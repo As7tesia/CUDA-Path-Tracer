@@ -6,6 +6,7 @@
 #include <thrust/execution_policy.h>
 #include <thrust/random.h>
 #include <thrust/remove.h>
+#include <thrust/partition.h>
 
 #include "sceneStructs.h"
 #include "scene.h"
@@ -273,10 +274,10 @@ __global__ void shadeMaterial(
                 intersection.surfaceNormal, materials[intersection.materialId], rng);
                 if (pathSegments[idx].remainingBounces == 1) {
                     pathSegments[idx].color = glm::vec3(0.f);
+                    --pathSegments[idx].remainingBounces;
                 } else {
                     --pathSegments[idx].remainingBounces;
                 }
-
             }
             // If there was no intersection, color the ray black.
             // Lots of renderers use 4 channel color, RGBA, where A = alpha, often
@@ -285,9 +286,19 @@ __global__ void shadeMaterial(
         }
         else {
             pathSegments[idx].color = glm::vec3(0.0f);
+            pathSegments[idx].remainingBounces = 0;
         }
     }
 }
+
+// Predicate for stream compaction: keep paths that still have bounces left.
+struct IsAlive
+{
+    __host__ __device__ bool operator()(const PathSegment& p) const
+    {
+        return p.remainingBounces > 0;
+    }
+};
 
 // Add the current iteration's output to the overall image
 __global__ void finalGather(int nPaths, glm::vec3* image, PathSegment* iterationPaths)
@@ -397,7 +408,13 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_paths,
             dev_materials
         );
-        iterationComplete = depth >= traceDepth; // TODO: should be based off stream compaction results.
+        // Stream compaction: move live paths to the front. Dead paths stay
+        // behind num_paths (with their final colour) for finalGather.
+        PathSegment* alive_end = thrust::stable_partition(
+            thrust::device, dev_paths, dev_paths + num_paths, IsAlive());
+        num_paths = alive_end - dev_paths;
+
+        iterationComplete = num_paths == 0 || depth >= traceDepth;
 
         if (guiData != NULL)
         {
@@ -407,7 +424,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
     // Assemble this iteration and apply it to the image
     dim3 numBlocksPixels = (pixelcount + blockSize1d - 1) / blockSize1d;
-    finalGather<<<numBlocksPixels, blockSize1d>>>(num_paths, dev_image, dev_paths);
+    finalGather<<<numBlocksPixels, blockSize1d>>>(pixelcount, dev_image, dev_paths);
 
     ///////////////////////////////////////////////////////////////////////////
 
