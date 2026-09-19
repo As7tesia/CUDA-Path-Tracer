@@ -14,14 +14,14 @@
 using namespace std;
 using json = nlohmann::json;
 
-Scene::Scene(string filename)
+Scene::Scene(string filename, const SceneOverrides& ov)
 {
     cout << "Reading scene from " << filename << " ..." << endl;
     cout << " " << endl;
     auto ext = filename.substr(filename.find_last_of('.'));
     if (ext == ".json")
     {
-        loadFromJSON(filename);
+        loadFromJSON(filename, ov);
         return;
     }
     else
@@ -31,7 +31,7 @@ Scene::Scene(string filename)
     }
 }
 
-void Scene::loadFromJSON(const std::string& jsonName)
+void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
 {
     std::ifstream f(jsonName);
     json data = json::parse(f);
@@ -103,6 +103,16 @@ void Scene::loadFromJSON(const std::string& jsonName)
     state.iterations = cameraData["ITERATIONS"];
     state.traceDepth = cameraData["DEPTH"];
     state.imageName = cameraData["FILE"];
+
+    // CLI overrides must land before the fov / pixelLength math below
+    if (ov.width > 0 && ov.height > 0)
+    {
+        camera.resolution = glm::ivec2(ov.width, ov.height);
+    }
+    if (ov.iterations > 0)
+    {
+        state.iterations = ov.iterations;
+    }
     const auto& pos = cameraData["EYE"];
     const auto& lookat = cameraData["LOOKAT"];
     const auto& up = cameraData["UP"];

@@ -17,14 +17,20 @@
 #include <cuda_runtime.h>
 #include <cuda_gl_interop.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <string>
 
 static std::string startTimeString;
+
+// CLI options
+static bool headless = false;
+static std::string outPath;   // empty = default img/auto_saved/<FILE>.<time>.<spp>samp.png
 
 // For camera controls
 static bool leftMousePressed = false;
@@ -61,6 +67,8 @@ bool mouseOverImGuiWinow = false;
 
 // Forward declarations for window loop and interactivity
 void runCuda();
+void runHeadless();
+void updateCameraFromOrbit();
 void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods);
 void mousePositionCallback(GLFWwindow* window, double xpos, double ypos);
 void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
@@ -342,16 +350,66 @@ int main(int argc, char** argv)
 {
     startTimeString = currentTimeString();
 
-    if (argc < 2)
+    const char* usage =
+        "Usage: %s SCENEFILE.json [--headless] [--spp N] [--res WxH] [--out PATH.png]\n"
+        "  --headless   render without a window and exit after saving\n"
+        "  --spp N      override the scene's ITERATIONS\n"
+        "  --res WxH    override the scene's RES\n"
+        "  --out PATH   write exactly this file (default: img/auto_saved/<FILE>.<time>.<spp>samp.png)\n";
+
+    const char* sceneFile = nullptr;
+    SceneOverrides ov;
+    for (int i = 1; i < argc; i++)
     {
-        printf("Usage: %s SCENEFILE.json\n", argv[0]);
+        std::string a = argv[i];
+        auto needValue = [&](const char* flag) -> const char* {
+            if (i + 1 >= argc)
+            {
+                printf("%s needs a value\n", flag);
+                exit(1);
+            }
+            return argv[++i];
+        };
+        if (a == "--headless")
+        {
+            headless = true;
+        }
+        else if (a == "--spp")
+        {
+            ov.iterations = atoi(needValue("--spp"));
+        }
+        else if (a == "--res")
+        {
+            if (sscanf(needValue("--res"), "%dx%d", &ov.width, &ov.height) != 2)
+            {
+                printf("--res expects WxH, e.g. 800x600\n");
+                return 1;
+            }
+        }
+        else if (a == "--out")
+        {
+            outPath = needValue("--out");
+        }
+        else if (a.size() > 2 && a.substr(0, 2) == "--")
+        {
+            printf("Unknown option %s\n", argv[i]);
+            printf(usage, argv[0]);
+            return 1;
+        }
+        else
+        {
+            sceneFile = argv[i];
+        }
+    }
+
+    if (sceneFile == nullptr)
+    {
+        printf(usage, argv[0]);
         return 1;
     }
 
-    const char* sceneFile = argv[1];
-
     // Load scene file
-    scene = new Scene(sceneFile);
+    scene = new Scene(sceneFile, ov);
 
     //Create Instance for ImGUIData
     guiData = new GuiDataContainer();
@@ -378,6 +436,12 @@ int main(int argc, char** argv)
     theta = glm::acos(glm::dot(glm::normalize(viewZY), glm::vec3(0, 1, 0)));
     ogLookAt = cam.lookAt;
     zoom = glm::length(cam.position - ogLookAt);
+
+    if (headless)
+    {
+        runHeadless();
+        return 0;
+    }
 
     // Initialize CUDA and GL components
     init();
@@ -408,14 +472,82 @@ void saveImage()
         }
     }
 
-    std::string filename = "img/auto_saved/" + renderState->imageName;
-    std::ostringstream ss;
-    ss << filename << "." << startTimeString << "." << samples << "samp";
-    filename = ss.str();
+    std::string filename;
+    if (!outPath.empty())
+    {
+        // savePNG appends ".png" itself
+        filename = outPath;
+        if (filename.size() > 4 && filename.substr(filename.size() - 4) == ".png")
+        {
+            filename = filename.substr(0, filename.size() - 4);
+        }
+    }
+    else
+    {
+        filename = "img/auto_saved/" + renderState->imageName;
+        std::ostringstream ss;
+        ss << filename << "." << startTimeString << "." << samples << "samp";
+        filename = ss.str();
+    }
+
+    std::filesystem::path dir = std::filesystem::path(filename).parent_path();
+    if (!dir.empty())
+    {
+        std::filesystem::create_directories(dir);
+    }
 
     // CHECKITOUT
     img.savePNG(filename);
     //img.saveHDR(filename);  // Save a Radiance HDR file
+}
+
+// Headless mode: no GLFW / GL / ImGui / PBO. Render state.iterations samples,
+// save, and exit. Used for agent-driven test renders.
+void runHeadless()
+{
+    updateCameraFromOrbit();
+    pathtraceInit(scene);
+
+    auto t0 = std::chrono::steady_clock::now();
+    for (iteration = 1; iteration <= renderState->iterations; iteration++)
+    {
+        pathtrace(nullptr, 0, iteration);
+    }
+    cudaDeviceSynchronize();
+    auto t1 = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    iteration = renderState->iterations;
+    saveImage();
+    pathtraceFree();
+    cudaDeviceReset();
+
+    printf("headless: %dx%d, %d spp, %.1f ms total, %.2f ms/spp\n",
+        width, height, renderState->iterations, ms, ms / renderState->iterations);
+}
+
+// Rebuild the camera basis (position, view, up, right) from the orbit
+// parameters phi / theta / zoom around lookAt. Shared by windowed and headless
+// so both produce identical rays. Note the scene loader leaves cam.right
+// uninitialised (it reads view before view is set), so this must run before
+// the first pathtrace call.
+void updateCameraFromOrbit()
+{
+    Camera& cam = renderState->camera;
+    cameraPosition.x = zoom * sin(phi) * sin(theta);
+    cameraPosition.y = zoom * cos(theta);
+    cameraPosition.z = zoom * cos(phi) * sin(theta);
+
+    cam.view = -glm::normalize(cameraPosition);
+    glm::vec3 v = cam.view;
+    glm::vec3 u = glm::vec3(0, 1, 0);//glm::normalize(cam.up);
+    glm::vec3 r = glm::cross(v, u);
+    cam.up = glm::cross(r, v);
+    cam.right = r;
+
+    cam.position = cameraPosition;
+    cameraPosition += cam.lookAt;
+    cam.position = cameraPosition;
 }
 
 void runCuda()
@@ -423,21 +555,7 @@ void runCuda()
     if (camchanged)
     {
         iteration = 0;
-        Camera& cam = renderState->camera;
-        cameraPosition.x = zoom * sin(phi) * sin(theta);
-        cameraPosition.y = zoom * cos(theta);
-        cameraPosition.z = zoom * cos(phi) * sin(theta);
-
-        cam.view = -glm::normalize(cameraPosition);
-        glm::vec3 v = cam.view;
-        glm::vec3 u = glm::vec3(0, 1, 0);//glm::normalize(cam.up);
-        glm::vec3 r = glm::cross(v, u);
-        cam.up = glm::cross(r, v);
-        cam.right = r;
-
-        cam.position = cameraPosition;
-        cameraPosition += cam.lookAt;
-        cam.position = cameraPosition;
+        updateCameraFromOrbit();
         camchanged = false;
     }
 

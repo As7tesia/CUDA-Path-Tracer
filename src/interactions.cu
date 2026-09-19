@@ -69,8 +69,7 @@ __host__ __device__ void scatterRay(
     }
     case SPECULAR:
     {
-        // TODO: perfect mirror. glm::reflect(in, normal); weight is m.specular.color
-        // (delta BRDF: pdf and cos cancel, no randomness needed)
+        // perfect mirror just reflect the ray
         pathSegment.ray.direction = glm::reflect(pathSegment.ray.direction, normal);
         pathSegment.ray.origin = intersect + normal * EPSILON;
         pathSegment.color *= m.specular.color;
@@ -78,18 +77,7 @@ __host__ __device__ void scatterRay(
     }
     case REFRACTIVE:
     {
-        // TODO: glass.
         //  - need to know entering vs leaving: normal always faces the incoming ray
-        //    (base code flips it), so use the intersection's `outside` flag once it is
-        //    propagated through ShadeableIntersection. eta = outside ? 1/ior : ior
-        //  - cosTheta = -dot(in, normal); Schlick: R0 = ((1-eta)/(1+eta))^2,
-        //    R = R0 + (1-R0)*(1-cosTheta)^5
-        //  - draw u01(rng): u < R -> reflect, else glm::refract(in, normal, eta)
-        //    (refract returns vec3(0) on total internal reflection -> reflect instead)
-        //  - no division by R / (1-R): choosing the branch with that probability
-        //    already cancels the weight. weight = m.color either way
-        //  - origin: reflected ray goes to intersect + normal*EPS,
-        //    transmitted ray goes to intersect - normal*EPS (other side!)
         float eta = outside ? 1.f / m.ior : m.ior;
         float cosTheta = -glm::dot(in, normal);
 

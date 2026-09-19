@@ -411,12 +411,19 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
     ///////////////////////////////////////////////////////////////////////////
 
-    // Send results to OpenGL buffer for rendering
-    sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, iter, dev_image);
+    // Send results to OpenGL buffer for rendering (pbo is null in headless mode)
+    if (pbo != nullptr)
+    {
+        sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, iter, dev_image);
+    }
 
-    // Retrieve image from GPU
-    cudaMemcpy(hst_scene->state.image.data(), dev_image,
-        pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+    // Retrieve image from GPU. Windowed mode copies every iteration so 'S' can
+    // save at any time; headless only needs the final one.
+    if (pbo != nullptr || iter >= hst_scene->state.iterations)
+    {
+        cudaMemcpy(hst_scene->state.image.data(), dev_image,
+            pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+    }
 
     checkCUDAError("pathtrace");
 }
