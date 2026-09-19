@@ -3,10 +3,7 @@
 #include <cstdio>
 #include <cuda.h>
 #include <cmath>
-#include <thrust/execution_policy.h>
 #include <thrust/random.h>
-#include <thrust/remove.h>
-#include <thrust/partition.h>
 
 #include "sceneStructs.h"
 #include "scene.h"
@@ -15,6 +12,7 @@
 #include "utilities.h"
 #include "intersections.h"
 #include "interactions.h"
+#include "wavefront_ops.h"
 
 #define ERRORCHECK 1
 
@@ -282,15 +280,6 @@ __global__ void shadeMaterial(
     }
 }
 
-// Predicate for stream compaction: keep paths that still have bounces left.
-struct IsAlive
-{
-    __host__ __device__ bool operator()(const PathSegment& p) const
-    {
-        return p.remainingBounces > 0;
-    }
-};
-
 // Add the current iteration's output to the overall image
 __global__ void finalGather(int nPaths, glm::vec3* image, PathSegment* iterationPaths)
 {
@@ -403,9 +392,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         );
         // Stream compaction: move live paths to the front. Dead paths stay
         // behind num_paths (with their final colour) for finalGather.
-        PathSegment* alive_end = thrust::stable_partition(
-            thrust::device, dev_paths, dev_paths + num_paths, IsAlive());
-        num_paths = alive_end - dev_paths;
+        num_paths = compactPaths(dev_paths, num_paths);
 
         iterationComplete = num_paths == 0 || depth >= traceDepth;
 
