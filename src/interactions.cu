@@ -77,26 +77,36 @@ __host__ __device__ void scatterRay(
     }
     case REFRACTIVE:
     {
-        //  - need to know entering vs leaving: normal always faces the incoming ray
+        // need to know entering vs leaving: normal always faces the incoming ray
         float eta = outside ? 1.f / m.ior : m.ior;
         float cosTheta = -glm::dot(in, normal);
 
+        // Snell: k = cos^2 of the transmitted angle. k < 0 means no transmitted
+        // direction exists (total internal reflection).
+        float k = 1.f - eta * eta * (1.f - cosTheta * cosTheta);
+        bool tir = k < 0.f;
+
         float r0 = (1.f - eta) / (1.f + eta);
         r0 = r0 * r0;
-        float R = r0 + (1.f - r0) * powf(1.f - cosTheta, 5.f);
+        // Schlick wants the cosine on the air side of the interface: the
+        // incident angle when entering, the transmitted angle when leaving.
+        float cosSchlick = (eta > 1.f && !tir) ? sqrtf(k) : cosTheta;
+        float R = tir ? 1.f : r0 + (1.f - r0) * powf(1.f - cosSchlick, 5.f);
 
         thrust::uniform_real_distribution<float> u01(0, 1);
-        glm::vec3 refracted = glm::refract(in, normal, eta);
-        bool tir = glm::dot(refracted, refracted) < EPSILON;
 
-        if (tir || u01(rng) < R)
+        // R of the energy goes to reflect, 1 - R goes to refract
+        // in pathtracer we can't split a ray into 2 so we use probability
+        if (u01(rng) < R)
         {
+            // reflected branch
             pathSegment.ray.direction = glm::reflect(in, normal);
             pathSegment.ray.origin = intersect + normal * EPSILON;
         }
         else
         {
-            pathSegment.ray.direction = refracted;
+            // refracted branch
+            pathSegment.ray.direction = glm::refract(in, normal, eta);
             pathSegment.ray.origin = intersect - normal * EPSILON;
         }
         pathSegment.color *= m.color;
