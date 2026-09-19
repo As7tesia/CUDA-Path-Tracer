@@ -33,17 +33,24 @@ struct Geom
     glm::mat4 invTranspose;
 };
 
+enum MaterialType
+{
+    DIFFUSE,
+    SPECULAR,
+    REFRACTIVE,
+    EMISSIVE
+};
+
 struct Material
 {
+    MaterialType type;
     glm::vec3 color;
     struct
     {
         float exponent;
         glm::vec3 color;
     } specular;
-    float hasReflective;
-    float hasRefractive;
-    float indexOfRefraction;
+    float ior;
     float emittance;
 };
 
@@ -84,4 +91,5 @@ struct ShadeableIntersection
   float t;
   glm::vec3 surfaceNormal;
   int materialId;
+  bool outside;
 };

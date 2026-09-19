@@ -183,10 +183,11 @@ __global__ void computeIntersections(
         glm::vec3 normal;
         float t_min = FLT_MAX;
         int hit_geom_index = -1;
-        bool outside = true;
+        bool closest_outside;
 
         glm::vec3 tmp_intersect;
         glm::vec3 tmp_normal;
+        bool tmp_outside;
 
         // naive parse through global geoms
 
@@ -196,11 +197,11 @@ __global__ void computeIntersections(
 
             if (geom.type == CUBE)
             {
-                t = boxIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
+                t = boxIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, tmp_outside);
             }
             else if (geom.type == SPHERE)
             {
-                t = sphereIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
+                t = sphereIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, tmp_outside);
             }
             // TODO: add more intersection tests here... triangle? metaball? CSG?
 
@@ -212,6 +213,7 @@ __global__ void computeIntersections(
                 hit_geom_index = i;
                 intersect_point = tmp_intersect;
                 normal = tmp_normal;
+                closest_outside = tmp_outside;
             }
         }
 
@@ -225,6 +227,7 @@ __global__ void computeIntersections(
             intersections[path_index].t = t_min;
             intersections[path_index].materialId = geoms[hit_geom_index].materialid;
             intersections[path_index].surfaceNormal = normal;
+            intersections[path_index].outside = closest_outside;
         }
     }
 }
@@ -264,7 +267,7 @@ __global__ void shadeMaterial(
                 } else {
                     scatterRay(pathSegments[idx], 
                         pathSegments[idx].ray.origin + intersection.t * pathSegments[idx].ray.direction,
-                        intersection.surfaceNormal, materials[intersection.materialId], rng);
+                        intersection.surfaceNormal, intersection.outside, materials[intersection.materialId], rng);
                     --pathSegments[idx].remainingBounces;
                 }
             }
