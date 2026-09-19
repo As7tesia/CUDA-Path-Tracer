@@ -231,15 +231,7 @@ __global__ void computeIntersections(
     }
 }
 
-// LOOK: "fake" shader demonstrating what you might do with the info in
-// a ShadeableIntersection, as well as how to use thrust's random number
-// generator. Observe that since the thrust random number generator basically
-// adds "noise" to the iteration, the image should start off noisy and get
-// cleaner as more iterations are computed.
-//
-// Note that this shader does NOT do a BSDF evaluation!
-// Your shaders should handle that - this can allow techniques such as
-// bump mapping.
+
 __global__ void shadeMaterial(
     int iter,
     int num_paths,
@@ -255,31 +247,26 @@ __global__ void shadeMaterial(
         if (intersection.t > 0.0f) // if the intersection exists...
         {
           // Set up the RNG
-          // LOOK: this is how you use thrust's RNG! Please look at
-          // makeSeededRandomEngine as well.
-            thrust::default_random_engine rng = makeSeededRandomEngine(iter, idx, pathSegments[idx].remainingBounces);
-            thrust::uniform_real_distribution<float> u01(0, 1);
+            thrust::default_random_engine rng = makeSeededRandomEngine(iter, pathSegments[idx].pixelIndex, pathSegments[idx].remainingBounces);
 
             Material material = materials[intersection.materialId];
             glm::vec3 materialColor = material.color;
             // glm::vec3 materialColor = intersection.surfaceNormal;
 
-            // If the material indicates that the object was a light, "light" the ray
+            // If the material indicates that the object was a light
             if (material.emittance > 0.0f) {
                 pathSegments[idx].color *= (materialColor * material.emittance);
                 pathSegments[idx].remainingBounces = 0;
             }
-            // Otherwise, do some pseudo-lighting computation. This is actually more
-            // like what you would expect from shading in a rasterizer like OpenGL.
-            // TODO: replace this! you should be able to start with basically a one-liner
             else {
-                scatterRay(pathSegments[idx], 
-                    pathSegments[idx].ray.origin + intersection.t * pathSegments[idx].ray.direction,
-                intersection.surfaceNormal, materials[intersection.materialId], rng);
                 if (pathSegments[idx].remainingBounces == 1) {
                     pathSegments[idx].color = glm::vec3(0.f);
-                    --pathSegments[idx].remainingBounces;
+                    pathSegments[idx].remainingBounces = 0;
+                    return;
                 } else {
+                    scatterRay(pathSegments[idx], 
+                        pathSegments[idx].ray.origin + intersection.t * pathSegments[idx].ray.direction,
+                        intersection.surfaceNormal, materials[intersection.materialId], rng);
                     --pathSegments[idx].remainingBounces;
                 }
             }
@@ -380,7 +367,9 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     while (!iterationComplete)
     {
         // clean shading chunks
-        cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
+        // this is so that kernel can assume unwritten means no hit, just need to remmeber
+        // later when integrating optix to write t = -1 in miss shader
+        // cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
 
         // tracing
         dim3 numblocksPathSegmentTracing = (num_paths + blockSize1d - 1) / blockSize1d;
