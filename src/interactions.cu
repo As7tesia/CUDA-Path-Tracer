@@ -54,4 +54,7 @@ __host__ __device__ void scatterRay(
     // TODO: implement this.
     // A basic implementation of pure-diffuse shading will just call the
     // calculateRandomDirectionInHemisphere defined above.
+    pathSegment.ray.direction = calculateRandomDirectionInHemisphere(normal, rng);
+    pathSegment.ray.origin = intersect + normal * EPSILON;
+    pathSegment.color *= m.color;
 }

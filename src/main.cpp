@@ -408,7 +408,7 @@ void saveImage()
         }
     }
 
-    std::string filename = renderState->imageName;
+    std::string filename = "img/auto_saved/" + renderState->imageName;
     std::ostringstream ss;
     ss << filename << "." << startTimeString << "." << samples << "samp";
     filename = ss.str();

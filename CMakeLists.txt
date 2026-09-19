@@ -21,6 +21,14 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     SET_PROPERTY(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
+# CUDA 13's CCCL headers (Thrust/CUB) refuse to build with MSVC's traditional
+# preprocessor; they require the standards-conforming one.
+if(MSVC)
+    add_compile_options(
+        "$<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>"
+        "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>")
+endif()
+
 find_package(OpenGL REQUIRED)
 
 if(UNIX)

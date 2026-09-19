@@ -557,3 +557,6 @@ xcuserdata
 *.xccheckout
 *.moved-aside
 *.xcuserstate
+
+# auto-saved renders (keep locally for the README, not in git)
+img/auto_saved/*.png
