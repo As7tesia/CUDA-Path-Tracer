@@ -87,6 +87,9 @@ void InitDataContainer(GuiDataContainer* imGuiData)
     guiData = imGuiData;
 }
 
+static bool useRussianRoulette = true;
+void setRussianRoulette(bool enabled) { useRussianRoulette = enabled; }
+
 void pathtraceInit(Scene* scene)
 {
     hst_scene = scene;
@@ -237,6 +240,7 @@ __global__ void shadeMaterial(
     int iter,
     int num_paths,
     int cur_depth,
+    bool russianRoulette,
     ShadeableIntersection* shadeableIntersections,
     PathSegment* pathSegments,
     Material* materials)
@@ -273,7 +277,7 @@ __global__ void shadeMaterial(
                     seg.remainingBounces = 0;
                 } else {    // still have bounces keep it up
                     // Russian Roulette
-                    if (cur_depth >= 3) 
+                    if (russianRoulette && cur_depth >= 3)
                     {
                         glm::vec3 c = seg.color;
                         // pick probability based on luminance
@@ -421,6 +425,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             iter,
             num_paths,
             depth,
+            useRussianRoulette,
             dev_intersections,
             dev_paths,
             dev_materials

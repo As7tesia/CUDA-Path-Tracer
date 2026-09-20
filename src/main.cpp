@@ -351,11 +351,12 @@ int main(int argc, char** argv)
     startTimeString = currentTimeString();
 
     const char* usage =
-        "Usage: %s SCENEFILE.json [--headless] [--spp N] [--res WxH] [--out PATH.png]\n"
+        "Usage: %s SCENEFILE.json [--headless] [--spp N] [--res WxH] [--out PATH.png] [--no-rr]\n"
         "  --headless   render without a window and exit after saving\n"
         "  --spp N      override the scene's ITERATIONS\n"
         "  --res WxH    override the scene's RES\n"
-        "  --out PATH   write exactly this file (default: img/auto_saved/<FILE>.<time>.<spp>samp.png)\n";
+        "  --out PATH   write exactly this file (default: img/auto_saved/<FILE>.<time>.<spp>samp.png)\n"
+        "  --no-rr      disable Russian roulette path termination\n";
 
     const char* sceneFile = nullptr;
     SceneOverrides ov;
@@ -389,6 +390,10 @@ int main(int argc, char** argv)
         else if (a == "--out")
         {
             outPath = needValue("--out");
+        }
+        else if (a == "--no-rr")
+        {
+            setRussianRoulette(false);
         }
         else if (a.size() > 2 && a.substr(0, 2) == "--")
         {
