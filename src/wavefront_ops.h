@@ -9,7 +9,7 @@
 // ops here rather than pulling thrust algorithm headers into pathtrace.cu.
 
 // Stable-partitions paths so that every path with remainingBounces > 0 is at
-// the front, in original order. Terminated paths (with their final colour)
+// the front, in original order. Terminated paths (with their final color)
 // follow, so finalGather can still read all of them. Returns the number of
 // live paths. Runs on the legacy default stream (thrust::device).
 int compactPaths(PathSegment* paths, int numPaths);

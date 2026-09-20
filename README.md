@@ -24,8 +24,18 @@ Render without a viewport
 | `--spp N` | Override `ITERATIONS` from the scene file |
 | `--res WxH` | Override `RES` from the scene file |
 | `--out path.png` | Write exactly this file. Default is the usual `img/auto_saved/<FILE>.<time>.<spp>samp.png` |
+| `--no-rr` | Disable Russian roulette |
+| `--tonemap none\|aces\|agx` | View transform for viewport and PNG. Default `agx`. `none` is the raw clamp the base code shipped with |
+| `--exposure X` | Linear multiplier before the view transform. Default 1.0 |
 
-The overrides also work in windowed mode. Output is deterministic, with same scene, spp and resolution produce a byte-identical PNG, so `cmp` against a previous render can be used to prove correctness for things that only improves performance but shouldn't alter the image at the same sample count.
+The overrides also work in windowed mode. Output is deterministic, with same scene, spp, resolution and tonemap produce a byte-identical PNG, so `cmp` against a previous render can be used to prove correctness for things that only improves performance but shouldn't alter the image at the same sample count.
+
+### View transform
+
+The accumulation buffer is scene-linear and never touched. Tonemapping is applied once at display and once at save, through the same function in `src/tonemap.h`, so the viewport and the PNG agree. Default is AgX.
+
+- **AgX** by Troy Sobotka, published as an OpenColorIO config: https://github.com/sobotka/AgX. The analytic version this project uses (inset/outset matrices, log2 shaper, polynomial sigmoid) is Benjamin Wrensch's "Minimal AgX Implementation": https://iolite-engine.com/blog_posts/minimal_agx_implementation
+- **ACES**, two fits of the reference RRT+ODT, picked by the `ACES_FIT_HILL` macro in `tonemap.h`. Default is Krzysztof Narkowicz's single rational curve: https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/. The alternative is Stephen Hill's fit with the sRGB to AP1 round trip, from `ACES.hlsl` in MJP's BakingLab: https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl. Hill's is scaled by 1/0.6 on input, same as three.js, so the two match in brightness. On Cornell they are within a few levels of each other once that's done.
 
 ### Issues along the way
 
@@ -33,7 +43,7 @@ Things that went wrong and what they turned out to be. Kept as a running log.
 
 #### Schlick used the wrong cosine on exit
 
-Schlick's approximation needs the cosine on the air side of the interface. Entering glass that is the incident angle. Leaving glass it is the transmitted angle, which the original code did not use. Real Fresnel reflectance hits 100% at the critical angle (about 42° for IOR 1.5), but with the incident cosine the curve did not get there until 90°, so exit rays just below critical leaked out instead of reflecting back inside. Fix: compute `k = 1 - eta²(1 - cos²θ)` yourself, use `sqrt(k)` as the Schlick cosine when `eta > 1`, and treat `k < 0` as total internal reflection.
+Schlick's approximation needs the cosine on the air side of the interface. Entering glass that is the incident angle. Leaving glass it is the transmitted angle, which the original code did not use. Real Fresnel reflectance hits 100% at the critical angle (about 42° for IOR 1.5), but with the incident cosine the curve did not get there until 90°, so exit rays just below critical leaked out instead of reflecting back inside. The fix computes `k = 1 - eta²(1 - cos²θ)` directly, uses `sqrt(k)` as the Schlick cosine when `eta > 1`, and treats `k < 0` as total internal reflection.
 
 Before (left) and after (right), 1000x1000, 500 spp, DEPTH 8:
 

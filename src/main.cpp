@@ -31,6 +31,8 @@ static std::string startTimeString;
 // CLI options
 static bool headless = false;
 static std::string outPath;   // empty = default img/auto_saved/<FILE>.<time>.<spp>samp.png
+static ToneMapMode toneMapMode = TONEMAP_AGX;
+static float exposure = 1.f;
 
 // For camera controls
 static bool leftMousePressed = false;
@@ -351,12 +353,15 @@ int main(int argc, char** argv)
     startTimeString = currentTimeString();
 
     const char* usage =
-        "Usage: %s SCENEFILE.json [--headless] [--spp N] [--res WxH] [--out PATH.png] [--no-rr]\n"
-        "  --headless   render without a window and exit after saving\n"
-        "  --spp N      override the scene's ITERATIONS\n"
-        "  --res WxH    override the scene's RES\n"
-        "  --out PATH   write exactly this file (default: img/auto_saved/<FILE>.<time>.<spp>samp.png)\n"
-        "  --no-rr      disable Russian roulette path termination\n";
+        "Usage: %s SCENEFILE.json [--headless] [--spp N] [--res WxH] [--out PATH.png]\n"
+        "                          [--no-rr] [--tonemap none|aces|agx] [--exposure X]\n"
+        "  --headless       render without a window and exit after saving\n"
+        "  --spp N          override the scene's ITERATIONS\n"
+        "  --res WxH        override the scene's RES\n"
+        "  --out PATH       write exactly this file (default: img/auto_saved/<FILE>.<time>.<spp>samp.png)\n"
+        "  --no-rr          disable Russian roulette path termination\n"
+        "  --tonemap MODE   view transform for display and PNG (default agx; none = raw clamp)\n"
+        "  --exposure X     linear multiplier before the view transform (default 1.0)\n";
 
     const char* sceneFile = nullptr;
     SceneOverrides ov;
@@ -395,6 +400,22 @@ int main(int argc, char** argv)
         {
             setRussianRoulette(false);
         }
+        else if (a == "--tonemap")
+        {
+            std::string m = needValue("--tonemap");
+            if (m == "none")      toneMapMode = TONEMAP_NONE;
+            else if (m == "aces") toneMapMode = TONEMAP_ACES;
+            else if (m == "agx")  toneMapMode = TONEMAP_AGX;
+            else
+            {
+                printf("--tonemap expects none, aces or agx\n");
+                return 1;
+            }
+        }
+        else if (a == "--exposure")
+        {
+            exposure = (float)atof(needValue("--exposure"));
+        }
         else if (a.size() > 2 && a.substr(0, 2) == "--")
         {
             printf("Unknown option %s\n", argv[i]);
@@ -412,6 +433,8 @@ int main(int argc, char** argv)
         printf(usage, argv[0]);
         return 1;
     }
+
+    setToneMap(toneMapMode, exposure);
 
     // Load scene file
     scene = new Scene(sceneFile, ov);
@@ -472,8 +495,8 @@ void saveImage()
         for (int y = 0; y < height; y++)
         {
             int index = x + (y * width);
-            glm::vec3 pix = renderState->image[index];
-            img.setPixel(width - 1 - x, y, glm::vec3(pix) / samples);
+            glm::vec3 pix = renderState->image[index] / samples;   // scene-linear average
+            img.setPixel(width - 1 - x, y, applyToneMap(pix, toneMapMode, exposure));
         }
     }
 
@@ -534,7 +557,7 @@ void runHeadless()
 // Rebuild the camera basis (position, view, up, right) from the orbit
 // parameters phi / theta / zoom around lookAt. Shared by windowed and headless
 // so both produce identical rays. Note the scene loader leaves cam.right
-// uninitialised (it reads view before view is set), so this must run before
+// uninitialized (it reads view before view is set), so this must run before
 // the first pathtrace call.
 void updateCameraFromOrbit()
 {

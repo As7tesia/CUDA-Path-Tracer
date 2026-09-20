@@ -49,7 +49,8 @@ thrust::default_random_engine makeSeededRandomEngine(int iter, int index, int de
 }
 
 //Kernel that writes the image to the OpenGL PBO directly.
-__global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution, int iter, glm::vec3* image)
+__global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution, int iter, glm::vec3* image,
+    ToneMapMode toneMap, float exposure)
 {
     int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -57,12 +58,13 @@ __global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution, int iter, glm
     if (x < resolution.x && y < resolution.y)
     {
         int index = x + (y * resolution.x);
-        glm::vec3 pix = image[index];
+        glm::vec3 pix = image[index] / (float)iter;   // running average, scene-linear
+        pix = applyToneMap(pix, toneMap, exposure);   // display-encoded [0, 1]
 
         glm::ivec3 color;
-        color.x = glm::clamp((int)(pix.x / iter * 255.0), 0, 255);
-        color.y = glm::clamp((int)(pix.y / iter * 255.0), 0, 255);
-        color.z = glm::clamp((int)(pix.z / iter * 255.0), 0, 255);
+        color.x = glm::clamp((int)(pix.x * 255.0), 0, 255);
+        color.y = glm::clamp((int)(pix.y * 255.0), 0, 255);
+        color.z = glm::clamp((int)(pix.z * 255.0), 0, 255);
 
         // Each thread writes one pixel location in the texture (textel)
         pbo[index].w = 0;
@@ -89,6 +91,14 @@ void InitDataContainer(GuiDataContainer* imGuiData)
 
 static bool useRussianRoulette = true;
 void setRussianRoulette(bool enabled) { useRussianRoulette = enabled; }
+
+static ToneMapMode toneMapMode = TONEMAP_AGX;
+static float toneMapExposure = 1.f;
+void setToneMap(ToneMapMode mode, float exposure)
+{
+    toneMapMode = mode;
+    toneMapExposure = exposure;
+}
 
 void pathtraceInit(Scene* scene)
 {
@@ -431,7 +441,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_materials
         );
         // Stream compaction: move live paths to the front. Dead paths stay
-        // behind num_paths (with their final colour) for finalGather.
+        // behind num_paths (with their final color) for finalGather.
         num_paths = compactPaths(dev_paths, num_paths);
 
         iterationComplete = num_paths == 0 || depth >= traceDepth;
@@ -451,7 +461,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     // Send results to OpenGL buffer for rendering (pbo is null in headless mode)
     if (pbo != nullptr)
     {
-        sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, iter, dev_image);
+        sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, iter, dev_image,
+            toneMapMode, toneMapExposure);
     }
 
     // Retrieve image from GPU. Windowed mode copies every iteration so 'S' can

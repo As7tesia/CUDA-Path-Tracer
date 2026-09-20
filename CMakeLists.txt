@@ -64,6 +64,7 @@ set(headers
     src/pathtrace.h
     src/scene.h
     src/sceneStructs.h
+    src/tonemap.h
     src/utilities.h
     src/wavefront_ops.h
 )
