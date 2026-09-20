@@ -354,7 +354,7 @@ int main(int argc, char** argv)
 
     const char* usage =
         "Usage: %s SCENEFILE.json [--headless] [--spp N] [--res WxH] [--out PATH.png]\n"
-        "                          [--no-rr] [--tonemap none|aces|agx] [--exposure X]\n"
+        "                          [--no-rr] [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
         "  --headless       render without a window and exit after saving\n"
         "  --spp N          override the scene's ITERATIONS\n"
         "  --res WxH        override the scene's RES\n"
@@ -406,9 +406,10 @@ int main(int argc, char** argv)
             if (m == "none")      toneMapMode = TONEMAP_NONE;
             else if (m == "aces") toneMapMode = TONEMAP_ACES;
             else if (m == "agx")  toneMapMode = TONEMAP_AGX;
+            else if (m == "agx-punchy") toneMapMode = TONEMAP_AGX_PUNCHY;
             else
             {
-                printf("--tonemap expects none, aces or agx\n");
+                printf("--tonemap expects none, aces, agx or agx-punchy\n");
                 return 1;
             }
         }

@@ -13,6 +13,7 @@ enum ToneMapMode
     TONEMAP_NONE = 0,   // clamp only, no gamma, base-code behavior.
     TONEMAP_ACES = 1,   // ACES fit (Narkowicz / Hill) + sRGB encode
     TONEMAP_AGX  = 2,   // Sobotka AgX (Wrensch minimal fit) + sRGB encode
+    TONEMAP_AGX_PUNCHY = 3,   // AgX with the "punchy" look: more contrast and saturation
 };
 
 // Which ACES fit `aces` uses. 0 = Narkowicz single rational curve, per channel.
@@ -78,7 +79,20 @@ __host__ __device__ inline glm::vec3 agxSigmoid(glm::vec3 x)
          - 0.00232f;
 }
 
-__host__ __device__ inline glm::vec3 agx(glm::vec3 val)
+// AgX "punchy" look from the same reference: an ASC CDL grade (slope, offset,
+// power, then saturation about luma) applied in the sigmoid's output space,
+// before the outset matrix. Blender ships the same look under that name.
+__host__ __device__ inline glm::vec3 agxLookPunchy(glm::vec3 val)
+{
+    const glm::vec3 lw(0.2126f, 0.7152f, 0.0722f);
+    float luma = glm::dot(val, lw);
+    const float power = 1.35f;
+    const float sat = 1.4f;
+    val = glm::vec3(powf(val.x, power), powf(val.y, power), powf(val.z, power));
+    return luma + sat * (val - luma);
+}
+
+__host__ __device__ inline glm::vec3 agx(glm::vec3 val, bool punchy)
 {
     const glm::mat3 inset(
         0.842479062253094f, 0.0423282422610123f, 0.0423756549057051f,
@@ -97,6 +111,10 @@ __host__ __device__ inline glm::vec3 agx(glm::vec3 val)
     val = glm::clamp(val, minEv, maxEv);
     val = (val - minEv) / (maxEv - minEv);
     val = agxSigmoid(val);
+    if (punchy)
+    {
+        val = agxLookPunchy(glm::clamp(val, 0.f, 1.f));
+    }
     val = outset * val;
     // The sigmoid output is already 2.2-gamma encoded. Linearize and
     // re-encode with the proper sRGB curve so all modes share one OETF.
@@ -115,7 +133,8 @@ __host__ __device__ inline glm::vec3 applyToneMap(glm::vec3 linear, ToneMapMode 
 #else
     case TONEMAP_ACES: return srgbEncode(acesFit(linear));
 #endif
-    case TONEMAP_AGX:  return agx(linear);
+    case TONEMAP_AGX:        return agx(linear, false);
+    case TONEMAP_AGX_PUNCHY: return agx(linear, true);
     default:           return glm::clamp(linear, 0.f, 1.f);
     }
 }
