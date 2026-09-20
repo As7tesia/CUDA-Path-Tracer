@@ -236,50 +236,81 @@ __global__ void computeIntersections(
 __global__ void shadeMaterial(
     int iter,
     int num_paths,
+    int cur_depth,
     ShadeableIntersection* shadeableIntersections,
     PathSegment* pathSegments,
     Material* materials)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_paths)
-    {   
-        if (pathSegments[idx].remainingBounces <= 0) return;
+    {
+        // Work on a register copy of the segment: one coalesced load here and
+        // one store at the end, instead of global traffic on every field access
+        // (scatterRay takes it by reference, so it would otherwise hit global
+        // memory for every read and write inside).
+        PathSegment seg = pathSegments[idx];
+        if (seg.remainingBounces <= 0) return;
         ShadeableIntersection intersection = shadeableIntersections[idx];
+        
+        
         if (intersection.t > 0.0f) // if the intersection exists...
         {
-          // Set up the RNG
-            thrust::default_random_engine rng = makeSeededRandomEngine(iter, pathSegments[idx].pixelIndex, pathSegments[idx].remainingBounces);
-
+            // Set up the RNG
+            thrust::default_random_engine rng = makeSeededRandomEngine(iter, seg.pixelIndex, seg.remainingBounces);
             Material material = materials[intersection.materialId];
             glm::vec3 materialColor = material.color;
             // glm::vec3 materialColor = intersection.surfaceNormal;
 
             // If the material indicates that the object was a light
             if (material.emittance > 0.0f) {
-                pathSegments[idx].color *= (materialColor * material.emittance);
-                pathSegments[idx].remainingBounces = 0;
+                seg.color *= (materialColor * material.emittance);
+                seg.remainingBounces = 0;
             }
             else {
-                if (pathSegments[idx].remainingBounces == 1) {
-                    pathSegments[idx].color = glm::vec3(0.f);
-                    pathSegments[idx].remainingBounces = 0;
-                    return;
-                } else {
-                    scatterRay(pathSegments[idx], 
-                        pathSegments[idx].ray.origin + intersection.t * pathSegments[idx].ray.direction,
-                        intersection.surfaceNormal, intersection.outside, materials[intersection.materialId], rng);
-                    --pathSegments[idx].remainingBounces;
+                // ran out of bounces without hitting light
+                if (seg.remainingBounces == 1) {
+                    seg.color = glm::vec3(0.f);
+                    seg.remainingBounces = 0;
+                } else {    // still have bounces keep it up
+                    // Russian Roulette
+                    if (cur_depth >= 3) 
+                    {
+                        glm::vec3 c = seg.color;
+                        // pick probability based on luminance
+                        float p = glm::min(0.95f, 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b);
+                        thrust::uniform_real_distribution<float> u01(0,1);
+                        float rand = u01(rng);
+
+                        if (rand >= p) {    // terminate
+                            seg.remainingBounces = 0;
+                            seg.color = glm::vec3(0.f);
+                        } else {   
+                            // lucky survive, boost weighting
+                            seg.color /= p;
+                            
+                        }
+                    }
+                    
+                    
+                    // keep bouncing, guard is so that terminated rays from roulette above doesn't continue into scatterRay
+                    if (seg.remainingBounces > 0) {
+                        scatterRay(seg,
+                            seg.ray.origin + intersection.t * seg.ray.direction,
+                            intersection.surfaceNormal, intersection.outside, material, rng);
+                        --seg.remainingBounces;
+                    }
                 }
             }
-            // If there was no intersection, color the ray black.
-            // Lots of renderers use 4 channel color, RGBA, where A = alpha, often
-            // used for opacity, in which case they can indicate "no opacity".
-            // This can be useful for post-processing and image compositing.
+
+
+            // If there was no intersection, color the ray black. could add Alpha channel if want to composite later
         }
         else {
-            pathSegments[idx].color = glm::vec3(0.0f);
-            pathSegments[idx].remainingBounces = 0;
+            seg.color = glm::vec3(0.0f);
+            seg.remainingBounces = 0;
         }
+
+        pathSegments[idx] = seg;
     }
 }
 
@@ -389,6 +420,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
             iter,
             num_paths,
+            depth,
             dev_intersections,
             dev_paths,
             dev_materials
