@@ -510,13 +510,14 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             toneMapMode, toneMapExposure);
     }
 
-    // Retrieve image from GPU. Windowed mode copies every iteration so 'S' can
-    // save at any time; headless only needs the final one.
-    if (pbo != nullptr || iter >= hst_scene->state.iterations)
-    {
-        cudaMemcpy(hst_scene->state.image.data(), dev_image,
-            pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
-    }
-
     checkCUDAError("pathtrace");
+}
+
+void pathtraceDownloadImage()
+{
+    const Camera& cam = hst_scene->state.camera;
+    const int pixelcount = cam.resolution.x * cam.resolution.y;
+    cudaMemcpy(hst_scene->state.image.data(), dev_image,
+        pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+    checkCUDAError("pathtraceDownloadImage");
 }
