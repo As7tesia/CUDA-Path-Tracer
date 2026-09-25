@@ -13,3 +13,11 @@
 // follow, so finalGather can still read all of them. Returns the number of
 // live paths. Runs on the legacy default stream (thrust::device).
 int compactPaths(PathSegment* paths, int numPaths);
+
+// Sorts the first numPaths paths and their intersections by materialIds (one
+// int key per path, written by computeIntersections: materialId on hit,
+// INT_MAX on miss). After this, paths hitting the same material are
+// contiguous, so shadeMaterial warps take one branch and read one material.
+// Keys are sorted in place too. Runs on the legacy default stream.
+void sortMaterials(int numPaths, int* materialIds,
+                   ShadeableIntersection* intersections, PathSegment* paths);

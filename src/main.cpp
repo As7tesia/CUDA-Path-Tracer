@@ -354,12 +354,13 @@ int main(int argc, char** argv)
 
     const char* usage =
         "Usage: %s SCENEFILE.json [--headless] [--spp N] [--res WxH] [--out PATH.png]\n"
-        "                          [--no-rr] [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
+        "                          [--no-rr] [--no-sort] [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
         "  --headless       render without a window and exit after saving\n"
         "  --spp N          override the scene's ITERATIONS\n"
         "  --res WxH        override the scene's RES\n"
         "  --out PATH       write exactly this file (default: img/auto_saved/<FILE>.<time>.<spp>samp.png)\n"
         "  --no-rr          disable Russian roulette path termination\n"
+        "  --no-sort        disable sorting paths by material before shading\n"
         "  --tonemap MODE   view transform for display and PNG (default agx; none = raw clamp)\n"
         "  --exposure X     linear multiplier before the view transform (default 1.0)\n";
 
@@ -399,6 +400,10 @@ int main(int argc, char** argv)
         else if (a == "--no-rr")
         {
             setRussianRoulette(false);
+        }
+        else if (a == "--no-sort")
+        {
+            setMaterialSort(false);
         }
         else if (a == "--tonemap")
         {

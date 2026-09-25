@@ -4,6 +4,7 @@
 #include <cuda.h>
 #include <cmath>
 #include <thrust/random.h>
+#include <climits>
 
 #include "sceneStructs.h"
 #include "scene.h"
@@ -79,6 +80,7 @@ static GuiDataContainer* guiData = NULL;
 static glm::vec3* dev_image = NULL;
 static Geom* dev_geoms = NULL;
 static Material* dev_materials = NULL;
+static int* dev_materialIds = NULL;
 static PathSegment* dev_paths = NULL;
 static ShadeableIntersection* dev_intersections = NULL;
 // TODO: static variables for device memory, any extra info you need, etc
@@ -91,6 +93,9 @@ void InitDataContainer(GuiDataContainer* imGuiData)
 
 static bool useRussianRoulette = true;
 void setRussianRoulette(bool enabled) { useRussianRoulette = enabled; }
+
+static bool useMaterialSort = true;
+void setMaterialSort(bool enabled) { useMaterialSort = enabled; }
 
 static ToneMapMode toneMapMode = TONEMAP_AGX;
 static float toneMapExposure = 1.f;
@@ -122,6 +127,7 @@ void pathtraceInit(Scene* scene)
     cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
 
     // TODO: initialize any extra device memeory you need
+    cudaMalloc(&dev_materialIds, pixelcount * sizeof(int));
 
     checkCUDAError("pathtraceInit");
 }
@@ -134,6 +140,7 @@ void pathtraceFree()
     cudaFree(dev_materials);
     cudaFree(dev_intersections);
     // TODO: clean up any extra device memory you created
+    cudaFree(dev_materialIds);
 
     checkCUDAError("pathtraceFree");
 }
@@ -181,6 +188,7 @@ __global__ void computeIntersections(
     int depth,
     int num_paths,
     PathSegment* pathSegments,
+    int* materialIDs,
     Geom* geoms,
     int geoms_size,
     ShadeableIntersection* intersections)
@@ -233,18 +241,19 @@ __global__ void computeIntersections(
         if (hit_geom_index == -1)
         {
             intersections[path_index].t = -1.0f;
+            materialIDs[path_index] = INT_MAX;
         }
         else
         {
             // The ray hits something
             intersections[path_index].t = t_min;
             intersections[path_index].materialId = geoms[hit_geom_index].materialid;
+            materialIDs[path_index] = geoms[hit_geom_index].materialid;
             intersections[path_index].surfaceNormal = normal;
             intersections[path_index].outside = closest_outside;
         }
     }
 }
-
 
 __global__ void shadeMaterial(
     int iter,
@@ -414,6 +423,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             depth,
             num_paths,
             dev_paths,
+            dev_materialIds,
             dev_geoms,
             hst_scene->geoms.size(),
             dev_intersections
@@ -430,6 +440,13 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         // materials you have in the scenefile.
         // TODO: compare between directly shading the path segments and shading
         // path segments that have been reshuffled to be contiguous in memory.
+
+        // Material sort: group paths by the material they hit so shadeMaterial
+        // warps are branch-uniform. Image-neutral (RNG is keyed on pixelIndex).
+        if (useMaterialSort)
+        {
+            sortMaterials(num_paths, dev_materialIds, dev_intersections, dev_paths);
+        }
 
         shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
             iter,
