@@ -152,6 +152,14 @@ void pathtraceFree()
     checkCUDAError("pathtraceFree");
 }
 
+void pathtraceReset()
+{
+    const Camera& cam = hst_scene->state.camera;
+    const int pixelcount = cam.resolution.x * cam.resolution.y;
+    cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3));
+    checkCUDAError("pathtraceReset");
+}
+
 /**
 * Generate PathSegments with rays from the camera through the screen into the
 * scene, which is the first bounce of rays.

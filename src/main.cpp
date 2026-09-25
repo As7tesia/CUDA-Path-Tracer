@@ -479,6 +479,8 @@ int main(int argc, char** argv)
 
     // Initialize CUDA and GL components
     init();
+    // Device buffers live for the whole run; camera changes only clear the image
+    pathtraceInit(scene);
 
     // Initialize ImGui Data
     InitImguiData(guiData);
@@ -598,8 +600,7 @@ void runCuda()
 
     if (iteration == 0)
     {
-        pathtraceFree();
-        pathtraceInit(scene);
+        pathtraceReset();
     }
 
     if (iteration < renderState->iterations)
