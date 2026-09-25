@@ -142,3 +142,21 @@ The base code's `CMakeLists.txt` sets `CUDA_SEPARABLE_COMPILATION ON`, which it 
 ![Device LTO before and after](img/readme/device_lto_inlining_before_after.png)
 
 The fix is two lines in `CMakeLists.txt`: `-dlto` on the CUDA compile options and `$<DEVICE_LINK:-dlto>` on the device link options, Release only. Byte-identical image, and the no-sort frame got 25 to 40% faster depending on resolution, before any of the compaction work. The cost is at build time: the device link step takes about 4 s on every incremental build, since the inlining happens there.
+
+#### The orbit camera mirrored any EYE off the z axis
+
+The base code turns EYE into orbit angles with `acos`, which returns `[0, pi]` and drops the sign of x and of the pitch. So an eye at x = -4 was placed at x = +4 and an eye at height 8 ended up near the floor looking up. The rebuilt `right` and `up` were also not normalized (length cos(pitch)), which zoomed any pitched view in by 1/cos(pitch). The fix computes the angles from the eye's offset with `atan2`, normalizes the basis, and orders the loader so `view` exists before `right` is derived from it. Cornell's shipped camera sits on the z axis at lookAt height, the one spot where the old math was right, so its renders did not change.
+
+400x400, 200 spp, AgX:
+
+| EYE (-4, 5, 10.5) before | after | EYE (3, 8, 9) before | after |
+|:---:|:---:|:---:|:---:|
+| ![left before](img/readme/camera_left_before.png) | ![left after](img/readme/camera_left_after.png) | ![high before](img/readme/camera_high_before.png) | ![high after](img/readme/camera_high_after.png) |
+
+In the same pass, `FOVY` was being read as a half angle (`tan(fovy)` where `tan(fovy/2)` belongs), so 45 in the scene file was a 90 degree vertical field. The loader now takes the full angle and the scene files say 90, which renders the same image and stops the value from capping when matching a real lens or a glTF camera.
+
+#### Smaller base code fixes
+
+- **Every camera move freed and reallocated all device buffers.** A drag re-ran the full init per mouse event, about 2.8 ms at 800x800, more than a frame now costs. Buffers are allocated once; a camera change clears the image and resets the sample count.
+- **The accumulation buffer was copied to the host every iteration** so the S key could save at any time. The copy now happens inside save.
+- **A CUDA error waited on `getchar()` before exiting** on Windows, which hangs a headless run. Removed; the message goes to stderr either way.

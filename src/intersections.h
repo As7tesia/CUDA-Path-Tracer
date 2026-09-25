@@ -22,8 +22,8 @@ __host__ __device__ inline unsigned int utilhash(unsigned int a)
 
 // CHECKITOUT
 /**
- * Compute a point at parameter value `t` on ray `r`.
- * Falls slightly short so that it doesn't intersect the object it's hitting.
+ * Compute a point at parameter value `t` on ray `r`. Exactly on the surface.
+ * scatterRay offsets the new origin along the normal instead.
  */
 __host__ __device__ inline glm::vec3 getPointOnRay(Ray r, float t)
 {

@@ -182,9 +182,6 @@ void cleanupCuda()
 void initCuda()
 {
     cudaGLSetGLDevice(0);
-
-    // Clean up on program exit
-    atexit(cleanupCuda);
 }
 
 void initPBO()
@@ -336,12 +333,16 @@ void mainLoop()
         glfwSwapBuffers(window);
     }
 
+    pathtraceFree();
+    cleanupCuda();
+
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 
     glfwDestroyWindow(window);
     glfwTerminate();
+    cudaDeviceReset();
 }
 
 //-------------------------------
@@ -617,10 +618,9 @@ void runCuda()
     }
     else
     {
+        // Same path as Escape: mainLoop ends and frees everything in order
         saveImage();
-        pathtraceFree();
-        cudaDeviceReset();
-        exit(EXIT_SUCCESS);
+        glfwSetWindowShouldClose(window, GL_TRUE);
     }
 }
 
@@ -665,7 +665,7 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
 
 void mousePositionCallback(GLFWwindow* window, double xpos, double ypos)
 {
-    if (xpos == lastX || ypos == lastY)
+    if (xpos == lastX && ypos == lastY)
     {
         return; // otherwise, clicking back into window causes re-start
     }
