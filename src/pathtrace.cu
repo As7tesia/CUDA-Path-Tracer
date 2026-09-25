@@ -4,7 +4,6 @@
 #include <cuda.h>
 #include <cmath>
 #include <thrust/random.h>
-#include <climits>
 
 #include "sceneStructs.h"
 #include "scene.h"
@@ -81,6 +80,8 @@ static glm::vec3* dev_image = NULL;
 static Geom* dev_geoms = NULL;
 static Material* dev_materials = NULL;
 static int* dev_materialIds = NULL;
+// two ping-pong pairs: compactPaths and sortMaterials swap
+// them with the spare buffers in wavefront_ops.cu, so they change every bounce.
 static PathSegment* dev_paths = NULL;
 static ShadeableIntersection* dev_intersections = NULL;
 // TODO: static variables for device memory, any extra info you need, etc
@@ -128,6 +129,8 @@ void pathtraceInit(Scene* scene)
 
     // TODO: initialize any extra device memeory you need
     cudaMalloc(&dev_materialIds, pixelcount * sizeof(int));
+    // initialize spare buffers and CUB storage for compaction and material sort
+    wavefrontInit(pixelcount);
 
     checkCUDAError("pathtraceInit");
 }
@@ -141,6 +144,10 @@ void pathtraceFree()
     cudaFree(dev_intersections);
     // TODO: clean up any extra device memory you created
     cudaFree(dev_materialIds);
+    // Frees the spares. dev_paths / dev_intersections above may hold the
+    // workspace's original buffers by now; the two sides still free each
+    // allocation exactly once.
+    wavefrontFree();
 
     checkCUDAError("pathtraceFree");
 }
@@ -189,6 +196,7 @@ __global__ void computeIntersections(
     int num_paths,
     PathSegment* pathSegments,
     int* materialIDs,
+    int numMaterials,
     Geom* geoms,
     int geoms_size,
     ShadeableIntersection* intersections)
@@ -241,7 +249,9 @@ __global__ void computeIntersections(
         if (hit_geom_index == -1)
         {
             intersections[path_index].t = -1.0f;
-            materialIDs[path_index] = INT_MAX;
+            // one past the last material id: misses sort last and the key
+            // range stays small enough for a one-pass radix sort
+            materialIDs[path_index] = numMaterials;
         }
         else
         {
@@ -262,7 +272,8 @@ __global__ void shadeMaterial(
     bool russianRoulette,
     ShadeableIntersection* shadeableIntersections,
     PathSegment* pathSegments,
-    Material* materials)
+    Material* materials,
+    glm::vec3* image)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_paths)
@@ -333,19 +344,14 @@ __global__ void shadeMaterial(
             seg.remainingBounces = 0;
         }
 
+        // A path that terminated in any branch above adds its color to the
+        // image now, because compaction drops it next. Each pixel has exactly
+        // one path per iteration, so no two threads add to the same pixel.
+        if (seg.remainingBounces <= 0) {
+            image[seg.pixelIndex] += seg.color;
+        }
+
         pathSegments[idx] = seg;
-    }
-}
-
-// Add the current iteration's output to the overall image
-__global__ void finalGather(int nPaths, glm::vec3* image, PathSegment* iterationPaths)
-{
-    int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-
-    if (index < nPaths)
-    {
-        PathSegment iterationPath = iterationPaths[index];
-        image[iterationPath.pixelIndex] += iterationPath.color;
     }
 }
 
@@ -353,11 +359,26 @@ __global__ void finalGather(int nPaths, glm::vec3* image, PathSegment* iteration
  * Wrapper for the __global__ call that sets up the kernel calls and does a ton
  * of memory management
  */
+// Number of bits needed to hold every value in [0, maxValue]. Sets the radix
+// sort's key range so it runs one pass for a scene with few materials.
+static int bitsToHold(int maxValue)
+{
+    int bits = 1;
+    while ((1 << bits) <= maxValue)
+    {
+        ++bits;
+    }
+    return bits;
+}
+
 void pathtrace(uchar4* pbo, int frame, int iter)
 {
     const int traceDepth = hst_scene->state.traceDepth;
     const Camera& cam = hst_scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
+    const int numMaterials = (int)hst_scene->materials.size();
+    // Sort keys lie in [0, numMaterials]; numMaterials is the miss key.
+    const int materialKeyBits = bitsToHold(numMaterials);
 
     // 2D block for generating ray from camera
     const dim3 blockSize2d(8, 8);
@@ -403,8 +424,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     checkCUDAError("generate camera ray");
 
     int depth = 0;
-    PathSegment* dev_path_end = dev_paths + pixelcount;
-    int num_paths = dev_path_end - dev_paths;
+    int num_paths = pixelcount;
 
     // --- PathSegment Tracing Stage ---
     // Shoot ray into scene, bounce between objects, push shading chunks
@@ -424,6 +444,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             num_paths,
             dev_paths,
             dev_materialIds,
+            numMaterials,
             dev_geoms,
             hst_scene->geoms.size(),
             dev_intersections
@@ -438,14 +459,12 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         // evaluating the BSDF.
         // Start off with just a big kernel that handles all the different
         // materials you have in the scenefile.
-        // TODO: compare between directly shading the path segments and shading
-        // path segments that have been reshuffled to be contiguous in memory.
 
-        // Material sort: group paths by the material they hit so shadeMaterial
-        // warps are branch-uniform. Image-neutral (RNG is keyed on pixelIndex).
+        // Material sort: group paths by the material they hit so shadeMaterial warps are branch-uniform.
+        // Swaps dev_paths and dev_intersections for the sorted copies.
         if (useMaterialSort)
         {
-            sortMaterials(num_paths, dev_materialIds, dev_intersections, dev_paths);
+            sortMaterials(num_paths, materialKeyBits, dev_materialIds, dev_intersections, dev_paths);
         }
 
         shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
@@ -455,10 +474,12 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             useRussianRoulette,
             dev_intersections,
             dev_paths,
-            dev_materials
+            dev_materials,
+            dev_image
         );
-        // Stream compaction: move live paths to the front. Dead paths stay
-        // behind num_paths (with their final color) for finalGather.
+        // Stream compaction: keep only the live paths. Terminated ones have
+        // already added their color to dev_image in shadeMaterial. Swaps
+        // dev_paths for the compacted copy.
         num_paths = compactPaths(dev_paths, num_paths);
 
         iterationComplete = num_paths == 0 || depth >= traceDepth;
@@ -469,9 +490,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         }
     }
 
-    // Assemble this iteration and apply it to the image
-    dim3 numBlocksPixels = (pixelcount + blockSize1d - 1) / blockSize1d;
-    finalGather<<<numBlocksPixels, blockSize1d>>>(pixelcount, dev_image, dev_paths);
+    // No gather pass: every path added its color to dev_image in shadeMaterial
+    // when it terminated.
 
     ///////////////////////////////////////////////////////////////////////////
 
