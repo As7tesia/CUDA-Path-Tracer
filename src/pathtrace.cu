@@ -34,9 +34,6 @@ void checkCUDAErrorFn(const char* msg, const char* file, int line)
         fprintf(stderr, " (%s:%d)", file, line);
     }
     fprintf(stderr, ": %s: %s\n", msg, cudaGetErrorString(err));
-#ifdef _WIN32
-    getchar();
-#endif // _WIN32
     exit(EXIT_FAILURE);
 #endif // ERRORCHECK
 }
