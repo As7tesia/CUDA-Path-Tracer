@@ -11,7 +11,7 @@
     "Camera":
     {
         "RES":[1024,1024],
-        "FOVY":45.0,
+        "FOVY":90.0,
         "ITERATIONS":5000,
         "DEPTH":8,
         "FILE":"sphere",

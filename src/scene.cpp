@@ -120,17 +120,20 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
     camera.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
     camera.up = glm::vec3(up[0], up[1], up[2]);
 
-    //calculate fov based on resolution
-    float yscaled = tan(fovy * (PI / 180));
+    // FOVY is the full vertical field of view in degrees, so the half angle
+    // sets the image plane's half height at unit distance.
+    float yscaled = tan(0.5f * fovy * (PI / 180));
     float xscaled = (yscaled * camera.resolution.x) / camera.resolution.y;
-    float fovx = (atan(xscaled) * 180) / PI;
+    float fovx = (2 * atan(xscaled) * 180) / PI;
     camera.fov = glm::vec2(fovx, fovy);
-
-    camera.right = glm::normalize(glm::cross(camera.view, camera.up));
     camera.pixelLength = glm::vec2(2 * xscaled / (float)camera.resolution.x,
         2 * yscaled / (float)camera.resolution.y);
 
+    // Orthonormal basis from EYE, LOOKAT and UP: view first, right from
+    // view and UP, then up rebuilt so it is perpendicular to both.
     camera.view = glm::normalize(camera.lookAt - camera.position);
+    camera.right = glm::normalize(glm::cross(camera.view, camera.up));
+    camera.up = glm::normalize(glm::cross(camera.right, camera.view));
 
     //set up render camera stuff
     int arraylen = camera.resolution.x * camera.resolution.y;

@@ -455,21 +455,17 @@ int main(int argc, char** argv)
     width = cam.resolution.x;
     height = cam.resolution.y;
 
-    glm::vec3 view = cam.view;
-    glm::vec3 up = cam.up;
-    glm::vec3 right = glm::cross(view, up);
-    up = glm::cross(right, view);
-
     cameraPosition = cam.position;
 
-    // compute phi (horizontal) and theta (vertical) relative 3D axis
-    // so, (0 0 1) is forward, (0 1 0) is up
-    glm::vec3 viewXZ = glm::vec3(view.x, 0.0f, view.z);
-    glm::vec3 viewZY = glm::vec3(0.0f, view.y, view.z);
-    phi = glm::acos(glm::dot(glm::normalize(viewXZ), glm::vec3(0, 0, -1)));
-    theta = glm::acos(glm::dot(glm::normalize(viewZY), glm::vec3(0, 1, 0)));
+    // Orbit parameters from the eye's offset around lookAt, in the same
+    // spherical convention updateCameraFromOrbit uses to rebuild the position:
+    // theta is the polar angle from +y, phi the azimuth from +z toward +x.
+    // atan2 keeps the sign of x, so an eye left of lookAt stays on the left.
     ogLookAt = cam.lookAt;
-    zoom = glm::length(cam.position - ogLookAt);
+    glm::vec3 offset = cam.position - ogLookAt;
+    zoom = glm::length(offset);
+    theta = glm::acos(glm::clamp(offset.y / zoom, -1.0f, 1.0f));
+    phi = glm::atan(offset.x, offset.z);
 
     if (headless)
     {
@@ -564,9 +560,9 @@ void runHeadless()
 
 // Rebuild the camera basis (position, view, up, right) from the orbit
 // parameters phi / theta / zoom around lookAt. Shared by windowed and headless
-// so both produce identical rays. Note the scene loader leaves cam.right
-// uninitialized (it reads view before view is set), so this must run before
-// the first pathtrace call.
+// so both produce identical rays. The orbit's polar axis is world +y, so the
+// basis is built against world up here; the scene's UP only seeds the
+// loader's initial basis, which this replaces before the first pathtrace.
 void updateCameraFromOrbit()
 {
     Camera& cam = renderState->camera;
@@ -576,9 +572,11 @@ void updateCameraFromOrbit()
 
     cam.view = -glm::normalize(cameraPosition);
     glm::vec3 v = cam.view;
-    glm::vec3 u = glm::vec3(0, 1, 0);//glm::normalize(cam.up);
-    glm::vec3 r = glm::cross(v, u);
-    cam.up = glm::cross(r, v);
+    glm::vec3 u = glm::vec3(0, 1, 0);
+    // Both normalized: cross(v, u) has length sin(theta), and the pixel
+    // offsets in generateRayFromCamera scale by right and up directly.
+    glm::vec3 r = glm::normalize(glm::cross(v, u));
+    cam.up = glm::normalize(glm::cross(r, v));
     cam.right = r;
 
     cam.position = cameraPosition;
@@ -676,7 +674,8 @@ void mousePositionCallback(GLFWwindow* window, double xpos, double ypos)
         // compute new camera parameters
         phi -= (xpos - lastX) / width;
         theta -= (ypos - lastY) / height;
-        theta = std::fmax(0.001f, std::fmin(theta, PI));
+        // keep away from both poles, where view is parallel to world up
+        theta = std::fmax(0.001f, std::fmin(theta, PI - 0.001f));
         camchanged = true;
     }
     else if (rightMousePressed)
