@@ -13,6 +13,7 @@
 #include "intersections.h"
 #include "interactions.h"
 #include "wavefront_ops.h"
+#include "optix_intersect.h"
 
 #define ERRORCHECK 1
 
@@ -95,6 +96,14 @@ void setRussianRoulette(bool enabled) { useRussianRoulette = enabled; }
 static bool useMaterialSort = true;
 void setMaterialSort(bool enabled) { useMaterialSort = enabled; }
 
+// OptiX intersection stage. useOptix is the request; optixReady is whether
+// optixIntersectInit succeeded, which is what intersectScene checks.
+static bool useOptix = true;
+static bool optixValidation = false;
+static bool optixReady = false;
+void setOptix(bool enabled) { useOptix = enabled; }
+void setOptixValidation(bool enabled) { optixValidation = enabled; }
+
 static ToneMapMode toneMapMode = TONEMAP_AGX;
 static float toneMapExposure = 1.f;
 void setToneMap(ToneMapMode mode, float exposure)
@@ -129,6 +138,15 @@ void pathtraceInit(Scene* scene)
     // initialize spare buffers and CUB storage for compaction and material sort
     wavefrontInit(pixelcount);
 
+    // OptiX intersection stage: context, acceleration structures, pipeline
+    // and shader binding table, built once for this scene. If the driver has
+    // no OptiX or any step fails, computeIntersections stays in use.
+    optixReady = useOptix && optixIntersectInit(scene, optixValidation);
+    if (useOptix && !optixReady)
+    {
+        fprintf(stderr, "OptiX unavailable, using the naive intersection kernel\n");
+    }
+
     checkCUDAError("pathtraceInit");
 }
 
@@ -141,6 +159,11 @@ void pathtraceFree()
     cudaFree(dev_intersections);
     // TODO: clean up any extra device memory you created
     cudaFree(dev_materialIds);
+    if (optixReady)
+    {
+        optixIntersectFree();
+        optixReady = false;
+    }
     // Frees the spares. dev_paths / dev_intersections above may hold the
     // workspace's original buffers by now; the two sides still free each
     // allocation exactly once.
@@ -268,6 +291,30 @@ __global__ void computeIntersections(
             intersections[path_index].outside = closest_outside;
         }
     }
+}
+
+// The intersection stage behind one call: OptiX when it initialized, else
+// the naive kernel above. Both fill dev_intersections and dev_materialIds the
+// same way, so nothing downstream knows which one ran.
+static void intersectScene(int depth, int numPaths, int numMaterials)
+{
+    if (optixReady)
+    {
+        optixIntersect(numPaths, dev_paths, dev_intersections, dev_materialIds, numMaterials);
+        return;
+    }
+    const int blockSize1d = 128;
+    dim3 numBlocks = (numPaths + blockSize1d - 1) / blockSize1d;
+    computeIntersections<<<numBlocks, blockSize1d>>>(
+        depth,
+        numPaths,
+        dev_paths,
+        dev_materialIds,
+        numMaterials,
+        dev_geoms,
+        hst_scene->geoms.size(),
+        dev_intersections
+    );
 }
 
 __global__ void shadeMaterial(
@@ -444,16 +491,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
         // tracing
         dim3 numblocksPathSegmentTracing = (num_paths + blockSize1d - 1) / blockSize1d;
-        computeIntersections<<<numblocksPathSegmentTracing, blockSize1d>>> (
-            depth,
-            num_paths,
-            dev_paths,
-            dev_materialIds,
-            numMaterials,
-            dev_geoms,
-            hst_scene->geoms.size(),
-            dev_intersections
-        );
+        intersectScene(depth, num_paths, numMaterials);
         checkCUDAError("trace one bounce");
         cudaDeviceSynchronize();
         depth++;

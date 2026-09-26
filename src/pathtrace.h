@@ -21,6 +21,12 @@ void pathtrace(uchar4 *pbo, int frame, int iteration);
 void setRussianRoulette(bool enabled);
 void setMaterialSort(bool enabled);
 
+// Startup options, read once by pathtraceInit: whether the intersection stage
+// runs on OptiX (false = the naive per-object kernel) and whether OptiX
+// validation mode is on (slow; checks every launch).
+void setOptix(bool enabled);
+void setOptixValidation(bool enabled);
+
 // View transform used by the viewport kernel. saveImage applies the same
 // function on the host, see tonemap.h.
 void setToneMap(ToneMapMode mode, float exposure);

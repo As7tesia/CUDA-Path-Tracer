@@ -56,11 +56,21 @@ set(GLM_ROOT_DIR "${CMAKE_SOURCE_DIR}/external")
 find_package(GLM REQUIRED)
 include_directories(${GLM_INCLUDE_DIRS})
 
+# OptiX. The API headers are vendored under external/include/optix (from the
+# OptiX SDK 9.1.0). The implementation lives in the display driver and is
+# loaded at run time by optixInit(), so there is nothing to link. Host code is
+# src/optix_intersect.cpp; the device programs are src/optix_programs.cu, built
+# separately below.
+set(OPTIX_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/external/include/optix")
+include_directories(${OPTIX_INCLUDE_DIR})
+
 set(headers
     src/image.h
     src/interactions.h
     src/intersections.h
     src/glslUtility.hpp
+    src/optix_intersect.h
+    src/optix_params.h
     src/pathtrace.h
     src/scene.h
     src/sceneStructs.h
@@ -77,6 +87,7 @@ set(sources
     src/pathtrace.cu
     src/intersections.cu
     src/interactions.cu
+    src/optix_intersect.cpp
     src/scene.cpp
     src/utilities.cpp
     src/wavefront_ops.cu
@@ -134,6 +145,38 @@ target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<AND:$<CONFIG:Release>,
 # can inline them. Release only; Debug and RelWithDebInfo use -G.
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-dlto>")
 target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<CONFIG:Release>:$<DEVICE_LINK:-dlto>>")
+
+# OptiX device programs. They are not linked like the other .cu files: the
+# driver compiles them at run time from OptiX-IR. nvcc emits that IR here,
+# cmake/EmbedFile.cmake turns the file into a byte array, and the array is
+# compiled into the executable, so optixModuleCreate reads the programs from
+# memory rather than from a file next to the binary. sm_75 is the oldest RTX
+# generation; the driver specializes the IR for the GPU it runs on.
+set(optix_programs "${CMAKE_SOURCE_DIR}/src/optix_programs.cu")
+set(optix_ir "${CMAKE_BINARY_DIR}/optix_programs.optixir")
+set(optix_ir_cpp "${CMAKE_BINARY_DIR}/optix_programs_ir.cpp")
+add_custom_command(
+    OUTPUT ${optix_ir}
+    COMMAND ${CMAKE_CUDA_COMPILER} -optix-ir -arch=sm_75 -rdc=true -std=c++17 -m64 -lineinfo
+            -ccbin "${CMAKE_CXX_COMPILER}"
+            "-I${OPTIX_INCLUDE_DIR}" "-I${GLM_INCLUDE_DIRS}" "-I${CMAKE_SOURCE_DIR}/src"
+            -o ${optix_ir} ${optix_programs}
+    DEPENDS ${optix_programs}
+            "${CMAKE_SOURCE_DIR}/src/optix_params.h"
+            "${CMAKE_SOURCE_DIR}/src/sceneStructs.h"
+    COMMENT "nvcc -optix-ir optix_programs.cu"
+    VERBATIM)
+add_custom_command(
+    OUTPUT ${optix_ir_cpp}
+    COMMAND ${CMAKE_COMMAND} -DINPUT=${optix_ir} -DOUTPUT=${optix_ir_cpp} -DSYMBOL=optix_programs_ir
+            -P "${CMAKE_SOURCE_DIR}/cmake/EmbedFile.cmake"
+    DEPENDS ${optix_ir} "${CMAKE_SOURCE_DIR}/cmake/EmbedFile.cmake"
+    COMMENT "embedding optix_programs.optixir"
+    VERBATIM)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${optix_ir_cpp} ${optix_programs})
+# Listed so it shows in the IDE; nvcc must not build it as an ordinary CUDA file.
+set_source_files_properties(${optix_programs} PROPERTIES HEADER_FILE_ONLY ON)
+source_group("OptiX" FILES ${optix_programs})
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${CMAKE_PROJECT_NAME})
 
