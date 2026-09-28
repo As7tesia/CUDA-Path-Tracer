@@ -1,22 +1,49 @@
 #pragma once
 
 #include "sceneStructs.h"
+#include <string>
 #include <vector>
 
-// Command-line overrides for values normally read from the scene JSON.
-// 0 / empty means "use the scene file's value".
+// Command-line overrides for values normally read from the scene file.
+// 0 means "use the scene file's value".
 struct SceneOverrides
 {
     int width = 0;
     int height = 0;
     int iterations = 0;
+    int traceDepth = 0;
+};
+
+// What a scene file says about the render itself. A scene JSON states all of
+// it in its Camera block; glTF has no such settings, so a glTF scene starts
+// from the defaults in scene.cpp.
+struct RenderSettings
+{
+    glm::ivec2 resolution;
+    int iterations;
+    int traceDepth;
+    std::string imageName;  // base name of auto-saved images
+};
+
+// Where the camera is and what it sees.
+struct CameraPose
+{
+    glm::vec3 eye;
+    glm::vec3 lookAt;  // also the point the interactive camera orbits
+    glm::vec3 up;
+    float fovy;        // full vertical field of view, degrees
+    bool mirrored;     // see Camera::mirrored
 };
 
 class Scene
 {
 private:
     void loadFromJSON(const std::string& jsonName, const SceneOverrides& ov);
+    void loadFromGltf(const std::string& gltfName, const SceneOverrides& ov);
+    void initRenderState(const RenderSettings& settings, const CameraPose& pose);
 public:
+    // filename is a scene JSON, or a glTF file (.gltf / .glb) that is the
+    // whole scene: geometry, materials, lights and camera.
     Scene(std::string filename, const SceneOverrides& ov = SceneOverrides());
 
     std::vector<Geom> geoms;

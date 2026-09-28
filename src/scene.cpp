@@ -7,6 +7,10 @@
 #include <glm/gtx/string_cast.hpp>
 #include "json.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -15,15 +19,53 @@
 using namespace std;
 using json = nlohmann::json;
 
+namespace
+{
+// Render settings for a scene file that has none, the same as the scene
+// JSONs in scenes/ use. The image is square unless the file's camera gives
+// an aspect ratio.
+const int DEFAULT_HEIGHT = 1024;
+const int DEFAULT_ITERATIONS = 5000;
+const int DEFAULT_TRACE_DEPTH = 8;
+// Vertical field of view, in degrees, of the camera made for a glTF file
+// that has none.
+const float DEFAULT_FOVY = 45.0f;
+
+// The command line wins over the scene file.
+RenderSettings withOverrides(RenderSettings settings, const SceneOverrides& ov)
+{
+    if (ov.width > 0 && ov.height > 0)
+    {
+        settings.resolution = glm::ivec2(ov.width, ov.height);
+    }
+    if (ov.iterations > 0)
+    {
+        settings.iterations = ov.iterations;
+    }
+    if (ov.traceDepth > 0)
+    {
+        settings.traceDepth = ov.traceDepth;
+    }
+    return settings;
+}
+}  // namespace
+
 Scene::Scene(string filename, const SceneOverrides& ov)
 {
     cout << "Reading scene from " << filename << " ..." << endl;
     cout << " " << endl;
-    auto ext = filename.substr(filename.find_last_of('.'));
+    string ext = std::filesystem::path(filename).extension().string();
+    for (char& c : ext)
+    {
+        c = (char)tolower((unsigned char)c);
+    }
     if (ext == ".json")
     {
         loadFromJSON(filename, ov);
-        return;
+    }
+    else if (ext == ".gltf" || ext == ".glb")
+    {
+        loadFromGltf(filename, ov);
     }
     else
     {
@@ -126,45 +168,148 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
         geoms.push_back(newGeom);
     }
     const auto& cameraData = data["Camera"];
-    Camera& camera = state.camera;
-    RenderState& state = this->state;
-    camera.resolution.x = cameraData["RES"][0];
-    camera.resolution.y = cameraData["RES"][1];
-    float fovy = cameraData["FOVY"];
-    state.iterations = cameraData["ITERATIONS"];
-    state.traceDepth = cameraData["DEPTH"];
-    state.imageName = cameraData["FILE"];
+    const auto& res = cameraData["RES"];
+    RenderSettings settings;
+    settings.resolution = glm::ivec2(res[0].get<int>(), res[1].get<int>());
+    settings.iterations = cameraData["ITERATIONS"].get<int>();
+    settings.traceDepth = cameraData["DEPTH"].get<int>();
+    settings.imageName = cameraData["FILE"].get<std::string>();
 
-    // CLI overrides must land before the fov / pixelLength math below
-    if (ov.width > 0 && ov.height > 0)
-    {
-        camera.resolution = glm::ivec2(ov.width, ov.height);
-    }
-    if (ov.iterations > 0)
-    {
-        state.iterations = ov.iterations;
-    }
     const auto& pos = cameraData["EYE"];
     const auto& lookat = cameraData["LOOKAT"];
     const auto& up = cameraData["UP"];
-    camera.position = glm::vec3(pos[0], pos[1], pos[2]);
-    camera.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
-    camera.up = glm::vec3(up[0], up[1], up[2]);
+    CameraPose pose;
+    pose.eye = glm::vec3(pos[0], pos[1], pos[2]);
+    pose.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
+    pose.up = glm::vec3(up[0], up[1], up[2]);
+    pose.fovy = cameraData["FOVY"];
+    pose.mirrored = false;
 
-    // FOVY is the full vertical field of view in degrees, so the half angle
+    initRenderState(withOverrides(settings, ov), pose);
+}
+
+void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
+{
+    GltfInfo info;
+    if (!loadGltf(gltfName, glm::mat4(1.0f), -1, *this, &info))
+    {
+        exit(-1);
+    }
+    if (geoms.empty())
+    {
+        cout << "Nothing to render in " << gltfName << endl;
+        exit(-1);
+    }
+    // Only a surface that emits lights a scene so far.
+    if (std::none_of(materials.begin(), materials.end(), [](const Material& m) { return m.emittance > 0.0f; }))
+    {
+        cout << "No emissive material in " << gltfName << ": the render will be black" << endl;
+    }
+
+    // The file's hints where it has them, the defaults elsewhere.
+    const GltfRenderHints& hints = info.render;
+    RenderSettings settings;
+    settings.resolution = glm::ivec2(DEFAULT_HEIGHT);
+    if (hints.width > 0 && hints.height > 0)
+    {
+        settings.resolution = glm::ivec2(hints.width, hints.height);
+    }
+    else if (info.camera && info.camera->aspectRatio > 0.0f)
+    {
+        settings.resolution.x = glm::max(1, (int)std::round(DEFAULT_HEIGHT * info.camera->aspectRatio));
+    }
+    settings.iterations = DEFAULT_ITERATIONS;
+    // PBRT's max_depth counts bounces, and its paths sample the lights at
+    // every bounce. A path here has to hit a light, which takes one more ray
+    // after the last bounce.
+    settings.traceDepth = hints.maxDepth > 0 ? hints.maxDepth + 1 : DEFAULT_TRACE_DEPTH;
+    settings.imageName = std::filesystem::path(gltfName).stem().string();
+    settings = withOverrides(settings, ov);
+
+    // The scene's bounding sphere, from the box's center and half diagonal.
+    const glm::vec3 center = 0.5f * (info.boundsMin + info.boundsMax);
+    const float radius = glm::max(0.5f * glm::length(info.boundsMax - info.boundsMin), 1e-3f);
+
+    CameraPose pose;
+    if (info.camera)
+    {
+        const GltfCamera& c = *info.camera;
+        pose.eye = c.position;
+        pose.up = c.up;
+        pose.fovy = glm::degrees(c.yfov);
+        pose.mirrored = c.mirrored;
+
+        // A glTF camera has no look-at point and the interactive camera needs
+        // one to orbit: the point on the view axis nearest the middle of the
+        // scene, or one scene radius ahead when the middle is beside or
+        // behind the camera.
+        float ahead = glm::dot(center - c.position, c.view);
+        if (ahead < 0.01f * radius)
+        {
+            ahead = radius;
+        }
+        pose.lookAt = c.position + ahead * c.view;
+
+        // The interactive camera (updateCameraFromOrbit in main.cpp) orbits
+        // with world +Y up, so its right is always level: perpendicular to
+        // view and +Y, or +X when it looks straight up or down. A glTF camera
+        // whose right points elsewhere is rolled about its view axis, and
+        // the roll is lost.
+        glm::vec3 level = glm::cross(c.view, glm::vec3(0.0f, 1.0f, 0.0f));
+        level = glm::length(level) < 1e-3f ? glm::vec3(1.0f, 0.0f, 0.0f) : glm::normalize(level);
+        if (glm::dot(glm::normalize(glm::cross(c.view, c.up)), level) < 0.9999f)
+        {
+            cout << "The camera in " << gltfName << " is rolled about its view axis; the roll is not kept" << endl;
+        }
+    }
+    else
+    {
+        // No camera in the file: look at the whole scene from +Z, far enough
+        // back that the bounding sphere fits the narrower side of the image.
+        const float halfY = glm::radians(0.5f * DEFAULT_FOVY);
+        const float aspect = (float)settings.resolution.x / (float)settings.resolution.y;
+        const float halfAngle = glm::min(halfY, std::atan(std::tan(halfY) * aspect));
+        pose.eye = center + glm::vec3(0.0f, 0.0f, radius / std::sin(halfAngle));
+        pose.lookAt = center;
+        pose.up = glm::vec3(0.0f, 1.0f, 0.0f);
+        pose.fovy = DEFAULT_FOVY;
+        pose.mirrored = false;
+    }
+
+    initRenderState(settings, pose);
+}
+
+void Scene::initRenderState(const RenderSettings& settings, const CameraPose& pose)
+{
+    Camera& camera = state.camera;
+    camera.resolution = settings.resolution;
+    state.iterations = settings.iterations;
+    state.traceDepth = settings.traceDepth;
+    state.imageName = settings.imageName;
+
+    camera.position = pose.eye;
+    camera.lookAt = pose.lookAt;
+    camera.up = pose.up;
+    camera.mirrored = pose.mirrored;
+
+    // fovy is the full vertical field of view in degrees, so the half angle
     // sets the image plane's half height at unit distance.
-    float yscaled = tan(0.5f * fovy * (PI / 180));
+    float yscaled = tan(0.5f * pose.fovy * (PI / 180));
     float xscaled = (yscaled * camera.resolution.x) / camera.resolution.y;
     float fovx = (2 * atan(xscaled) * 180) / PI;
-    camera.fov = glm::vec2(fovx, fovy);
+    camera.fov = glm::vec2(fovx, pose.fovy);
     camera.pixelLength = glm::vec2(2 * xscaled / (float)camera.resolution.x,
         2 * yscaled / (float)camera.resolution.y);
 
-    // Orthonormal basis from EYE, LOOKAT and UP: view first, right from
-    // view and UP, then up rebuilt so it is perpendicular to both.
+    // Orthonormal basis from eye, lookAt and up: view first, right from
+    // view and up, then up rebuilt so it is perpendicular to both.
     camera.view = glm::normalize(camera.lookAt - camera.position);
     camera.right = glm::normalize(glm::cross(camera.view, camera.up));
     camera.up = glm::normalize(glm::cross(camera.right, camera.view));
+    if (camera.mirrored)
+    {
+        camera.right = -camera.right;
+    }
 
     //set up render camera stuff
     int arraylen = camera.resolution.x * camera.resolution.y;

@@ -89,6 +89,9 @@ struct Camera
     glm::vec3 right;
     glm::vec2 fov;
     glm::vec2 pixelLength;
+    // right is -cross(view, up) instead of cross(view, up), so the image is
+    // flipped left to right. Set by a glTF camera whose transform mirrors.
+    bool mirrored;
 };
 
 struct RenderState

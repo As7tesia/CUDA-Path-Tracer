@@ -310,7 +310,17 @@ void mainLoop()
 {
     while (!glfwWindowShouldClose(window))
     {
-        glfwPollEvents();
+        // A finished render has nothing left to compute: wait for input
+        // instead of redrawing the same image as fast as the GPU can.
+        const bool finished = !camchanged && iteration >= (int)renderState->iterations;
+        if (finished)
+        {
+            glfwWaitEventsTimeout(0.1);
+        }
+        else
+        {
+            glfwPollEvents();
+        }
 
         runCuda();
 
@@ -354,12 +364,14 @@ int main(int argc, char** argv)
     startTimeString = currentTimeString();
 
     const char* usage =
-        "Usage: %s SCENEFILE.json [--headless] [--spp N] [--res WxH] [--out PATH.png]\n"
-        "                          [--no-rr] [--no-sort] [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
-        "                          [--no-optix] [--optix-validate]\n"
+        "Usage: %s SCENEFILE [--headless] [--spp N] [--res WxH] [--depth N] [--out PATH.png]\n"
+        "                     [--no-rr] [--no-sort] [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
+        "                     [--no-optix] [--optix-validate]\n"
+        "  SCENEFILE        a scene .json, or a .gltf / .glb file that is the whole scene\n"
         "  --headless       render without a window and exit after saving\n"
         "  --spp N          override the scene's ITERATIONS\n"
         "  --res WxH        override the scene's RES\n"
+        "  --depth N        override the scene's DEPTH, the most rays a path may trace\n"
         "  --out PATH       write exactly this file (default: img/auto_saved/<FILE>.<time>.<spp>samp.png)\n"
         "  --no-rr          disable Russian roulette path termination\n"
         "  --no-sort        disable sorting paths by material before shading\n"
@@ -396,6 +408,10 @@ int main(int argc, char** argv)
                 printf("--res expects WxH, e.g. 800x600\n");
                 return 1;
             }
+        }
+        else if (a == "--depth")
+        {
+            ov.traceDepth = atoi(needValue("--depth"));
         }
         else if (a == "--out")
         {
@@ -477,6 +493,9 @@ int main(int argc, char** argv)
     glm::vec3 offset = cam.position - ogLookAt;
     zoom = glm::length(offset);
     theta = glm::acos(glm::clamp(offset.y / zoom, -1.0f, 1.0f));
+    // Same limits as dragging: a camera that looks straight up or down (a
+    // glTF camera can) is tilted a hair off the pole, where the basis exists.
+    theta = std::fmax(0.001f, std::fmin(theta, PI - 0.001f));
     phi = glm::atan(offset.x, offset.z);
 
     if (headless)
@@ -590,7 +609,7 @@ void updateCameraFromOrbit()
     // offsets in generateRayFromCamera scale by right and up directly.
     glm::vec3 r = glm::normalize(glm::cross(v, u));
     cam.up = glm::normalize(glm::cross(r, v));
-    cam.right = r;
+    cam.right = cam.mirrored ? -r : r;
 
     cam.position = cameraPosition;
     cameraPosition += cam.lookAt;
@@ -626,12 +645,13 @@ void runCuda()
 
         // unmap buffer object
         cudaGLUnmapBufferObject(pbo);
-    }
-    else
-    {
-        // Same path as Escape: mainLoop ends and frees everything in order
-        saveImage();
-        glfwSetWindowShouldClose(window, GL_TRUE);
+
+        // The last sample: save the image. The window stays open on the
+        // finished render until Escape; moving the camera starts it over.
+        if (iteration == (int)renderState->iterations)
+        {
+            saveImage();
+        }
     }
 }
 

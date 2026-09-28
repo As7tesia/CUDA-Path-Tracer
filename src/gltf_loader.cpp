@@ -1,4 +1,4 @@
-// glTF mesh loading through tinygltf. See gltf_loader.h.
+// glTF loading through tinygltf. See gltf_loader.h.
 //
 // This is the one translation unit that compiles tinygltf's implementation.
 // The repo already has nlohmann's json.hpp, so tinygltf uses that instead of
@@ -175,6 +175,68 @@ glm::mat4 nodeLocalMatrix(const tinygltf::Node& node)
     return t * r * s;
 }
 
+// Extensions and extras reach this file as raw JSON values. object[key], or
+// a null value when object is not a JSON object or has no such member
+// (Value::Get asserts on anything that is not an object).
+const tinygltf::Value& member(const tinygltf::Value& object, const char* key)
+{
+    static const tinygltf::Value null;
+    return object.Has(key) ? object.Get(key) : null;
+}
+
+float numberMember(const tinygltf::Value& object, const char* key, float fallback)
+{
+    const tinygltf::Value& value = member(object, key);
+    return value.IsNumber() ? (float)value.GetNumberAsDouble() : fallback;
+}
+
+// A number from one of a material's extensions, or fallback when the
+// material does not have the extension or the extension does not say.
+float extensionNumber(const tinygltf::Material& material, const char* extension, const char* key, float fallback)
+{
+    auto found = material.extensions.find(extension);
+    return found == material.extensions.end() ? fallback : numberMember(found->second, key, fallback);
+}
+
+// The render settings of a research scene, see GltfRenderHints. Two are left
+// alone. fov_degrees is PBRT's angle across the shorter side of the image,
+// and the camera's yfov already is the vertical angle. samples_per_pixel is
+// tuned for PBRT, whose paths sample the lights and need far fewer samples.
+GltfRenderHints renderHints(const tinygltf::Model& model)
+{
+    GltfRenderHints hints;
+    const tinygltf::Value& render = member(member(model.extras, "pbrt"), "render");
+    const tinygltf::Value& resolution = member(render, "resolution");
+    if (resolution.ArrayLen() == 2)
+    {
+        hints.width = resolution.Get(0).GetNumberAsInt();
+        hints.height = resolution.Get(1).GetNumberAsInt();
+    }
+    hints.maxDepth = (int)numberMember(render, "max_depth", 0.0f);
+    return hints;
+}
+
+// Names the lights in the file that do not reach the render, so a dark image
+// explains itself. Only emissive surfaces light a scene so far: punctual
+// lights (KHR_lights_punctual, which tinygltf parses into model.lights) and
+// PBRT's distant lights have no surface a path could hit and wait for direct
+// light sampling, PBRT's infinite lights wait for the environment map. The
+// research scenes list the PBRT ones under extras.pbrt.light_sources.
+void reportUnusedLights(const tinygltf::Model& model, const std::string& path)
+{
+    if (!model.lights.empty())
+    {
+        fprintf(stderr, "glTF %s: %zu punctual lights ignored (not supported yet)\n", path.c_str(), model.lights.size());
+    }
+    const tinygltf::Value& sources = member(member(model.extras, "pbrt"), "light_sources");
+    for (size_t i = 0; i < sources.ArrayLen(); ++i)
+    {
+        const tinygltf::Value& kind = member(sources.Get(i), "pbrt");
+        fprintf(stderr, "glTF %s: PBRT %s light ignored (not supported yet)\n", path.c_str(),
+            kind.IsString() ? kind.Get<std::string>().c_str() : "unnamed");
+    }
+}
+
 // State for one file: the model, the scene being filled, and the maps that
 // keep a primitive or a material shared by several nodes as one entry.
 struct Loader
@@ -185,6 +247,7 @@ struct Loader
     int materialOverride;
     std::map<int, int> materialIds;                    // glTF material index (-1 = none) -> Scene material
     std::map<std::pair<int, int>, int> meshIds;        // (glTF mesh, primitive) -> Scene mesh, -1 if unusable
+    std::optional<GltfCamera> camera;                  // the first usable camera the walk reached
 
     // A primitive this loader cannot use is skipped, not fatal: the rest of
     // the file still loads.
@@ -196,6 +259,17 @@ struct Loader
     // glTF materials become Diffuse with the base color factor for now; the
     // base color texture and the metallic-roughness inputs wait for the GGX
     // step. A primitive without a material gets glTF's default, white.
+    //
+    // A material that emits becomes Emitting. glTF's emission is the emissive
+    // factor times the emissive texture times the strength from
+    // KHR_materials_emissive_strength (1 without the extension), which maps
+    // onto color times emittance. Two things are missing until the material
+    // model grows in the GGX step:
+    // - An emitter only emits. The shade kernel ends a path at a light, so
+    //   the base color of an emitting material is dropped.
+    // - A material with an emissive texture does not emit. Textures are not
+    //   read yet, and the factor alone would light up the whole surface
+    //   (DamagedHelmet: factor 1, texture black except for a few lamps).
     int materialFor(int gltfMaterial)
     {
         if (materialOverride >= 0)
@@ -212,16 +286,55 @@ struct Loader
         m.color = glm::vec3(1.0f);
         if (gltfMaterial >= 0 && gltfMaterial < (int)model.materials.size())
         {
-            const std::vector<double>& f = model.materials[gltfMaterial].pbrMetallicRoughness.baseColorFactor;
-            if (f.size() >= 3)
+            const tinygltf::Material& source = model.materials[gltfMaterial];
+            const std::vector<double>& base = source.pbrMetallicRoughness.baseColorFactor;
+            if (base.size() >= 3)
             {
-                m.color = glm::vec3((float)f[0], (float)f[1], (float)f[2]);
+                m.color = glm::vec3((float)base[0], (float)base[1], (float)base[2]);
+            }
+            const std::vector<double>& e = source.emissiveFactor;
+            const glm::vec3 emissive = e.size() >= 3 ? glm::vec3((float)e[0], (float)e[1], (float)e[2]) : glm::vec3(0.0f);
+            const float strength = extensionNumber(source, "KHR_materials_emissive_strength", "emissiveStrength", 1.0f);
+            const bool textured = source.emissiveTexture.index >= 0;
+            if (!textured && strength > 0.0f && glm::max(emissive.r, glm::max(emissive.g, emissive.b)) > 0.0f)
+            {
+                m.type = EMISSIVE;
+                m.color = emissive;
+                m.emittance = strength;
             }
         }
         const int id = (int)scene.materials.size();
         scene.materials.push_back(m);
         materialIds[gltfMaterial] = id;
         return id;
+    }
+
+    // Keeps the pose of the first perspective camera the walk reaches; a
+    // file's other cameras are ignored.
+    void cameraFor(int gltfCamera, const glm::mat4& world)
+    {
+        if (camera || gltfCamera < 0 || gltfCamera >= (int)model.cameras.size())
+        {
+            return;
+        }
+        const tinygltf::Camera& source = model.cameras[gltfCamera];
+        // The upper 3x3 holds the camera's axes. Its determinant is negative
+        // when the transform mirrors, and zero when a scale of 0 has
+        // flattened the axes, which leaves no direction to look in.
+        const float det = glm::determinant(glm::mat3(world));
+        if (source.type != "perspective" || source.perspective.yfov <= 0.0 || det == 0.0f)
+        {
+            fprintf(stderr, "glTF %s: camera %d skipped: not a usable perspective camera\n", path.c_str(), gltfCamera);
+            return;
+        }
+        GltfCamera c;
+        c.position = glm::vec3(world[3]);
+        c.view = -glm::normalize(glm::vec3(world[2]));
+        c.up = glm::normalize(glm::vec3(world[1]));
+        c.mirrored = det < 0.0f;
+        c.yfov = (float)source.perspective.yfov;
+        c.aspectRatio = (float)source.perspective.aspectRatio;
+        camera = c;
     }
 
     // Appends the primitive's vertices and triangles to the scene's flat
@@ -365,6 +478,7 @@ struct Loader
         }
         const tinygltf::Node& node = model.nodes[nodeIndex];
         const glm::mat4 world = parent * nodeLocalMatrix(node);
+        cameraFor(node.camera, world);
         if (node.mesh >= 0 && node.mesh < (int)model.meshes.size())
         {
             const tinygltf::Mesh& mesh = model.meshes[node.mesh];
@@ -395,7 +509,8 @@ struct Loader
 };
 }  // namespace
 
-bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int materialOverride, Scene& scene)
+bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int materialOverride, Scene& scene,
+    GltfInfo* info)
 {
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
@@ -478,5 +593,14 @@ bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int mate
     printf("glTF %s: %zu triangles in %zu primitives, %zu instances, bounds (%.3f, %.3f, %.3f) to (%.3f, %.3f, %.3f)\n",
         path.c_str(), scene.indices.size() - firstTriangle, scene.meshes.size() - firstMesh,
         scene.geoms.size() - firstGeom, lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
+    reportUnusedLights(model, path);
+
+    if (info != nullptr)
+    {
+        info->boundsMin = lo;
+        info->boundsMax = hi;
+        info->camera = l.camera;
+        info->render = renderHints(model);
+    }
     return true;
 }
