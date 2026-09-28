@@ -221,7 +221,9 @@ GltfRenderHints renderHints(const tinygltf::Model& model)
 // lights (KHR_lights_punctual, which tinygltf parses into model.lights) and
 // PBRT's distant lights have no surface a path could hit and wait for direct
 // light sampling, PBRT's infinite lights wait for the environment map. The
-// research scenes list the PBRT ones under extras.pbrt.light_sources.
+// research scenes list the PBRT ones under extras.pbrt.light_sources and
+// mark those glTF cannot express as "metadata_only"; the list's area lights
+// are in the file as emissive meshes.
 void reportUnusedLights(const tinygltf::Model& model, const std::string& path)
 {
     if (!model.lights.empty())
@@ -232,8 +234,12 @@ void reportUnusedLights(const tinygltf::Model& model, const std::string& path)
     for (size_t i = 0; i < sources.ArrayLen(); ++i)
     {
         const tinygltf::Value& kind = member(sources.Get(i), "pbrt");
-        fprintf(stderr, "glTF %s: PBRT %s light ignored (not supported yet)\n", path.c_str(),
-            kind.IsString() ? kind.Get<std::string>().c_str() : "unnamed");
+        const tinygltf::Value& form = member(sources.Get(i), "gltf");
+        if (form.IsString() && form.Get<std::string>() == "metadata_only")
+        {
+            fprintf(stderr, "glTF %s: PBRT %s light ignored (not supported yet)\n", path.c_str(),
+                kind.IsString() ? kind.Get<std::string>().c_str() : "unnamed");
+        }
     }
 }
 

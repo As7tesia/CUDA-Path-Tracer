@@ -13,6 +13,41 @@ CUDA Path Tracer
 project, and we will not be able to grade you without a good README.
 
 
+### Status
+
+What works today, and what each missing piece needs before it can work. Last updated 2026-09-28.
+
+#### glTF
+
+A `.gltf` or `.glb` file loads in two ways: as the whole scene when it is the scene argument, or as a `"TYPE":"mesh"` object inside a scene JSON.
+
+| Part | Works today |
+|---|---|
+| Geometry | Triangle lists with float positions, indexed or not. Normals come from the file, or are generated area-weighted when it has none. Node transforms as a matrix or as translation, rotation, scale. One instance per (node, primitive) pair |
+| Camera | The first perspective camera in the node tree gives position, direction and `yfov`. A camera transform that mirrors flips the image. A file without a camera gets one that frames the scene's bounding sphere |
+| Lights | Emissive surfaces: `emissiveFactor` times `KHR_materials_emissive_strength` |
+| Materials | Diffuse with the base color factor, or an emitter |
+| Render settings | glTF has none. Resolution and depth come from the flags, then from `extras.pbrt.render` when the file has it, then from the defaults (1024 high, depth 8). 5000 spp unless `--spp` is given |
+
+| glTF feature | What happens today | Needs |
+|---|---|---|
+| Base color texture | The base color factor is used alone, so textured scenes render white | Texture loading: image decoding, UVs carried through both intersection paths, textures on the GPU |
+| Metallic and roughness | Ignored. Every surface that does not emit is diffuse | GGX microfacet BSDF with the glTF metallic-roughness layering. Texture loading for the metallic-roughness map |
+| Normal map | Ignored | Texture loading, tangents (read from the file or generated), normal mapping in the shade kernel |
+| Glass: `KHR_materials_transmission`, `_ior`, `_volume` | Rendered as opaque diffuse | Microfacet transmission (GGX BTDF) and Beer-Lambert absorption in the material model |
+| Alpha mask | Ignored, masked surfaces are solid | Texture loading, and an any-hit program in OptiX with the same test in the naive kernel |
+| Emitter that also reflects | An emitting material only emits, its base color is dropped | A material struct that carries emission next to the BSDF inputs. Today a material has one type, and the shade kernel ends the path at a light |
+| Emissive texture | A material with one does not emit at all, since the factor alone would light the whole surface | Texture loading |
+| One-sided emitters (`doubleSided` false) | An emitter emits from both faces | A front-face test on emission in the shade kernel |
+| Environment light (PBRT infinite light in the research scenes) | Ignored, named on stderr | Environment lighting: radiance returned when a ray misses, from an HDRI map (`.exr`, `.pfm`) or a constant color |
+| Punctual lights (`KHR_lights_punctual`), PBRT distant lights | Ignored, named on stderr | Direct light sampling (next event estimation). These lights have no surface for a path to hit |
+| Scenes lit through a small opening (veach-ajar) | Mostly noise | Direct light sampling (next event estimation) |
+| Camera roll | Dropped, with a note printed | An interactive camera that keeps its own up vector. The orbit camera always uses world +Y |
+
+Of the 26 [glTF research scenes](https://github.com/ErfanMo77/gltf-research-scenes), 15 have an emissive surface and render, with every material diffuse. The other 11 render black: 10 are lit by an environment light, and dragon by a distant light alone.
+
+Skipped by the loader, with no work planned: alpha blend, occlusion maps, clearcoat, sheen and the other `KHR_materials_*` extensions.
+
 ### Headless rendering
 Render without a viewport
 ```
