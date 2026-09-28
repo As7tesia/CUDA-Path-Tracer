@@ -9,12 +9,22 @@
 
 #include "sceneStructs.h"
 
+// What a hit program needs to know about the instance it hit, indexed by
+// optixGetInstanceId() (the Geom's index). A compact record rather than the
+// Geom itself, so a hit loads 8 bytes and not three mat4s.
+struct InstanceRecord
+{
+    int materialId;
+    int meshId;  // MESH instances: index into MeshBuffers::meshes; -1 otherwise
+};
+
 struct OptixIntersectParams
 {
     const PathSegment* paths;              // paths[i].ray is the ray for launch index i
     ShadeableIntersection* intersections;  // closest-hit and miss write intersections[i]
     int* materialIds;                      // sort key per path: materialId on hit, numMaterials on miss
     int numMaterials;
-    const Geom* geoms;                     // indexed by instance id, for the material id
-    OptixTraversableHandle handle;         // the IAS over the unit cube and unit sphere GAS
+    const InstanceRecord* instances;       // indexed by instance id
+    MeshBuffers buffers;                   // the same flat mesh arrays the naive kernel reads
+    OptixTraversableHandle handle;         // the IAS over the unit cube, unit sphere and mesh GASes
 };

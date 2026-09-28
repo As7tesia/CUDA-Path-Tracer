@@ -82,8 +82,23 @@ static int* dev_materialIds = NULL;
 // them with the spare buffers in wavefront_ops.cu, so they change every bounce.
 static PathSegment* dev_paths = NULL;
 static ShadeableIntersection* dev_intersections = NULL;
-// TODO: static variables for device memory, any extra info you need, etc
-// ...
+// The scene's flat mesh arrays (see Scene), read by the naive kernel and by
+// OptiX. Null pointers when the scene has no meshes.
+static MeshBuffers dev_mesh = {};
+
+// Device copy of a host vector, or null when it is empty.
+template <typename T>
+static T* uploadVector(const std::vector<T>& v)
+{
+    if (v.empty())
+    {
+        return nullptr;
+    }
+    T* d = nullptr;
+    cudaMalloc(&d, v.size() * sizeof(T));
+    cudaMemcpy(d, v.data(), v.size() * sizeof(T), cudaMemcpyHostToDevice);
+    return d;
+}
 
 void InitDataContainer(GuiDataContainer* imGuiData)
 {
@@ -138,10 +153,15 @@ void pathtraceInit(Scene* scene)
     // initialize spare buffers and CUB storage for compaction and material sort
     wavefrontInit(pixelcount);
 
+    dev_mesh.positions = uploadVector(scene->positions);
+    dev_mesh.normals = uploadVector(scene->normals);
+    dev_mesh.indices = uploadVector(scene->indices);
+    dev_mesh.meshes = uploadVector(scene->meshes);
+
     // OptiX intersection stage: context, acceleration structures, pipeline
     // and shader binding table, built once for this scene. If the driver has
     // no OptiX or any step fails, computeIntersections stays in use.
-    optixReady = useOptix && optixIntersectInit(scene, optixValidation);
+    optixReady = useOptix && optixIntersectInit(scene, dev_mesh, optixValidation);
     if (useOptix && !optixReady)
     {
         fprintf(stderr, "OptiX unavailable, using the naive intersection kernel\n");
@@ -161,9 +181,14 @@ void pathtraceFree()
     cudaFree(dev_materialIds);
     if (optixReady)
     {
-        optixIntersectFree();
+        optixIntersectFree();  // before the mesh buffers it points into
         optixReady = false;
     }
+    cudaFree(dev_mesh.positions);
+    cudaFree(dev_mesh.normals);
+    cudaFree(dev_mesh.indices);
+    cudaFree(dev_mesh.meshes);
+    dev_mesh = {};
     // Frees the spares. dev_paths / dev_intersections above may hold the
     // workspace's original buffers by now; the two sides still free each
     // allocation exactly once.
@@ -220,13 +245,13 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 // Generating new rays is handled in your shader(s).
 // Feel free to modify the code below.
 __global__ void computeIntersections(
-    int depth,
     int num_paths,
     PathSegment* pathSegments,
     int* materialIDs,
     int numMaterials,
     Geom* geoms,
     int geoms_size,
+    MeshBuffers buffers,
     ShadeableIntersection* intersections)
 {
     int path_index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -260,7 +285,11 @@ __global__ void computeIntersections(
             {
                 t = sphereIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, tmp_outside);
             }
-            // TODO: add more intersection tests here... triangle? metaball? CSG?
+            else  // MESH: every triangle of the instanced mesh
+            {
+                t = meshIntersectionTest(geom, buffers.meshes[geom.meshId], buffers, pathSegment.ray,
+                    tmp_intersect, tmp_normal, tmp_outside);
+            }
 
             // Compute the minimum t from the intersection tests to determine what
             // scene geometry object was hit first.
@@ -296,7 +325,7 @@ __global__ void computeIntersections(
 // The intersection stage behind one call: OptiX when it initialized, else
 // the naive kernel above. Both fill dev_intersections and dev_materialIds the
 // same way, so nothing downstream knows which one ran.
-static void intersectScene(int depth, int numPaths, int numMaterials)
+static void intersectScene(int numPaths, int numMaterials)
 {
     if (optixReady)
     {
@@ -306,13 +335,13 @@ static void intersectScene(int depth, int numPaths, int numMaterials)
     const int blockSize1d = 128;
     dim3 numBlocks = (numPaths + blockSize1d - 1) / blockSize1d;
     computeIntersections<<<numBlocks, blockSize1d>>>(
-        depth,
         numPaths,
         dev_paths,
         dev_materialIds,
         numMaterials,
         dev_geoms,
         hst_scene->geoms.size(),
+        dev_mesh,
         dev_intersections
     );
 }
@@ -484,14 +513,12 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     bool iterationComplete = false;
     while (!iterationComplete)
     {
-        // clean shading chunks
-        // this is so that kernel can assume unwritten means no hit, just need to remmeber
-        // later when integrating optix to write t = -1 in miss shader
-        // cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
+        // dev_intersections is not cleared between bounces: both intersection
+        // paths write every entry, with t = -1 on a miss.
 
         // tracing
         dim3 numblocksPathSegmentTracing = (num_paths + blockSize1d - 1) / blockSize1d;
-        intersectScene(depth, num_paths, numMaterials);
+        intersectScene(num_paths, numMaterials);
         checkCUDAError("trace one bounce");
         cudaDeviceSynchronize();
         depth++;

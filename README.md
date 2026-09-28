@@ -27,6 +27,8 @@ Render without a viewport
 | `--out path.png` | Write exactly this file. Default is the usual `img/auto_saved/<FILE>.<time>.<spp>samp.png` |
 | `--no-rr` | Disable Russian roulette |
 | `--no-sort` | Disable the material sort before shading |
+| `--no-optix` | Intersect with the naive per-object kernel instead of the OptiX stage |
+| `--optix-validate` | OptiX validation mode: checks every launch, slow |
 | `--tonemap none\|aces\|agx\|agx-punchy` | View transform for viewport and PNG. Default `agx`. `none` is the raw clamp the base code shipped with |
 | `--exposure X` | Linear multiplier before the view transform. Default 1.0 |
 
@@ -48,6 +50,50 @@ Same accumulation buffer through each transform. Glass Cornell, 600x600, 1000 sp
 | ![ACES Narkowicz](img/readme/tonemap_aces_narkowicz.png) | ![ACES Hill](img/readme/tonemap_aces_hill.png) |
 | **AgX** | **AgX punchy** |
 | ![AgX](img/readme/tonemap_agx.png) | ![AgX punchy](img/readme/tonemap_agx_punchy.png) |
+
+### Meshes: glTF loading
+
+glTF files load through [tinygltf](https://github.com/syoyo/tinygltf) (v2.9.7, the last C++ header; v3 is a C rewrite). A scene object of `"TYPE":"mesh"` names the file, relative to the scene file's folder:
+
+```json
+{
+    "TYPE":"mesh",
+    "FILE":"assets/Duck/glTF/Duck.gltf",
+    "MATERIAL":"glass",
+    "TRANS":[0.0,-0.3,0.0], "ROTAT":[0.0,-25.0,0.0], "SCALE":[3.0,3.0,3.0]
+}
+```
+
+The loader walks the file's default scene, multiplies node transforms down the tree, and makes one instance per (node, primitive) pair: the object's TRANS/ROTAT/SCALE times the node's world matrix. The positions, normals and triangle indices of every primitive go into one flat array each on the `Scene`, read through the accessor's buffer view and stride, with a per-primitive record of where its triangles start. A primitive without normals gets area-weighted vertex normals. `MATERIAL` is optional: without it the file's materials are appended to the scene's material list as diffuse with the base color factor. Textures, metallic-roughness and tangents are not read yet.
+
+Both intersection paths read the same arrays. The naive kernel loops over every triangle of every mesh instance in object space (two-sided Moller-Trumbore). OptiX builds one triangle GAS per primitive over the same buffers and one instance per scene object; its closest-hit program finds the triangle through a per-instance record and interpolates the vertex normal from the barycentrics. Same conventions on both sides: the geometric normal decides `outside`, the shading normal is flipped to face the ray on a back-face hit, so refraction through a mesh works the same as through the built-in sphere.
+
+#### Test assets
+
+Models come from [KhronosGroup/glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets), folder `Models/<name>/glTF/`, and are expected under `scenes/assets/<name>/glTF/`. That folder is gitignored; the `.gltf` and `.bin` are enough since textures are not read yet.
+
+| model | triangles | scene file | credit |
+|---|---|---|---|
+| Box | 12 | `cornell_boxmesh.json` | Cesium, 2017, CC BY 4.0 |
+| Duck | 4,212 | `cornell_duck.json` | Sony, 2006, SCEA Shared Source License 1.0 |
+| Suzanne | 3,936 | `cornell_suzanne.json` | Norbert Nopper / UX3D, 2017, CC0 |
+| DamagedHelmet | 15,452 | `cornell_helmet.json` | theblueturtle_, 2016, CC BY-NC 4.0; glTF rebuild by ctxwing, 2018, CC BY 4.0 |
+| Sponza | 262,267 | `sponza.json` | Crytek (Frank Meinl), CryENGINE Limited License Agreement, glTF conversion from the Khronos repo |
+
+#### Naive loop vs OptiX by triangle count
+
+1024x1024, DEPTH 8, ms per sample, median of 3 runs, GPU otherwise idle. `--no-optix` runs the naive kernel.
+
+| scene | triangles | naive | OptiX |
+|---|---|---|---|
+| Cornell with the two Box cubes | 24 | 6.07 | 5.76 |
+| Duck | 4,212 | 80.6 | 5.67 |
+| DamagedHelmet | 15,452 | 300.0 | 5.96 |
+| Sponza | 262,267 | 5,947 | 8.30 |
+
+![Naive loop vs OptiX by triangle count](img/readme/mesh_naive_vs_optix.png)
+
+The naive kernel's time grows linearly with the triangle count, about 20 ms per sample per thousand triangles at this resolution, because every path tests every triangle of every instance at every bounce. OptiX stays at the Cornell frame time until Sponza, where traversing 103 GASes in a scene with far more surface to bounce off adds 2.6 ms.
 
 ### Performance optimization
 
@@ -85,6 +131,16 @@ At 1024x1024 the frame went from 22.90 to 2.07 ms per sample, 11x. Device LTO is
 ### Issues along the way
 
 Things that went wrong and what they turned out to be. Kept as a running log.
+
+#### The OptiX cube kept the outward normal on exit hits
+
+`boxIntersectionTest` returns the normal facing the ray on both entry and exit (on the exit face it stores the slab's entering normal, which points back inside). The OptiX cube hit program returned the face's outward normal in both cases. Nothing in Cornell starts a ray inside a wall, and the glass tests used the sphere, so the two paths agreed on every scene until the Box model test: a glass cube as a mesh rendered right on both paths, while the same cube as a scene cube came out dark under OptiX (mean 72 vs 78 of 255). The mesh hit program had been written with the flip, the cube one had not. One sign flip on the inside branch, and the cube scene matches the naive path to the same 4 levels as the mesh scenes.
+
+600x600, 1000 spp, DEPTH 8, AgX, OptiX:
+
+| Outward normal on exit | Normal facing the ray |
+|:---:|:---:|
+| ![Dark glass cube](img/bloopers/cornell_boxcube_optix_dark_glass_cube.png) | ![Fixed glass cube](img/readme/cornell_boxcube_optix_fixed.png) |
 
 #### Schlick used the wrong cosine on exit
 

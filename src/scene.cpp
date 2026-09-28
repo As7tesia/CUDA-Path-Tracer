@@ -1,5 +1,6 @@
 #include "scene.h"
 
+#include "gltf_loader.h"
 #include "utilities.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
@@ -67,30 +68,60 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
         MatNameToID[name] = materials.size();
         materials.emplace_back(newMaterial);
     }
+    // Material by name. The map's operator[] would silently insert 0 for a
+    // typo, which is the light in every Cornell scene.
+    auto materialIndex = [&](const std::string& name) -> int {
+        auto found = MatNameToID.find(name);
+        if (found == MatNameToID.end())
+        {
+            cout << "Unknown material " << name << endl;
+            exit(-1);
+        }
+        return (int)found->second;
+    };
+
+    // FILE paths in the scene are relative to the scene file's folder.
+    const std::string sceneDir = jsonName.substr(0, jsonName.find_last_of("/\\") + 1);
     const auto& objectsData = data["Objects"];
     for (const auto& p : objectsData)
     {
         const auto& type = p["TYPE"];
-        Geom newGeom;
-        if (type == "cube")
-        {
-            newGeom.type = CUBE;
-        }
-        else
-        {
-            newGeom.type = SPHERE;
-        }
-        newGeom.materialid = MatNameToID[p["MATERIAL"]];
         const auto& trans = p["TRANS"];
         const auto& rotat = p["ROTAT"];
         const auto& scale = p["SCALE"];
-        newGeom.translation = glm::vec3(trans[0], trans[1], trans[2]);
-        newGeom.rotation = glm::vec3(rotat[0], rotat[1], rotat[2]);
-        newGeom.scale = glm::vec3(scale[0], scale[1], scale[2]);
-        newGeom.transform = utilityCore::buildTransformationMatrix(
-            newGeom.translation, newGeom.rotation, newGeom.scale);
-        newGeom.inverseTransform = glm::inverse(newGeom.transform);
-        newGeom.invTranspose = glm::inverseTranspose(newGeom.transform);
+        const glm::vec3 translation(trans[0], trans[1], trans[2]);
+        const glm::vec3 rotation(rotat[0], rotat[1], rotat[2]);
+        const glm::vec3 scaling(scale[0], scale[1], scale[2]);
+        const glm::mat4 transform = utilityCore::buildTransformationMatrix(translation, rotation, scaling);
+
+        if (type == "mesh")
+        {
+            // A glTF file: its nodes and primitives become Geoms of type MESH
+            // under this transform. MATERIAL, when given, replaces the file's
+            // materials; without it they are appended to the material list.
+            if (!p.contains("FILE"))
+            {
+                cout << "Mesh object without a FILE" << endl;
+                exit(-1);
+            }
+            const int materialOverride = p.contains("MATERIAL") ? materialIndex(p["MATERIAL"].get<std::string>()) : -1;
+            if (!loadGltf(sceneDir + std::string(p["FILE"]), transform, materialOverride, *this))
+            {
+                exit(-1);
+            }
+            continue;
+        }
+
+        Geom newGeom{};
+        newGeom.type = (type == "cube") ? CUBE : SPHERE;
+        newGeom.materialid = materialIndex(p["MATERIAL"].get<std::string>());
+        newGeom.meshId = -1;
+        newGeom.translation = translation;
+        newGeom.rotation = rotation;
+        newGeom.scale = scaling;
+        newGeom.transform = transform;
+        newGeom.inverseTransform = glm::inverse(transform);
+        newGeom.invTranspose = glm::inverseTranspose(transform);
 
         geoms.push_back(newGeom);
     }

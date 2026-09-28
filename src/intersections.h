@@ -71,3 +71,22 @@ __host__ __device__ float sphereIntersectionTest(
     glm::vec3& intersectionPoint,
     glm::vec3& normal,
     bool& outside);
+
+/**
+ * Test intersection between a ray and one instance of a triangle mesh: every
+ * triangle of `mesh` under geom's transform, closest hit wins. The normal is
+ * the vertex normal interpolated at the hit, flipped to face the ray when the
+ * ray hit the back face, like sphereIntersectionTest. `outside` is whether
+ * the ray hit the front face (counterclockwise winding seen from the ray),
+ * which for a closed mesh means the ray came from outside.
+ *
+ * @return  Ray parameter `t` value. -1 if no intersection.
+ */
+__host__ __device__ float meshIntersectionTest(
+    const Geom& geom,
+    const TriangleMesh& mesh,
+    const MeshBuffers& buffers,
+    Ray r,
+    glm::vec3& intersectionPoint,
+    glm::vec3& normal,
+    bool& outside);

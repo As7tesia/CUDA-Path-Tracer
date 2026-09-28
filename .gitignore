@@ -562,3 +562,6 @@ xcuserdata
 img/auto_saved/*.png
 imgui.ini
 img/test/
+
+# glTF test models (downloaded, see the README's asset list)
+scenes/assets/

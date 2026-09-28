@@ -65,6 +65,7 @@ set(OPTIX_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/external/include/optix")
 include_directories(${OPTIX_INCLUDE_DIR})
 
 set(headers
+    src/gltf_loader.h
     src/image.h
     src/interactions.h
     src/intersections.h
@@ -82,6 +83,7 @@ set(headers
 set(sources
     src/main.cpp
     src/stb.cpp
+    src/gltf_loader.cpp
     src/image.cpp
     src/glslUtility.cpp
     src/pathtrace.cu

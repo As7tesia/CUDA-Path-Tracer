@@ -57,10 +57,15 @@ extern "C" __global__ void __miss__paths()
     params.materialIds[i] = params.numMaterials;
 }
 
-static __forceinline__ __device__ void writeHit(glm::vec3 normal, bool outside)
+// The hit instance's record: material, and mesh for MESH instances.
+static __forceinline__ __device__ InstanceRecord instance()
+{
+    return params.instances[optixGetInstanceId()];
+}
+
+static __forceinline__ __device__ void writeHit(int materialId, glm::vec3 normal, bool outside)
 {
     const unsigned int i = optixGetLaunchIndex().x;
-    const int materialId = params.geoms[optixGetInstanceId()].materialid;
 
     ShadeableIntersection isect;
     isect.t = optixGetRayTmax();
@@ -73,8 +78,9 @@ static __forceinline__ __device__ void writeHit(glm::vec3 normal, bool outside)
 
 // Unit cube GAS: 12 triangles, two per face, in the order -x +x -y +y -z +z
 // (see buildCubeGas), so the primitive index says which face was hit. Like
-// boxIntersectionTest the normal is the face's outward normal even when the
-// ray started inside the cube, and outside comes from where the ray started.
+// boxIntersectionTest the normal faces the ray: the face's outward normal
+// when the ray came from outside, the inward one when the ray started inside
+// the cube and is leaving (the exit hit of a refractive cube).
 extern "C" __global__ void __closesthit__cube()
 {
     const unsigned int face = optixGetPrimitiveIndex() / 2;
@@ -90,7 +96,12 @@ extern "C" __global__ void __closesthit__cube()
     const float3 origin = optixTransformPointFromWorldToObjectSpace(optixGetWorldRayOrigin());
     const bool outside = fmaxf(fabsf(origin.x), fmaxf(fabsf(origin.y), fabsf(origin.z))) > 0.5f;
 
-    writeHit(glm::normalize(toVec3(worldNormal)), outside);
+    glm::vec3 normal = glm::normalize(toVec3(worldNormal));
+    if (!outside)
+    {
+        normal = -normal;
+    }
+    writeHit(instance().materialId, normal, outside);
 }
 
 // Unit sphere GAS: one custom primitive, center at the origin, radius 0.5,
@@ -164,5 +175,51 @@ extern "C" __global__ void __closesthit__sphere()
         normal = -normal;
     }
 
-    writeHit(normal, outside);
+    writeHit(instance().materialId, normal, outside);
+}
+
+// Mesh GAS: OptiX's built-in triangle intersection reports which triangle of
+// the instance's TriangleMesh was hit and where on it (barycentrics u, v
+// weighting vertices 1 and 2). The vertex data comes from the same flat
+// arrays the naive kernel reads. Same conventions as meshIntersectionTest:
+// the geometric normal decides outside, the interpolated vertex normal is
+// the shading normal, flipped to face the ray on a back-face hit.
+extern "C" __global__ void __closesthit__mesh()
+{
+    const InstanceRecord inst = instance();
+    const TriangleMesh mesh = params.buffers.meshes[inst.meshId];
+    const glm::ivec3 tri = params.buffers.indices[mesh.indexOffset + optixGetPrimitiveIndex()];
+    const glm::vec3 p0 = params.buffers.positions[tri.x];
+    const glm::vec3 p1 = params.buffers.positions[tri.y];
+    const glm::vec3 p2 = params.buffers.positions[tri.z];
+
+    // Object-space direction, transformed by hand since a closest-hit program
+    // cannot read the object ray. Only its sign against the geometric normal
+    // matters, and that is the same in object and world space.
+    const glm::vec3 d = toVec3(optixTransformVectorFromWorldToObjectSpace(optixGetWorldRayDirection()));
+    const glm::vec3 geometricNormal = glm::cross(p1 - p0, p2 - p0);
+    const bool outside = glm::dot(geometricNormal, d) < 0.0f;
+
+    const float2 bary = optixGetTriangleBarycentrics();
+    const glm::vec3 n = (1.0f - bary.x - bary.y) * params.buffers.normals[tri.x]
+                      + bary.x * params.buffers.normals[tri.y]
+                      + bary.y * params.buffers.normals[tri.z];
+    glm::vec3 normal = glm::normalize(toVec3(optixTransformNormalFromObjectToWorldSpace(toFloat3(n))));
+    if (!outside)
+    {
+        normal = -normal;
+    }
+    // Same fallback as meshIntersectionTest: a smooth vertex normal near a
+    // silhouette can point away from the ray even on a front-face hit, and
+    // scatterRay needs one that faces it, so use the geometric normal there.
+    if (glm::dot(normal, toVec3(optixGetWorldRayDirection())) > 0.0f)
+    {
+        normal = glm::normalize(toVec3(optixTransformNormalFromObjectToWorldSpace(toFloat3(geometricNormal))));
+        if (!outside)
+        {
+            normal = -normal;
+        }
+    }
+
+    writeHit(inst.materialId, normal, outside);
 }

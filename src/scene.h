@@ -21,5 +21,12 @@ public:
 
     std::vector<Geom> geoms;
     std::vector<Material> materials;
+    // Triangle meshes from glTF files, flattened: every primitive appends its
+    // vertices and triangles here and gets a TriangleMesh saying where its
+    // triangles are. Empty when the scene has no meshes.
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals;
+    std::vector<glm::ivec3> indices;
+    std::vector<TriangleMesh> meshes;
     RenderState state;
 };
