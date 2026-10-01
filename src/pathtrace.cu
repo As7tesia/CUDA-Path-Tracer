@@ -12,6 +12,8 @@
 #include "utilities.h"
 #include "intersections.h"
 #include "interactions.h"
+#include "bsdf.h"
+#include "material_textures.h"
 #include "wavefront_ops.h"
 #include "optix_intersect.h"
 #include "textures.h"
@@ -160,6 +162,7 @@ void pathtraceInit(Scene* scene)
     dev_mesh.positions = uploadVector(scene->positions);
     dev_mesh.normals = uploadVector(scene->normals);
     dev_mesh.uvs = uploadVector(scene->uvs);
+    dev_mesh.tangents = uploadVector(scene->tangents);
     dev_mesh.indices = uploadVector(scene->indices);
     dev_mesh.meshes = uploadVector(scene->meshes);
 
@@ -168,7 +171,7 @@ void pathtraceInit(Scene* scene)
     // OptiX intersection stage: context, acceleration structures, pipeline
     // and shader binding table, built once for this scene. If the driver has
     // no OptiX or any step fails, computeIntersections stays in use.
-    optixReady = useOptix && optixIntersectInit(scene, dev_mesh, optixValidation);
+    optixReady = useOptix && optixIntersectInit(scene, dev_mesh, dev_materials, dev_textures, optixValidation);
     if (useOptix && !optixReady)
     {
         fprintf(stderr, "OptiX unavailable, using the naive intersection kernel\n");
@@ -194,6 +197,7 @@ void pathtraceFree()
     cudaFree(dev_mesh.positions);
     cudaFree(dev_mesh.normals);
     cudaFree(dev_mesh.uvs);
+    cudaFree(dev_mesh.tangents);
     cudaFree(dev_mesh.indices);
     cudaFree(dev_mesh.meshes);
     dev_mesh = {};
@@ -262,6 +266,8 @@ __global__ void computeIntersections(
     Geom* geoms,
     int geoms_size,
     MeshBuffers buffers,
+    const Material* materials,
+    const cudaTextureObject_t* textures,
     ShadeableIntersection* intersections)
 {
     int path_index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -274,6 +280,7 @@ __global__ void computeIntersections(
         glm::vec3 intersect_point;
         glm::vec3 normal;
         glm::vec2 uv;
+        glm::vec4 tangent;
         float t_min = FLT_MAX;
         int hit_geom_index = -1;
         bool closest_outside;
@@ -281,6 +288,7 @@ __global__ void computeIntersections(
         glm::vec3 tmp_intersect;
         glm::vec3 tmp_normal;
         glm::vec2 tmp_uv;
+        glm::vec4 tmp_tangent;
         bool tmp_outside;
 
         // naive parse through global geoms
@@ -289,8 +297,9 @@ __global__ void computeIntersections(
         {
             Geom& geom = geoms[i];
 
-            // Only meshes have texture coordinates.
+            // Only meshes have texture coordinates and tangents.
             tmp_uv = glm::vec2(0.0f);
+            tmp_tangent = glm::vec4(0.0f);
             if (geom.type == CUBE)
             {
                 t = boxIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, tmp_outside);
@@ -301,8 +310,8 @@ __global__ void computeIntersections(
             }
             else  // MESH: every triangle of the instanced mesh
             {
-                t = meshIntersectionTest(geom, buffers.meshes[geom.meshId], buffers, pathSegment.ray,
-                    tmp_intersect, tmp_normal, tmp_uv, tmp_outside);
+                t = meshIntersectionTest(geom, buffers.meshes[geom.meshId], buffers, materials[geom.materialid],
+                    textures, pathSegment.ray, tmp_intersect, tmp_normal, tmp_uv, tmp_tangent, tmp_outside);
             }
 
             // Compute the minimum t from the intersection tests to determine what
@@ -314,6 +323,7 @@ __global__ void computeIntersections(
                 intersect_point = tmp_intersect;
                 normal = tmp_normal;
                 uv = tmp_uv;
+                tangent = tmp_tangent;
                 closest_outside = tmp_outside;
             }
         }
@@ -333,6 +343,7 @@ __global__ void computeIntersections(
             materialIDs[path_index] = geoms[hit_geom_index].materialid;
             intersections[path_index].surfaceNormal = normal;
             intersections[path_index].uv = uv;
+            intersections[path_index].tangent = tangent;
             intersections[path_index].outside = closest_outside;
         }
     }
@@ -358,6 +369,8 @@ static void intersectScene(int numPaths, int numMaterials)
         dev_geoms,
         hst_scene->geoms.size(),
         dev_mesh,
+        dev_materials,
+        dev_textures,
         dev_intersections
     );
 }
@@ -389,26 +402,33 @@ __global__ void shadeMaterial(
         {
             // Set up the RNG
             thrust::default_random_engine rng = makeSeededRandomEngine(iter, seg.pixelIndex, seg.remainingBounces);
-            Material material = materials[intersection.materialId];
-            // The texture unit has already decoded an sRGB base color to
-            // linear, and filters after decoding, so the sample scales the
-            // factor directly. scatterRay reads the result from material.color.
-            if (material.baseColorTexture >= 0)
-            {
-                const float4 texel = tex2D<float4>(textures[material.baseColorTexture],
-                    intersection.uv.x, intersection.uv.y);
-                material.color *= glm::vec3(texel.x, texel.y, texel.z);
-            }
-            glm::vec3 materialColor = material.color;
-            // glm::vec3 materialColor = intersection.surfaceNormal;
+            const Material& material = materials[intersection.materialId];
+            const glm::vec3 hitPoint = seg.ray.origin + intersection.t * seg.ray.direction;
 
-            // If the material indicates that the object was a light
-            if (material.emittance > 0.0f) {
-                seg.color *= (materialColor * material.emittance);
+            // A scene file's light only emits, so the path ends on it
+            if (material.type == EMISSIVE) {
+                seg.color *= (material.color * material.emittance);
                 seg.remainingBounces = 0;
             }
             else {
-                // ran out of bounces without hitting light
+                // A glTF material: the texture lookups happen once per hit.
+                // A back-face hit means the path crossed the inside of the
+                // object to get here, and a volume absorbed part of it on the
+                // way (Beer-Lambert over the distance t). An emissive surface
+                // adds its light now and the path goes on: glTF emitters also
+                // reflect, like any other surface.
+                PbrSurface surface;
+                if (material.type == PBR) {
+                    surface = pbrSurface(material, intersection, -seg.ray.direction, textures);
+                    if (!intersection.outside && material.absorption != glm::vec3(0.0f)) {
+                        seg.color *= glm::exp(-material.absorption * intersection.t);
+                    }
+                    if (surface.emission != glm::vec3(0.0f)) {
+                        image[seg.pixelIndex] += seg.color * surface.emission;
+                    }
+                }
+
+                // ran out of bounces: the next ray would not be traced
                 if (seg.remainingBounces == 1) {
                     seg.color = glm::vec3(0.f);
                     seg.remainingBounces = 0;
@@ -435,10 +455,19 @@ __global__ void shadeMaterial(
                     
                     // keep bouncing, guard is so that terminated rays from roulette above doesn't continue into scatterRay
                     if (seg.remainingBounces > 0) {
-                        scatterRay(seg,
-                            seg.ray.origin + intersection.t * seg.ray.direction,
-                            intersection.surfaceNormal, intersection.outside, material, rng);
-                        --seg.remainingBounces;
+                        if (material.type == PBR) {
+                            // a sample that carries no light ends the path
+                            if (scatterPbr(seg, hitPoint, intersection.surfaceNormal, intersection.outside,
+                                    material, surface, rng)) {
+                                --seg.remainingBounces;
+                            } else {
+                                seg.color = glm::vec3(0.f);
+                                seg.remainingBounces = 0;
+                            }
+                        } else {
+                            scatterRay(seg, hitPoint, intersection.surfaceNormal, intersection.outside, material, rng);
+                            --seg.remainingBounces;
+                        }
                     }
                 }
             }

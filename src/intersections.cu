@@ -1,5 +1,7 @@
 #include "intersections.h"
 
+#include "material_textures.h"
+
 #include <cfloat>
 
 __host__ __device__ float boxIntersectionTest(
@@ -150,14 +152,17 @@ __host__ __device__ static bool rayTriangle(
     return t > 0.0f;
 }
 
-__host__ __device__ float meshIntersectionTest(
+__device__ float meshIntersectionTest(
     const Geom& geom,
     const TriangleMesh& mesh,
     const MeshBuffers& buffers,
+    const Material& material,
+    const cudaTextureObject_t* textures,
     Ray r,
     glm::vec3& intersectionPoint,
     glm::vec3& normal,
     glm::vec2& uv,
+    glm::vec4& tangent,
     bool& outside)
 {
     // Object space, with the direction normalized like the other tests, so
@@ -166,6 +171,7 @@ __host__ __device__ float meshIntersectionTest(
     const glm::vec3 o = multiplyMV(geom.inverseTransform, glm::vec4(r.origin, 1.0f));
     const glm::vec3 d = glm::normalize(multiplyMV(geom.inverseTransform, glm::vec4(r.direction, 0.0f)));
 
+    const bool masked = material.alphaMode == ALPHA_MASK;
     float tMin = FLT_MAX;
     int hit = -1;
     float hitU = 0.0f;
@@ -179,6 +185,16 @@ __host__ __device__ float meshIntersectionTest(
         if (rayTriangle(o, d, buffers.positions[tri.x], buffers.positions[tri.y], buffers.positions[tri.z], t, u, v)
             && t < tMin)
         {
+            // Only a hit that would become the closest is alpha tested, so
+            // a masked mesh reads the texture for few of its triangles.
+            if (masked)
+            {
+                const glm::vec2 hitUv = (1.0f - u - v) * buffers.uvs[tri.x] + u * buffers.uvs[tri.y] + v * buffers.uvs[tri.z];
+                if (alphaCutOut(material, hitUv, textures))
+                {
+                    continue;
+                }
+            }
             tMin = t;
             hit = i;
             hitU = u;
@@ -226,6 +242,16 @@ __host__ __device__ float meshIntersectionTest(
     uv = (1.0f - hitU - hitV) * buffers.uvs[tri.x]
        + hitU * buffers.uvs[tri.y]
        + hitV * buffers.uvs[tri.z];
+
+    // A tangent lies in the surface, so it goes to world space with the
+    // transform itself. A mirroring transform flips the bitangent the cross
+    // product gives, so the sign flips with it. The sign is the same at all
+    // three vertices of a triangle.
+    const glm::vec3 tObject = (1.0f - hitU - hitV) * glm::vec3(buffers.tangents[tri.x])
+                            + hitU * glm::vec3(buffers.tangents[tri.y])
+                            + hitV * glm::vec3(buffers.tangents[tri.z]);
+    const float mirror = glm::determinant(glm::mat3(geom.transform)) < 0.0f ? -1.0f : 1.0f;
+    tangent = glm::vec4(multiplyMV(geom.transform, glm::vec4(tObject, 0.0f)), mirror * buffers.tangents[tri.x].w);
 
     intersectionPoint = multiplyMV(geom.transform, glm::vec4(o + tMin * d, 1.0f));
     return glm::length(r.origin - intersectionPoint);

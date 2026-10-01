@@ -5,12 +5,13 @@
 // The programs produce exactly what computeIntersections in pathtrace.cu
 // produces, so shadeMaterial and the material sort cannot tell the two apart:
 // t along the normalized ray, the surface normal with the same orientation
-// convention as the naive tests, the uv, the material id, the outside flag,
-// and the sort key. There is no payload: every program knows its launch
-// index and writes straight into the intersection buffer.
+// convention as the naive tests, the uv, the tangent, the material id, the
+// outside flag, and the sort key. There is no payload: every program knows
+// its launch index and writes straight into the intersection buffer.
 
 #include <optix.h>
 
+#include "material_textures.h"
 #include "optix_params.h"
 
 extern "C"
@@ -31,6 +32,8 @@ static __forceinline__ __device__ glm::vec3 toVec3(float3 v)
 // One thread per path: read its ray and trace it. The direction is normalized
 // so optixGetRayTmax() in the hit programs is a world-space distance, which is
 // what shadeMaterial expects when it rebuilds the hit point as origin + t * dir.
+// No ray flags: the geometry and instance flags (optix_intersect.cpp) leave
+// any-hit on for ALPHA_MASK instances only.
 extern "C" __global__ void __raygen__paths()
 {
     const unsigned int i = optixGetLaunchIndex().x;
@@ -42,7 +45,7 @@ extern "C" __global__ void __raygen__paths()
         1e16f,                 // tmax
         0.0f,                  // ray time, no motion blur
         OptixVisibilityMask(255),
-        OPTIX_RAY_FLAG_DISABLE_ANYHIT,
+        OPTIX_RAY_FLAG_NONE,
         0,                     // SBT offset, added to the instance's sbtOffset
         1,                     // SBT stride: one ray type
         0);                    // miss program index
@@ -63,7 +66,8 @@ static __forceinline__ __device__ InstanceRecord instance()
     return params.instances[optixGetInstanceId()];
 }
 
-static __forceinline__ __device__ void writeHit(int materialId, glm::vec3 normal, glm::vec2 uv, bool outside)
+static __forceinline__ __device__ void writeHit(int materialId, glm::vec3 normal, glm::vec2 uv, glm::vec4 tangent,
+    bool outside)
 {
     const unsigned int i = optixGetLaunchIndex().x;
 
@@ -71,6 +75,7 @@ static __forceinline__ __device__ void writeHit(int materialId, glm::vec3 normal
     isect.t = optixGetRayTmax();
     isect.surfaceNormal = normal;
     isect.uv = uv;
+    isect.tangent = tangent;
     isect.materialId = materialId;
     isect.outside = outside;
     params.intersections[i] = isect;
@@ -102,7 +107,7 @@ extern "C" __global__ void __closesthit__cube()
     {
         normal = -normal;
     }
-    writeHit(instance().materialId, normal, glm::vec2(0.0f), outside);
+    writeHit(instance().materialId, normal, glm::vec2(0.0f), glm::vec4(0.0f), outside);
 }
 
 // Unit sphere GAS: one custom primitive, center at the origin, radius 0.5,
@@ -176,7 +181,7 @@ extern "C" __global__ void __closesthit__sphere()
         normal = -normal;
     }
 
-    writeHit(instance().materialId, normal, glm::vec2(0.0f), outside);
+    writeHit(instance().materialId, normal, glm::vec2(0.0f), glm::vec4(0.0f), outside);
 }
 
 // Mesh GAS: OptiX's built-in triangle intersection reports which triangle of
@@ -185,7 +190,7 @@ extern "C" __global__ void __closesthit__sphere()
 // arrays the naive kernel reads. Same conventions as meshIntersectionTest:
 // the geometric normal decides outside, the interpolated vertex normal is
 // the shading normal, flipped to face the ray on a back-face hit, and the uv
-// is interpolated with the same weights.
+// and tangent are interpolated with the same weights.
 extern "C" __global__ void __closesthit__mesh()
 {
     const InstanceRecord inst = instance();
@@ -227,5 +232,38 @@ extern "C" __global__ void __closesthit__mesh()
                        + bary.x * params.buffers.uvs[tri.y]
                        + bary.y * params.buffers.uvs[tri.z];
 
-    writeHit(inst.materialId, normal, uv, outside);
+    // Like meshIntersectionTest: the tangent goes to world space with the
+    // transform itself, and the bitangent sign flips under a mirroring one.
+    const glm::vec4* tangents = params.buffers.tangents;
+    const glm::vec3 t = (1.0f - bary.x - bary.y) * glm::vec3(tangents[tri.x])
+                      + bary.x * glm::vec3(tangents[tri.y])
+                      + bary.y * glm::vec3(tangents[tri.z]);
+    float m[12];
+    optixGetObjectToWorldTransformMatrix(m);  // rows of the 3x4 matrix
+    const float det = m[0] * (m[5] * m[10] - m[6] * m[9])
+                    - m[1] * (m[4] * m[10] - m[6] * m[8])
+                    + m[2] * (m[4] * m[9] - m[5] * m[8]);
+    const glm::vec4 tangent(toVec3(optixTransformVectorFromObjectToWorldSpace(toFloat3(t))),
+                            (det < 0.0f ? -1.0f : 1.0f) * tangents[tri.x].w);
+
+    writeHit(inst.materialId, normal, uv, tangent, outside);
+}
+
+// Any-hit for ALPHA_MASK instances only (the others have it disabled by
+// their instance flags): a hit in a cut-out is ignored and traversal goes on,
+// the same test meshIntersectionTest makes. OptiX may call this more than
+// once for the same triangle; the test gives the same answer every time.
+extern "C" __global__ void __anyhit__mesh()
+{
+    const InstanceRecord inst = instance();
+    const TriangleMesh mesh = params.buffers.meshes[inst.meshId];
+    const glm::ivec3 tri = params.buffers.indices[mesh.indexOffset + optixGetPrimitiveIndex()];
+    const float2 bary = optixGetTriangleBarycentrics();
+    const glm::vec2 uv = (1.0f - bary.x - bary.y) * params.buffers.uvs[tri.x]
+                       + bary.x * params.buffers.uvs[tri.y]
+                       + bary.y * params.buffers.uvs[tri.z];
+    if (alphaCutOut(params.materials[inst.materialId], uv, params.textures))
+    {
+        optixIgnoreIntersection();
+    }
 }

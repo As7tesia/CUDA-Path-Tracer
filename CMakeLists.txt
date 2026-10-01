@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(cis565_path_tracer LANGUAGES CUDA CXX)
+project(cis565_path_tracer LANGUAGES C CUDA CXX)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
@@ -64,11 +64,20 @@ include_directories(${GLM_INCLUDE_DIRS})
 set(OPTIX_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/external/include/optix")
 include_directories(${OPTIX_INCLUDE_DIR})
 
+# MikkTSpace (Morten S. Mikkelsen, zlib license), vendored from
+# github.com/mmikk/MikkTSpace: generates the tangents of glTF meshes that have
+# a normal map and no TANGENT attribute (src/gltf_loader.cpp). Plain C, the
+# reason the project enables the C language.
+set(MIKKTSPACE_DIR "${CMAKE_SOURCE_DIR}/external/mikktspace")
+include_directories(${MIKKTSPACE_DIR})
+
 set(headers
+    src/bsdf.h
     src/gltf_loader.h
     src/image.h
     src/interactions.h
     src/intersections.h
+    src/material_textures.h
     src/glslUtility.hpp
     src/optix_intersect.h
     src/optix_params.h
@@ -88,6 +97,7 @@ set(sources
     src/image.cpp
     src/glslUtility.cpp
     src/pathtrace.cu
+    src/bsdf.cu
     src/intersections.cu
     src/interactions.cu
     src/optix_intersect.cpp
@@ -132,7 +142,9 @@ source_group("ImGui\\Sources" FILES ${imgui_sources})
 #add_subdirectory(src/ImGui)
 #add_subdirectory(stream_compaction)  # TODO: uncomment if using your stream compaction
 
-add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers} ${imgui_sources} ${imgui_headers})
+add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers} ${imgui_sources} ${imgui_headers}
+    ${MIKKTSPACE_DIR}/mikktspace.c ${MIKKTSPACE_DIR}/mikktspace.h)
+source_group("MikkTSpace" FILES ${MIKKTSPACE_DIR}/mikktspace.c ${MIKKTSPACE_DIR}/mikktspace.h)
 target_link_libraries(${CMAKE_PROJECT_NAME}
     ${GL_LIBRARIES}
     #stream_compaction  # TODO: uncomment if using your stream compaction
@@ -168,6 +180,7 @@ add_custom_command(
     DEPENDS ${optix_programs}
             "${CMAKE_SOURCE_DIR}/src/optix_params.h"
             "${CMAKE_SOURCE_DIR}/src/sceneStructs.h"
+            "${CMAKE_SOURCE_DIR}/src/material_textures.h"
     COMMENT "nvcc -optix-ir optix_programs.cu"
     VERBATIM)
 add_custom_command(

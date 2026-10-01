@@ -24,9 +24,10 @@ struct Ray
 
 // One glTF primitive: triCount consecutive triangles of the scene's flat
 // index array. Each index points into the flat vertex arrays (positions,
-// normals and uvs share it), already offset, so a triangle needs no base
-// vertex. A Geom of type MESH instances one of these under its transform;
-// several Geoms may share one (a mesh used by more than one glTF node).
+// normals, uvs and tangents share it), already offset, so a triangle needs no
+// base vertex. A Geom of type MESH instances one of these under its
+// transform; several Geoms may share one (a mesh used by more than one glTF
+// node).
 struct TriangleMesh
 {
     int indexOffset;  // first triangle in the index array
@@ -36,13 +37,17 @@ struct TriangleMesh
 // Device pointers to the scene's flat mesh arrays, uploaded once by
 // pathtraceInit and read by both intersection paths (the naive kernel loops
 // over them; OptiX builds its acceleration structures from them and reads the
-// normals and uvs in its hit program). Read-only after the upload.
+// vertex attributes in its hit programs). Read-only after the upload.
 struct MeshBuffers
 {
     glm::vec3* positions;
     glm::vec3* normals;     // per vertex, unit length, object space
     glm::vec2* uvs;         // per vertex, TEXCOORD_0; (0, 0) for a primitive without one
-    glm::ivec3* indices;    // per triangle, into positions / normals / uvs
+    // per vertex, object space: xyz along increasing u, w = +-1 the bitangent
+    // sign (bitangent = w * cross(normal, tangent), as in glTF); all zero for
+    // a primitive whose material has no normal map
+    glm::vec4* tangents;
+    glm::ivec3* indices;    // per triangle, into the vertex arrays
     TriangleMesh* meshes;   // indexed by Geom::meshId
 };
 
@@ -81,26 +86,60 @@ struct Geom
     glm::mat4 invTranspose;
 };
 
+// DIFFUSE, SPECULAR, REFRACTIVE and EMISSIVE come from scene JSON files and
+// are shaded by scatterRay. PBR is every glTF material: the metallic-roughness
+// model with the extensions bsdf.h lists, shaded by scatterPbr.
 enum MaterialType
 {
     DIFFUSE,
     SPECULAR,
     REFRACTIVE,
-    EMISSIVE
+    EMISSIVE,
+    PBR
+};
+
+// glTF's alpha modes. BLEND is loaded as OPAQUE.
+enum AlphaMode
+{
+    ALPHA_OPAQUE,
+    ALPHA_MASK  // a hit whose alpha is below alphaCutoff is no hit
 };
 
 struct Material
 {
     MaterialType type;
-    glm::vec3 color;
+    glm::vec3 color;  // PBR: the base color factor
     struct
     {
         float exponent;
         glm::vec3 color;
     } specular;
-    float ior;
-    float emittance;
-    int baseColorTexture = -1;  // into Scene::textures, multiplies color; -1 for none
+    float ior;        // REFRACTIVE; PBR: KHR_materials_ior, 0 meaning a Fresnel term of 1
+    float emittance;  // EMISSIVE: radiance is color * emittance
+
+    // PBR only, from the glTF material and its extensions. Every texture slot
+    // indexes Scene::textures (-1 for none), and the texture value multiplies
+    // the factor it belongs to.
+    float alpha = 1.0f;                           // base color factor alpha
+    AlphaMode alphaMode = ALPHA_OPAQUE;
+    float alphaCutoff = 0.5f;
+    float metallic = 1.0f;
+    float roughness = 1.0f;
+    float normalScale = 1.0f;                     // scales the normal map's x and y
+    glm::vec3 emission = glm::vec3(0.0f);         // emissive factor * KHR_materials_emissive_strength
+    float transmission = 0.0f;                    // KHR_materials_transmission
+    float specularFactor = 1.0f;                  // KHR_materials_specular
+    glm::vec3 specularColorFactor = glm::vec3(1.0f);
+    float clearcoat = 0.0f;                       // KHR_materials_clearcoat
+    float clearcoatRoughness = 0.0f;
+    // KHR_materials_volume: absorption per unit of world distance inside the
+    // object, -ln(attenuationColor) / attenuationDistance; zero without it
+    glm::vec3 absorption = glm::vec3(0.0f);
+    int baseColorTexture = -1;                    // sRGB rgb, linear alpha
+    int metallicRoughnessTexture = -1;            // G roughness, B metallic
+    int normalTexture = -1;                       // tangent space, +Y up
+    int emissiveTexture = -1;                     // sRGB
+    int transmissionTexture = -1;                 // R
 };
 
 struct Camera
@@ -143,6 +182,10 @@ struct ShadeableIntersection
   float t;
   glm::vec3 surfaceNormal;
   glm::vec2 uv;  // texture coordinates at the hit; (0, 0) on spheres and cubes
+  // World-space tangent at the hit (xyz, not unit length) and bitangent sign
+  // (w), see MeshBuffers::tangents. The sign already includes a mirroring
+  // instance transform. All zero on spheres, cubes and meshes without one.
+  glm::vec4 tangent;
   int materialId;
   bool outside;
 };

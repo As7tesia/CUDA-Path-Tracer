@@ -18,6 +18,8 @@
 #include "gltf_loader.h"
 #include "scene.h"
 
+#include "mikktspace.h"
+
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -224,12 +226,103 @@ float numberMember(const tinygltf::Value& object, const char* key, float fallbac
     return value.IsNumber() ? (float)value.GetNumberAsDouble() : fallback;
 }
 
+// One of a material's extensions as a JSON object, or a null value when the
+// material does not have it.
+const tinygltf::Value& extension(const tinygltf::Material& material, const char* name)
+{
+    static const tinygltf::Value null;
+    auto found = material.extensions.find(name);
+    return found == material.extensions.end() ? null : found->second;
+}
+
 // A number from one of a material's extensions, or fallback when the
 // material does not have the extension or the extension does not say.
-float extensionNumber(const tinygltf::Material& material, const char* extension, const char* key, float fallback)
+float extensionNumber(const tinygltf::Material& material, const char* name, const char* key, float fallback)
 {
-    auto found = material.extensions.find(extension);
-    return found == material.extensions.end() ? fallback : numberMember(found->second, key, fallback);
+    return numberMember(extension(material, name), key, fallback);
+}
+
+// A color (three numbers) from one of a material's extensions, or fallback.
+glm::vec3 extensionColor(const tinygltf::Material& material, const char* name, const char* key, glm::vec3 fallback)
+{
+    const tinygltf::Value& value = member(extension(material, name), key);
+    if (value.ArrayLen() != 3)
+    {
+        return fallback;
+    }
+    glm::vec3 color;
+    for (int i = 0; i < 3; ++i)
+    {
+        const tinygltf::Value& c = value.Get(i);
+        if (!c.IsNumber())
+        {
+            return fallback;
+        }
+        color[i] = (float)c.GetNumberAsDouble();
+    }
+    return color;
+}
+
+// A texture slot inside one of a material's extensions ({"index", "texCoord"}),
+// in the form tinygltf gives the core slots; index -1 when there is none.
+tinygltf::TextureInfo extensionTexture(const tinygltf::Material& material, const char* name, const char* key)
+{
+    const tinygltf::Value& slot = member(extension(material, name), key);
+    tinygltf::TextureInfo info;
+    info.index = (int)numberMember(slot, "index", -1.0f);
+    info.texCoord = (int)numberMember(slot, "texCoord", 0.0f);
+    return info;
+}
+
+// The material extensions this loader reads. Others are named once per file.
+const char* const kReadExtensions[] = {
+    "KHR_materials_emissive_strength",
+    "KHR_materials_ior",
+    "KHR_materials_transmission",
+    "KHR_materials_volume",
+    "KHR_materials_specular",
+    "KHR_materials_clearcoat",
+};
+
+bool isReadExtension(const std::string& name)
+{
+    for (const char* read : kReadExtensions)
+    {
+        if (name == read)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Names, once per file, what the materials ask for that the loader does not
+// do, so a render that differs from the asset's look explains itself. The
+// occlusion texture is left out on purpose and not named: it stands in for
+// the shadowing a path tracer computes anyway.
+void reportUnsupportedMaterialFeatures(const tinygltf::Model& model, const std::string& path)
+{
+    std::map<std::string, int> extensions;
+    int blend = 0;
+    for (const tinygltf::Material& material : model.materials)
+    {
+        for (const auto& e : material.extensions)
+        {
+            if (!isReadExtension(e.first))
+            {
+                ++extensions[e.first];
+            }
+        }
+        blend += material.alphaMode == "BLEND";
+    }
+    for (const auto& e : extensions)
+    {
+        fprintf(stderr, "glTF %s: %s ignored (%d materials)\n", path.c_str(), e.first.c_str(), e.second);
+    }
+    if (blend > 0)
+    {
+        fprintf(stderr, "glTF %s: alphaMode BLEND rendered opaque (%d materials)\n", path.c_str(), blend);
+    }
 }
 
 // The render settings of a research scene, see GltfRenderHints. Two are left
@@ -277,6 +370,72 @@ void reportUnusedLights(const tinygltf::Model& model, const std::string& path)
     }
 }
 
+// One primitive as MikkTSpace sees it: triangles over the primitive's own
+// vertices, and a tangent out for every triangle corner.
+struct MikkPrimitive
+{
+    const glm::vec3* positions;
+    const glm::vec3* normals;
+    const glm::vec2* uvs;
+    const std::vector<unsigned int>& indices;  // three per triangle
+    std::vector<glm::vec4> corners;            // tangent and sign per corner, filled by mikkSetTangent
+
+    unsigned int vertex(int face, int vert) const { return indices[face * 3 + vert]; }
+};
+
+const MikkPrimitive& mikkData(const SMikkTSpaceContext* context)
+{
+    return *static_cast<const MikkPrimitive*>(context->m_pUserData);
+}
+
+int mikkNumFaces(const SMikkTSpaceContext* context)
+{
+    return (int)(mikkData(context).indices.size() / 3);
+}
+
+int mikkNumVerticesOfFace(const SMikkTSpaceContext*, const int)
+{
+    return 3;
+}
+
+void mikkPosition(const SMikkTSpaceContext* context, float out[], const int face, const int vert)
+{
+    const MikkPrimitive& p = mikkData(context);
+    const glm::vec3 v = p.positions[p.vertex(face, vert)];
+    out[0] = v.x;
+    out[1] = v.y;
+    out[2] = v.z;
+}
+
+void mikkNormal(const SMikkTSpaceContext* context, float out[], const int face, const int vert)
+{
+    const MikkPrimitive& p = mikkData(context);
+    const glm::vec3 n = p.normals[p.vertex(face, vert)];
+    out[0] = n.x;
+    out[1] = n.y;
+    out[2] = n.z;
+}
+
+// glTF's v runs down the image, while MikkTSpace (and Blender, where most
+// normal maps are baked against it) take v up. MikkTSpace's bitangent follows
+// increasing v, and glTF wants it toward the top of the image (the normal
+// map's +Y), so it gets 1 - v. The tangent follows u and is the same either
+// way; only the sign changes.
+void mikkTexCoord(const SMikkTSpaceContext* context, float out[], const int face, const int vert)
+{
+    const MikkPrimitive& p = mikkData(context);
+    const glm::vec2 uv = p.uvs[p.vertex(face, vert)];
+    out[0] = uv.x;
+    out[1] = 1.0f - uv.y;
+}
+
+void mikkSetTangent(const SMikkTSpaceContext* context, const float tangent[], const float sign, const int face,
+    const int vert)
+{
+    MikkPrimitive& p = *static_cast<MikkPrimitive*>(context->m_pUserData);
+    p.corners[face * 3 + vert] = glm::vec4(tangent[0], tangent[1], tangent[2], sign < 0.0f ? -1.0f : 1.0f);
+}
+
 // State for one file: the model, the scene being filled, and the maps that
 // keep a primitive or a material shared by several nodes as one entry.
 struct Loader
@@ -298,20 +457,12 @@ struct Loader
         fprintf(stderr, "glTF %s: mesh %d primitive %d skipped: %s\n", path.c_str(), meshIndex, primIndex, what);
     }
 
-    // glTF materials become Diffuse with the base color factor times the base
-    // color texture for now; the metallic-roughness inputs wait for the GGX
-    // step. A primitive without a material gets glTF's default, white.
-    //
-    // A material that emits becomes Emitting. glTF's emission is the emissive
-    // factor times the emissive texture times the strength from
-    // KHR_materials_emissive_strength (1 without the extension), which maps
-    // onto color times emittance. Two things are missing until the material
-    // model grows in the GGX step:
-    // - An emitter only emits. The shade kernel ends a path at a light, so
-    //   the base color and its texture are dropped for an emitting material.
-    // - A material with an emissive texture does not emit. Emissive textures
-    //   are not read, and the factor alone would light up the whole surface
-    //   (DamagedHelmet: factor 1, texture black except for a few lamps).
+    // Every glTF material becomes a PBR material (bsdf.h): the core
+    // metallic-roughness factors and texture slots (base color,
+    // metallic-roughness, normal, emissive), the alpha mode, and the factors
+    // of the extensions in kReadExtensions. Of the extensions' textures only
+    // transmissionTexture is read. A primitive without a material gets glTF's
+    // default material: white, fully metallic, fully rough.
     int materialFor(int gltfMaterial)
     {
         if (materialOverride >= 0)
@@ -324,30 +475,74 @@ struct Loader
             return found->second;
         }
         Material m{};
-        m.type = DIFFUSE;
+        m.type = PBR;
         m.color = glm::vec3(1.0f);
+        m.ior = 1.5f;
         if (gltfMaterial >= 0 && gltfMaterial < (int)model.materials.size())
         {
             const tinygltf::Material& source = model.materials[gltfMaterial];
-            const std::vector<double>& base = source.pbrMetallicRoughness.baseColorFactor;
-            if (base.size() >= 3)
+            const tinygltf::PbrMetallicRoughness& pbr = source.pbrMetallicRoughness;
+            if (pbr.baseColorFactor.size() == 4)
             {
-                m.color = glm::vec3((float)base[0], (float)base[1], (float)base[2]);
+                m.color = glm::vec3((float)pbr.baseColorFactor[0], (float)pbr.baseColorFactor[1], (float)pbr.baseColorFactor[2]);
+                m.alpha = (float)pbr.baseColorFactor[3];
             }
+            m.metallic = (float)pbr.metallicFactor;
+            m.roughness = (float)pbr.roughnessFactor;
+            m.baseColorTexture = textureFor(pbr.baseColorTexture.index, pbr.baseColorTexture.texCoord, true);
+            m.metallicRoughnessTexture = textureFor(pbr.metallicRoughnessTexture.index, pbr.metallicRoughnessTexture.texCoord, false);
+            m.normalTexture = textureFor(source.normalTexture.index, source.normalTexture.texCoord, false);
+            m.normalScale = (float)source.normalTexture.scale;
+
+            // Emission is the emissive factor times the emissive texture
+            // times KHR_materials_emissive_strength (1 without it). A black
+            // factor leaves the texture nothing to scale.
             const std::vector<double>& e = source.emissiveFactor;
-            const glm::vec3 emissive = e.size() >= 3 ? glm::vec3((float)e[0], (float)e[1], (float)e[2]) : glm::vec3(0.0f);
-            const float strength = extensionNumber(source, "KHR_materials_emissive_strength", "emissiveStrength", 1.0f);
-            const bool textured = source.emissiveTexture.index >= 0;
-            if (!textured && strength > 0.0f && glm::max(emissive.r, glm::max(emissive.g, emissive.b)) > 0.0f)
+            const glm::vec3 emissive = e.size() == 3 ? glm::vec3((float)e[0], (float)e[1], (float)e[2]) : glm::vec3(0.0f);
+            m.emission = emissive * extensionNumber(source, "KHR_materials_emissive_strength", "emissiveStrength", 1.0f);
+            if (glm::max(m.emission.r, glm::max(m.emission.g, m.emission.b)) > 0.0f)
             {
-                m.type = EMISSIVE;
-                m.color = emissive;
-                m.emittance = strength;
+                m.emissiveTexture = textureFor(source.emissiveTexture.index, source.emissiveTexture.texCoord, true);
             }
-            else
+
+            if (source.alphaMode == "MASK")
             {
-                m.baseColorTexture = textureFor(source.pbrMetallicRoughness.baseColorTexture, true);
+                m.alphaMode = ALPHA_MASK;
+                m.alphaCutoff = (float)source.alphaCutoff;
             }
+
+            // ior 0 is glTF's code for a Fresnel term of 1; any other value
+            // below 1 is invalid and read as 1.
+            m.ior = extensionNumber(source, "KHR_materials_ior", "ior", 1.5f);
+            if (m.ior != 0.0f && m.ior < 1.0f)
+            {
+                m.ior = 1.0f;
+            }
+
+            m.transmission = glm::clamp(extensionNumber(source, "KHR_materials_transmission", "transmissionFactor", 0.0f), 0.0f, 1.0f);
+            if (m.transmission > 0.0f)
+            {
+                const tinygltf::TextureInfo slot = extensionTexture(source, "KHR_materials_transmission", "transmissionTexture");
+                m.transmissionTexture = textureFor(slot.index, slot.texCoord, false);
+            }
+
+            // KHR_materials_volume contributes only its absorption: every
+            // transmissive surface is a solid boundary here, so the
+            // thickness that tells thin-walled from solid is not read. An
+            // absent attenuation distance is infinite, no absorption.
+            const float distance = extensionNumber(source, "KHR_materials_volume", "attenuationDistance", 0.0f);
+            if (distance > 0.0f)
+            {
+                const glm::vec3 color = extensionColor(source, "KHR_materials_volume", "attenuationColor", glm::vec3(1.0f));
+                m.absorption = -glm::log(glm::clamp(color, glm::vec3(1e-6f), glm::vec3(1.0f))) / distance;
+            }
+
+            m.specularFactor = glm::clamp(extensionNumber(source, "KHR_materials_specular", "specularFactor", 1.0f), 0.0f, 1.0f);
+            m.specularColorFactor = glm::max(extensionColor(source, "KHR_materials_specular", "specularColorFactor", glm::vec3(1.0f)),
+                glm::vec3(0.0f));
+            m.clearcoat = glm::clamp(extensionNumber(source, "KHR_materials_clearcoat", "clearcoatFactor", 0.0f), 0.0f, 1.0f);
+            m.clearcoatRoughness = glm::clamp(
+                extensionNumber(source, "KHR_materials_clearcoat", "clearcoatRoughnessFactor", 0.0f), 0.0f, 1.0f);
         }
         const int id = (int)scene.materials.size();
         scene.materials.push_back(m);
@@ -355,30 +550,31 @@ struct Loader
         return id;
     }
 
-    // The Scene texture for one of a material's texture slots, or -1 when
-    // the slot is empty or its image is unusable; the material then uses its
-    // factor alone. srgb says the slot holds color (base color) rather than
-    // data. Only TEXCOORD_0 is loaded, so a slot that names another set is
-    // read with TEXCOORD_0.
-    int textureFor(const tinygltf::TextureInfo& slot, bool srgb)
+    // The Scene texture for one of a material's texture slots (glTF texture
+    // index and texture coordinate set), or -1 when the slot is empty or its
+    // image is unusable; the material then uses its factor alone. srgb says
+    // the slot holds color (base color, emissive) rather than data. Only
+    // TEXCOORD_0 is loaded, so a slot that names another set is read with
+    // TEXCOORD_0.
+    int textureFor(int index, int texCoord, bool srgb)
     {
-        if (slot.index < 0)
+        if (index < 0)
         {
             return -1;
         }
-        const std::pair<int, bool> key(slot.index, srgb);
+        const std::pair<int, bool> key(index, srgb);
         auto found = textureIds.find(key);
         if (found != textureIds.end())
         {
             return found->second;
         }
-        if (slot.texCoord != 0)
+        if (texCoord != 0)
         {
             fprintf(stderr, "glTF %s: texture %d reads TEXCOORD_%d, only TEXCOORD_0 is loaded\n",
-                path.c_str(), slot.index, slot.texCoord);
+                path.c_str(), index, texCoord);
         }
         int id = -1;
-        const tinygltf::Texture* source = slot.index < (int)model.textures.size() ? &model.textures[slot.index] : nullptr;
+        const tinygltf::Texture* source = index < (int)model.textures.size() ? &model.textures[index] : nullptr;
         const int image = imageFor(source != nullptr ? source->source : -1);
         if (image >= 0)
         {
@@ -628,11 +824,133 @@ struct Loader
             scene.uvs.resize(scene.uvs.size() + pos.count, glm::vec2(0.0f));
         }
 
+        // Tangents, which only a normal map uses: TANGENT when present and
+        // well formed, else generated when the primitive's material has a
+        // normal map, else zero (the shade kernel skips the map then).
+        auto tanAttr = prim.attributes.find("TANGENT");
+        AccessorView tan;
+        std::string tanErr;
+        if (tanAttr != prim.attributes.end() && viewAccessor(model, tanAttr->second, tan, tanErr)
+            && tan.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && tan.numComponents == 4 && tan.count == pos.count)
+        {
+            for (size_t i = 0; i < tan.count; ++i)
+            {
+                const float* f = reinterpret_cast<const float*>(tan.at(i));
+                scene.tangents.push_back(glm::vec4(f[0], f[1], f[2], f[3] < 0.0f ? -1.0f : 1.0f));
+            }
+        }
+        else
+        {
+            if (tanAttr != prim.attributes.end())
+            {
+                fprintf(stderr, "glTF %s: mesh %d primitive %d: TANGENT unusable (%s), generating it\n", path.c_str(),
+                    meshIndex, primIndex, tanErr.empty() ? "unsupported layout" : tanErr.c_str());
+            }
+            const bool normalMapped = materialOverride < 0 && prim.material >= 0 && prim.material < (int)model.materials.size()
+                && model.materials[prim.material].normalTexture.index >= 0;
+            if (normalMapped)
+            {
+                generateTangents(baseVertex, pos.count, indexOffset, triCount);
+            }
+            else
+            {
+                scene.tangents.resize(scene.tangents.size() + pos.count, glm::vec4(0.0f));
+            }
+        }
+
         TriangleMesh mesh;
         mesh.indexOffset = indexOffset;
         mesh.triCount = triCount;
         scene.meshes.push_back(mesh);
         return (int)scene.meshes.size() - 1;
+    }
+
+    // Tangents for a primitive whose file has none, the way glTF asks for
+    // them: MikkTSpace over the positions, normals and TEXCOORD_0, which is
+    // what normal maps are baked against. The primitive's vertices start at
+    // baseVertex and its triangles at indexOffset; positions, normals and
+    // uvs are already in the scene, tangents are appended here.
+    //
+    // MikkTSpace gives every triangle corner its own tangent. Corners that
+    // share a vertex nearly always agree; where they do not (a mirrored uv
+    // seam, a hard break in the tangent frame), the vertex is copied so each
+    // copy carries one tangent, and the corner is pointed at its copy.
+    void generateTangents(int baseVertex, size_t vertexCount, int indexOffset, int triCount)
+    {
+        std::vector<unsigned int> local((size_t)triCount * 3);
+        for (int t = 0; t < triCount; ++t)
+        {
+            for (int k = 0; k < 3; ++k)
+            {
+                local[3 * t + k] = (unsigned int)(scene.indices[indexOffset + t][k] - baseVertex);
+            }
+        }
+        MikkPrimitive data{ scene.positions.data() + baseVertex, scene.normals.data() + baseVertex,
+            scene.uvs.data() + baseVertex, local, std::vector<glm::vec4>(local.size(), glm::vec4(0.0f)) };
+        SMikkTSpaceInterface callbacks = {};
+        callbacks.m_getNumFaces = mikkNumFaces;
+        callbacks.m_getNumVerticesOfFace = mikkNumVerticesOfFace;
+        callbacks.m_getPosition = mikkPosition;
+        callbacks.m_getNormal = mikkNormal;
+        callbacks.m_getTexCoord = mikkTexCoord;
+        callbacks.m_setTSpaceBasic = mikkSetTangent;
+        SMikkTSpaceContext context = {};
+        context.m_pInterface = &callbacks;
+        context.m_pUserData = &data;
+        if (!genTangSpaceDefault(&context))
+        {
+            fprintf(stderr, "glTF %s: MikkTSpace failed, normal map skipped for a primitive\n", path.c_str());
+            scene.tangents.resize(scene.tangents.size() + vertexCount, glm::vec4(0.0f));
+            return;
+        }
+
+        // Each vertex keeps a list of the tangents its corners have asked for
+        // so far and which vertex (itself or a copy) carries each one.
+        struct Variant
+        {
+            glm::vec4 tangent;
+            unsigned int vertex;
+            int next;  // the vertex's next variant, -1 at the end
+        };
+        std::vector<int> firstVariant(vertexCount, -1);
+        std::vector<Variant> variants;
+        std::vector<glm::vec4> tangents(vertexCount, glm::vec4(0.0f));
+        for (size_t c = 0; c < local.size(); ++c)
+        {
+            const unsigned int v = local[c];
+            const glm::vec4 tangent = data.corners[c];
+            int k = firstVariant[v];
+            while (k >= 0 && variants[k].tangent != tangent)
+            {
+                k = variants[k].next;
+            }
+            unsigned int carrier;
+            if (k >= 0)
+            {
+                carrier = variants[k].vertex;
+            }
+            else
+            {
+                carrier = v;
+                if (firstVariant[v] >= 0)
+                {
+                    // Copied through locals: push_back may reallocate.
+                    const glm::vec3 position = scene.positions[baseVertex + v];
+                    const glm::vec3 normal = scene.normals[baseVertex + v];
+                    const glm::vec2 uv = scene.uvs[baseVertex + v];
+                    scene.positions.push_back(position);
+                    scene.normals.push_back(normal);
+                    scene.uvs.push_back(uv);
+                    carrier = (unsigned int)tangents.size();
+                    tangents.push_back(glm::vec4(0.0f));
+                }
+                tangents[carrier] = tangent;
+                variants.push_back({ tangent, carrier, firstVariant[v] });
+                firstVariant[v] = (int)variants.size() - 1;
+            }
+            scene.indices[indexOffset + c / 3][(int)(c % 3)] = baseVertex + (int)carrier;
+        }
+        scene.tangents.insert(scene.tangents.end(), tangents.begin(), tangents.end());
     }
 
     // Walks the node tree, accumulating transforms, and makes one Geom per
@@ -760,6 +1078,10 @@ bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int mate
         path.c_str(), scene.indices.size() - firstTriangle, scene.meshes.size() - firstMesh,
         scene.geoms.size() - firstGeom, lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
     reportUnusedLights(model, path);
+    if (materialOverride < 0)
+    {
+        reportUnsupportedMaterialFeatures(model, path);
+    }
 
     if (info != nullptr)
     {

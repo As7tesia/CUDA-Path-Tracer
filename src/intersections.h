@@ -79,16 +79,24 @@ __host__ __device__ float sphereIntersectionTest(
  * ray hit the back face, like sphereIntersectionTest. `outside` is whether
  * the ray hit the front face (counterclockwise winding seen from the ray),
  * which for a closed mesh means the ray came from outside. `uv` is the vertex
- * uvs interpolated at the hit.
+ * uvs interpolated at the hit, `tangent` the vertex tangents in world space
+ * (see ShadeableIntersection::tangent). Hits in the cut-outs of an
+ * ALPHA_MASK material do not count, the same test OptiX's any-hit program
+ * makes.
+ *
+ * Device only: the alpha test reads textures.
  *
  * @return  Ray parameter `t` value. -1 if no intersection.
  */
-__host__ __device__ float meshIntersectionTest(
+__device__ float meshIntersectionTest(
     const Geom& geom,
     const TriangleMesh& mesh,
     const MeshBuffers& buffers,
+    const Material& material,
+    const cudaTextureObject_t* textures,
     Ray r,
     glm::vec3& intersectionPoint,
     glm::vec3& normal,
     glm::vec2& uv,
+    glm::vec4& tangent,
     bool& outside);

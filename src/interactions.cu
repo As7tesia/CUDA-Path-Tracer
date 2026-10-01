@@ -113,7 +113,8 @@ __host__ __device__ void scatterRay(
         break;
     }
     default:
-        // EMISSIVE is handled in the shade kernel before scatterRay is called
+        // EMISSIVE is handled in the shade kernel before scatterRay is called,
+        // and PBR goes to scatterPbr (bsdf.cu) instead
         break;
     }
 }

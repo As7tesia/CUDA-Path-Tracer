@@ -201,7 +201,9 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
         exit(-1);
     }
     // Only a surface that emits lights a scene so far.
-    if (std::none_of(materials.begin(), materials.end(), [](const Material& m) { return m.emittance > 0.0f; }))
+    if (std::none_of(materials.begin(), materials.end(), [](const Material& m) {
+            return m.emittance > 0.0f || glm::max(m.emission.r, glm::max(m.emission.g, m.emission.b)) > 0.0f;
+        }))
     {
         cout << "No emissive material in " << gltfName << ": the render will be black" << endl;
     }

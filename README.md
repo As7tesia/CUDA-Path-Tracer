@@ -15,7 +15,7 @@ project, and we will not be able to grade you without a good README.
 
 ### Status
 
-What works today, and what each missing piece needs before it can work. Last updated 2026-09-30.
+What works today, and what each missing piece needs before it can work. Last updated 2026-10-01.
 
 #### glTF
 
@@ -23,30 +23,25 @@ A `.gltf` or `.glb` file loads in two ways: as the whole scene when it is the sc
 
 | Part | Works today |
 |---|---|
-| Geometry | Triangle lists with float positions, indexed or not. Normals come from the file, or are generated area-weighted when it has none. Node transforms as a matrix or as translation, rotation, scale. One instance per (node, primitive) pair |
+| Geometry | Triangle lists with float positions, indexed or not. Normals come from the file, or are generated area-weighted when it has none. Tangents come from the file, or are generated with MikkTSpace when the primitive's material has a normal map. Node transforms as a matrix or as translation, rotation, scale. One instance per (node, primitive) pair |
 | Camera | The first perspective camera in the node tree gives position, direction and `yfov`. A camera transform that mirrors flips the image. A file without a camera gets one that frames the scene's bounding sphere |
-| Lights | Emissive surfaces: `emissiveFactor` times `KHR_materials_emissive_strength` |
-| Materials | Diffuse with the base color factor times the base color texture, or an emitter |
-| Textures | Base color only. PNG and JPEG, as files next to the glTF, data URIs or buffer views, decoded by tinygltf through stb_image. 16-bit images are converted to 8 bits per channel. Texture coordinates from `TEXCOORD_0`, wrap modes and the magnification filter from the sampler, no mipmaps. The texture unit decodes sRGB to linear before filtering |
+| Lights | Emissive surfaces: `emissiveFactor` times the emissive texture times `KHR_materials_emissive_strength`. An emitter also reflects through its BSDF |
+| Materials | The glTF metallic-roughness BSDF with GGX microfacets (see [Materials](#materials-gltf-metallic-roughness)): base color, metallic, roughness, normal map, alpha mask, `KHR_materials_ior`, `_transmission`, `_volume` absorption, and the factors of `_specular` and `_clearcoat` |
+| Textures | Base color, metallic-roughness, normal, emissive and transmission. PNG and JPEG, as files next to the glTF, data URIs or buffer views, decoded by tinygltf through stb_image. 16-bit images are converted to 8 bits per channel. Texture coordinates from `TEXCOORD_0`, wrap modes and the magnification filter from the sampler, no mipmaps. The texture unit decodes sRGB (base color, emissive) to linear before filtering |
 | Render settings | glTF has none. Resolution and depth come from the flags, then from `extras.pbrt.render` when the file has it, then from the defaults (1024 high, depth 8). 5000 spp unless `--spp` is given |
 
 | glTF feature | What happens today | Needs |
 |---|---|---|
-| Metallic and roughness | Ignored. Every surface that does not emit is diffuse | GGX microfacet BSDF with the glTF metallic-roughness layering. The metallic-roughness map as a linear texture slot |
-| Normal map | Ignored | Tangents (read from the file or generated), the map as a linear texture slot, normal mapping in the shade kernel |
-| Glass: `KHR_materials_transmission`, `_ior`, `_volume` | Rendered as opaque diffuse | Microfacet transmission (GGX BTDF) and Beer-Lambert absorption in the material model |
-| Alpha mask | Ignored, masked surfaces are solid | An any-hit program in OptiX that reads the base color texture's alpha, with the same test in the naive kernel |
-| Emitter that also reflects | An emitting material only emits, its base color and base color texture are dropped | A material struct that carries emission next to the BSDF inputs. Today a material has one type, and the shade kernel ends the path at a light |
-| Emissive texture | A material with one does not emit at all, since the factor alone would light the whole surface | The emissive slot as an sRGB texture, read like base color |
+| Alpha blend | Rendered opaque: every Bistro material (the foliage) and Intel Sponza's `dirt_decal` | Alpha as coverage in the any-hit program that already handles alpha mask: the ray passes with probability 1 - alpha, from a random number both intersection paths can compute |
 | One-sided emitters (`doubleSided` false) | An emitter emits from both faces | A front-face test on emission in the shade kernel |
 | Environment light (PBRT infinite light in the research scenes) | Ignored, named on stderr | Environment lighting: radiance returned when a ray misses, from an HDRI map (`.exr`, `.pfm`) or a constant color |
 | Punctual lights (`KHR_lights_punctual`), PBRT distant lights | Ignored, named on stderr | Direct light sampling (next event estimation). These lights have no surface for a path to hit |
 | Scenes lit through a small opening (veach-ajar) | Mostly noise | Direct light sampling (next event estimation) |
 | Camera roll | Dropped, with a note printed | An interactive camera that keeps its own up vector. The orbit camera always uses world +Y |
 
-Of the 26 [glTF research scenes](https://github.com/ErfanMo77/gltf-research-scenes), 15 have an emissive surface and render, with every material diffuse and base color textures where the file has them. The other 11 render black: 10 are lit by an environment light, and dragon by a distant light alone.
+Of the 26 [glTF research scenes](https://github.com/ErfanMo77/gltf-research-scenes), 15 have an emissive surface and render with their glTF materials. The other 11 render black: 10 are lit by an environment light, and dragon by a distant light alone. cornell-caustic renders nearly black too, as it did with every material diffuse: its `extras.pbrt.render` names SPPM as the integrator.
 
-Skipped by the loader, with no work planned: alpha blend, occlusion maps, clearcoat, sheen and the other `KHR_materials_*` extensions, vertex colors, texture coordinate sets after `TEXCOORD_0`, `KHR_texture_transform`.
+Skipped by the loader, with no work planned: occlusion maps (they stand in for the shadowing a path tracer computes), the textures of `KHR_materials_specular` and `_clearcoat` (the clearcoat normal map among them), the thickness of `KHR_materials_volume`, sheen and the other `KHR_materials_*` extensions, vertex colors, texture coordinate sets after `TEXCOORD_0`, `KHR_texture_transform`. The loader names the extensions it skips and counts the blend materials on stderr.
 
 ### Headless rendering
 Render without a viewport
@@ -99,15 +94,15 @@ glTF files load through [tinygltf](https://github.com/syoyo/tinygltf) (v2.9.7, t
 }
 ```
 
-The loader walks the file's default scene, multiplies node transforms down the tree, and makes one instance per (node, primitive) pair: the object's TRANS/ROTAT/SCALE times the node's world matrix. The positions, normals, texture coordinates and triangle indices of every primitive go into one flat array each on the `Scene`, read through the accessor's buffer view and stride, with a per-primitive record of where its triangles start. A primitive without normals gets area-weighted vertex normals, one without `TEXCOORD_0` gets (0, 0) at every vertex. `MATERIAL` is optional: without it the file's materials are appended to the scene's material list as diffuse with the base color factor and texture. Metallic-roughness and tangents are not read yet.
+The loader walks the file's default scene, multiplies node transforms down the tree, and makes one instance per (node, primitive) pair: the object's TRANS/ROTAT/SCALE times the node's world matrix. The positions, normals, texture coordinates, tangents and triangle indices of every primitive go into one flat array each on the `Scene`, read through the accessor's buffer view and stride, with a per-primitive record of where its triangles start. A primitive without normals gets area-weighted vertex normals, one without `TEXCOORD_0` gets (0, 0) at every vertex. A primitive without `TANGENT` whose material has a normal map gets tangents from [MikkTSpace](https://github.com/mmikk/MikkTSpace) (Morten S. Mikkelsen, zlib license, vendored in `external/mikktspace/`), the generator glTF names and the one normal maps are baked against; every other primitive gets zero tangents. `MATERIAL` is optional: without it the file's materials are appended to the scene's material list (see [Materials](#materials-gltf-metallic-roughness)).
 
-Both intersection paths read the same arrays. The naive kernel loops over every triangle of every mesh instance in object space (two-sided Moller-Trumbore). OptiX builds one triangle GAS per primitive over the same buffers and one instance per scene object; its closest-hit program finds the triangle through a per-instance record and interpolates the vertex normal and uv from the barycentrics. Same conventions on both sides: the geometric normal decides `outside`, the shading normal is flipped to face the ray on a back-face hit, so refraction through a mesh works the same as through the built-in sphere.
+Both intersection paths read the same arrays. The naive kernel loops over every triangle of every mesh instance in object space (two-sided Moller-Trumbore). OptiX builds one triangle GAS per primitive over the same buffers and one instance per scene object; its closest-hit program finds the triangle through a per-instance record and interpolates the vertex normal, uv and tangent from the barycentrics. Same conventions on both sides: the geometric normal decides `outside`, the shading normal is flipped to face the ray on a back-face hit, so refraction through a mesh works the same as through the built-in sphere.
 
-Each image a material uses becomes a CUDA array of `uchar4`, and each (image, sampler, color space) a texture object over it (`src/textures.cpp`). The shade kernel samples the base color texture with `tex2D` at the hit's uv and multiplies the factor by it. Base color is stored sRGB-encoded, and the texture object's `sRGB` flag has the texture unit decode each texel to linear before the bilinear blend, so memory keeps the 8-bit sRGB values and the shader gets linear floats. A 16-bit image is rounded to 8 bits per channel at load. There are no mipmaps: the camera jitters each pixel's ray, so the samples already average the texels a pixel covers.
+Each image a material uses becomes a CUDA array of `uchar4`, and each (image, sampler, color space) a texture object over it (`src/textures.cpp`). The shade kernel samples each of a material's textures with `tex2D` at the hit's uv and multiplies the matching factor by it. Base color and emissive are stored sRGB-encoded, and the texture object's `sRGB` flag has the texture unit decode each texel to linear before the bilinear blend, so memory keeps the 8-bit sRGB values and the shader gets linear floats. A 16-bit image is rounded to 8 bits per channel at load. There are no mipmaps: the camera jitters each pixel's ray, so the samples already average the texels a pixel covers.
 
 #### Test assets
 
-Models come from [KhronosGroup/glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets), folder `Models/<name>/glTF/`, and are expected under `scenes/assets/<name>/glTF/`. That folder is gitignored. Each model needs its `.gltf`, `.bin` and the image files next to them. A missing image is a warning, and the materials that use it fall back to their base color factor.
+Models come from [KhronosGroup/glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets), folder `Models/<name>/glTF/`, and are expected under `scenes/assets/<name>/glTF/`. The three material tests are the `.glb` files from `Models/<name>/glTF-Binary/`, under `scenes/assets/KhronosTests/`; they are made for environment lighting and have no light of their own, so their scene files add an emitting panel. That folder is gitignored. Each model needs its `.gltf`, `.bin` and the image files next to them. A missing image is a warning, and the materials that use it fall back to their base color factor.
 
 | model | triangles | scene file | credit |
 |---|---|---|---|
@@ -119,10 +114,13 @@ Models come from [KhronosGroup/glTF-Sample-Assets](https://github.com/KhronosGro
 | Intel Sponza, main and curtains | 3,747,018 + 1,997,366 | `sponza_intel.json` | Frank Meinl and Anton Kaplanyan, Intel, 2022, CC BY 4.0; curtains add-on by the Sponza Addon Package Crew |
 | Bistro exterior | 2,829,226 | `assets/Bistro/Exterior/BistroExterior.gltf`, loaded directly | Amazon Lumberyard, July 2017, CC BY 4.0 |
 | Bistro interior | 1,043,077 | `assets/Bistro/Interior/BistroInterior.gltf`, loaded directly | Amazon Lumberyard, July 2017, CC BY 4.0 |
+| TransmissionRoughnessTest | 77,792 | `transmission_roughness.json` | Ed Mackey, Analytical Graphics, 2021, CC BY 4.0 |
+| DragonAttenuation | 134,995 | `dragon_attenuation.json` | Dragon: Stanford Computer Graphics Laboratory, 1996, converted by Morgan McGuire, 2017, Stanford Graphics Library license; cloth backdrop: Adobe, CC0 |
+| ClearCoatTest | 37,116 | `clearcoat.json` | Ed Mackey, Analytical Graphics, 2020, CC BY 4.0 |
 
 The Intel Sponza comes from the [Intel Sample Library](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-processing-research/samples.html) as one zip per package. The glTF files, their `.bin` and `textures/` folders go under `scenes/assets/IntelSponza/<package>/`, keeping the zip's folder names (`main_sponza`, `pkg_a_curtains`, `pkg_d_10k_candles`). `sponza_intel.json` loads the main scene and the curtains package together, with the main file's first camera (`PhysCamera001`) and an emitting slab above the atrium in place of the sun, which is a punctual light. Cited as: Frank Meinl and Anton Kaplanyan, 2022, Intel Sample Library. The add-on packages also credit the Sponza Addon Package Crew: Katica Putica, Cristiano Siqueira, Timothy Heath, Justin Prazen, Sebastian Herholz, Bruce Cherniak, Anton Kaplanyan.
 
-The Bistro comes from NVIDIA's Open Research Content Archive as FBX with DDS textures (`Bistro_v5_2.zip`), cited as: Amazon Lumberyard Bistro, Open Research Content Archive (ORCA). Amazon Lumberyard, July 2017. http://developer.nvidia.com/orca/amazon-lumberyard-bistro. I converted it with Blender 5.2.2: FBX import, then a glTF Separate export into `scenes/assets/Bistro/Exterior/` and `scenes/assets/Bistro/Interior/`, which writes every DDS texture out as PNG. Bistro's "Specular" texture packs occlusion, roughness and metalness into R, G and B, and the FBX importer wires it to Specular IOR Level, which exports as `KHR_materials_specular`. In the saved `.blend` files a Separate Color node sends G to Roughness and B to Metallic instead, so the export writes the same image as glTF's `metallicRoughnessTexture` (glTF reads roughness from G and metalness from B too). Every Bistro emitter has an emissive texture, so both scenes render black until emissive textures are read.
+The Bistro comes from NVIDIA's Open Research Content Archive as FBX with DDS textures (`Bistro_v5_2.zip`), cited as: Amazon Lumberyard Bistro, Open Research Content Archive (ORCA). Amazon Lumberyard, July 2017. http://developer.nvidia.com/orca/amazon-lumberyard-bistro. I converted it with Blender 5.2.2: FBX import, then a glTF Separate export into `scenes/assets/Bistro/Exterior/` and `scenes/assets/Bistro/Interior/`, which writes every DDS texture out as PNG. Bistro's "Specular" texture packs occlusion, roughness and metalness into R, G and B, and the FBX importer wires it to Specular IOR Level, which exports as `KHR_materials_specular`. In the saved `.blend` files a Separate Color node sends G to Roughness and B to Metallic instead, so the export writes the same image as glTF's `metallicRoughnessTexture` (glTF reads roughness from G and metalness from B too). Every Bistro emitter has an emissive texture, and the scenes are otherwise lit by punctual lights and the sun, so both render dark until direct light sampling. Bistro's normal maps follow the DirectX convention (its README lists them as "Normal (DirectX)"), whose green channel points the opposite way from glTF's. They are loaded unchanged, so detail along the texture's v direction is lit inverted.
 
 #### Naive loop vs OptiX by triangle count
 
@@ -138,6 +136,80 @@ The Bistro comes from NVIDIA's Open Research Content Archive as FBX with DDS tex
 ![Naive loop vs OptiX by triangle count](img/readme/mesh_naive_vs_optix.png)
 
 The naive kernel's time grows linearly with the triangle count, about 20 ms per sample per thousand triangles at this resolution, because every path tests every triangle of every instance at every bounce. OptiX stays at the Cornell frame time until Sponza, where traversing 103 GASes in a scene with far more surface to bounce off adds 2.6 ms.
+
+### Materials: glTF metallic-roughness
+
+Every glTF material loads as one material model: the metallic-roughness BSDF from Appendix B of the glTF 2.0 spec, plus five `KHR_materials_*` extensions. Scene JSON materials (Diffuse, Specular, Refractive, Emitting) keep their own code path, and scenes that use only them render byte-identical to before (24 of 24 renders: six scenes, two sizes, both intersection paths).
+
+```
+coated     = fresnel_coat(material, GGX(clearcoatRoughness^2))        KHR_materials_clearcoat
+material   = mix(dielectric, metal, metallic)
+metal      = GGX(roughness^2) with Schlick Fresnel, f0 = base color
+dielectric = fresnel_mix(layer = GGX(roughness^2),
+                         base  = mix(Lambert(base color), GGX transmission x base color, transmission))
+```
+
+The dielectric's f0 comes from `KHR_materials_ior` (1.5 by default, f0 = 0.04), times `specularColorFactor` and weighted by `specularFactor` from `KHR_materials_specular`. Per hit, `src/material_textures.h` reads the base color (rgb and alpha), metallic-roughness (roughness in G, metallic in B), normal, emissive and transmission (R) textures and multiplies each factor by its texture.
+
+#### Sampling
+
+`scatterPbr` (`src/bsdf.cu`) picks one lobe per bounce and samples a direction from it. Microfacet normals come from the GGX distribution of normals visible from the outgoing direction (Dupuy and Benyoub 2023, spherical caps), so the D term and the Jacobian of the reflection or refraction cancel against the pdf, and a microfacet lobe's weight is its Fresnel term times the height-correlated Smith G2/G1. Roughness below 0.01 is a perfect mirror or a clean refraction.
+
+| choice | picked with probability | sample weight |
+|---|---|---|
+| clearcoat or the rest | clearcoat x Fresnel(0.04, n·v) | G2/G1 |
+| metal or dielectric | metallic | Fresnel(base color, v·h) x G2/G1 |
+| glass or opaque dielectric | transmission | the chosen lobe's |
+| glass: reflect or refract | Fresnel at the sampled microfacet | G2/G1, and x base color for refraction |
+| opaque: specular layer or Lambert, p = layer / (layer + base) | layer: specularFactor x max Fresnel(n·v); base: max of the base color | layer: Fresnel(v·h) x G2/G1 / p; Lambert: base color x (1 - max Fresnel(v·h)) / (1 - p) |
+
+Where the probability is the mixing weight itself, the weight cancels. The last row cannot do that, because the layer's Fresnel term depends on the sampled microfacet, so it picks with an estimate made from n·v and divides by it. The first version estimated the base as (1 - layer) x base color, which goes to 0 at grazing angles while the Fresnel term at a cosine-sampled half vector stays small, and the rare diffuse samples there got weights near 100. With the base color alone a diffuse weight stays below 2. A sample that ends on the wrong side of the surface (a normal map or a rough lobe can produce one) ends the path.
+
+#### Transmission and absorption
+
+Transmission is a solid boundary: the ray refracts through the ior on the way in and on the way out, with or without `KHR_materials_volume`. glTF reads a transmissive material without the volume extension as thin-walled, with no bending. I chose solid because 31 of the 34 glass materials in the research scenes have no volume extension and were converted from PBRT's solid dielectrics, and Blender exports glass without it. The volume extension adds absorption: a hit on a back face means the path crossed the object's inside, and the shade kernel multiplies its throughput by exp(-σt), with σ = -ln(attenuationColor) / attenuationDistance and t the distance traveled. The base color tints every crossing of the boundary.
+
+#### Emission
+
+Emission is `emissiveFactor` x emissive texture x `emissiveStrength`. The shade kernel adds throughput x emission to the pixel at every hit and the path goes on, so a glTF emitter also reflects. The clearcoat sits above the emission and darkens it by 1 - clearcoat x Fresnel(0.04, n·v). Scene JSON lights still end the path.
+
+#### Normal maps
+
+The tangent frame is the interpolated tangent made perpendicular to the normal, and the bitangent w x cross(N, T). It is built on the front-face normal, the side the map was authored for, and the mapped normal is flipped for a back-face hit. A mapped normal that faces away from the ray (a steep map at a grazing angle) falls back to the unmapped one. A mirroring instance transform flips w. The clearcoat lobe keeps the unmapped normal.
+
+MikkTSpace takes v pointing up the image and glTF's v points down, so the loader hands it 1 - v. In Khronos Sponza, which ships its own `TANGENT`, 99.97% of the triangles have the bitangent pointing toward decreasing v, the direction this produces. Where MikkTSpace gives the corners of a shared vertex different tangents (a mirrored uv seam), the loader copies the vertex.
+
+#### Alpha mask
+
+A hit on a `MASK` material whose alpha (base color factor alpha x texture alpha) is below `alphaCutoff` does not count, and the ray goes on. OptiX runs an any-hit program for this on masked instances only: a mesh GAS keeps any-hit when one of its instances is masked, and the instance flag turns it off on the rest. The naive kernel makes the same test on every hit that would become the closest. The texture unit reads alpha linearly even from an sRGB texture (a texel of 128 reads 0.502 with the sRGB flag on, while its color reads 0.216). On a Sponza plant close-up the two paths differ by 0.15/255 on average.
+
+#### Checking the BSDF
+
+A host-side test runs `scatterPbr` two million times per case and compares the mean weight, which is the directional albedo, to a brute-force integral of the analytic BSDF over the sphere. Roughness 0.6, view angle 0.8 rad from the normal, red channel:
+
+| material | sampled | integral |
+|---|---|---|
+| metal, base color (1, 0.7, 0.3) | 0.7941 | 0.7948 |
+| opaque dielectric, base color (0.5, 0.8, 0.2) | 0.5147 | 0.5146 |
+| the same with `specularFactor` 0 | 0.5000 | 0.4999 |
+| glass, ior 1.5, white | 0.9615 | 0.9611 |
+| metallic 0.4, transmission 0.3, `specularFactor` 0.7 | 0.8208 | 0.8210 |
+| clearcoat 1 (roughness 0.3) over red plastic | 0.5347 | 0.5346 |
+
+All 54 cases (six materials, roughness 0.3, 0.6 and 1, three view angles) agree within the noise of the integral. The largest gaps, up to 0.008 for glass and metal at roughness 0.3, belong to the integral: with 16 times the samples it moves by as much (glass at 0.8 rad goes from 0.9895 to 0.9999, against 0.9975 sampled), since uniformly drawn directions rarely land in a narrow lobe. Two million random inputs, including grazing views and tilted shading normals, produce no NaN, infinite or negative weight.
+
+The three Khronos material tests ship without lights, so their scene files add an emitting panel. 1024 spp, AgX.
+
+| TransmissionRoughnessTest | DragonAttenuation |
+|:---:|:---:|
+| ![TransmissionRoughnessTest](img/readme/materials_transmission_roughness.png) | ![DragonAttenuation](img/readme/materials_dragon_attenuation.png) |
+| **ClearCoatTest** | **DamagedHelmet** |
+| ![ClearCoatTest](img/readme/materials_clearcoat.png) | ![DamagedHelmet](img/readme/materials_cornell_helmet.png) |
+
+- **TransmissionRoughnessTest**: rows from ior 1.0 to 2.42, roughness growing to the right. The ior 1.0 row stays sharp at every roughness, since a microfacet cannot bend a ray that crosses no change in index, and the blur grows with the ior.
+- **DragonAttenuation**: one absorption color and distance; the thin claws and spines come out pale yellow and the thick body deep orange.
+- **ClearCoatTest**: the middle column combines the base layer's broad highlight (left) with the coating's sharp one (right). Four of its rows depend on clearcoat textures, which are not read, so their coat is uniform.
+- **DamagedHelmet**: normal map (tangents from MikkTSpace), metallic-roughness map and the emissive lamps.
 
 ### Performance optimization
 

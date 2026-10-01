@@ -54,6 +54,7 @@ public:
     std::vector<glm::vec3> positions;
     std::vector<glm::vec3> normals;
     std::vector<glm::vec2> uvs;
+    std::vector<glm::vec4> tangents;
     std::vector<glm::ivec3> indices;
     std::vector<TriangleMesh> meshes;
     // Images and the textures that read them, from glTF materials. Empty

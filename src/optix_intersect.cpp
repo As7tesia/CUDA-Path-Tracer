@@ -47,7 +47,16 @@ CUdeviceptr d_ias = 0;
 OptixTraversableHandle iasHandle = 0;
 OptixIntersectParams* d_params = nullptr;
 InstanceRecord* d_instances = nullptr;  // instance id -> material and mesh
-MeshBuffers meshBuffers = {};           // pathtrace.cu's device arrays, passed through to the hit program
+// pathtrace.cu's device arrays, passed through to the hit programs
+MeshBuffers meshBuffers = {};
+const Material* d_materials = nullptr;
+const cudaTextureObject_t* d_textures = nullptr;
+
+// Whether a Geom's hits go through the any-hit alpha test.
+bool isMasked(const Scene* scene, const Geom& g)
+{
+    return g.type == MESH && scene->materials[g.materialid].alphaMode == ALPHA_MASK;
+}
 
 bool check(OptixResult result, const char* call)
 {
@@ -181,15 +190,26 @@ bool buildSphereGas(OptixTraversableHandle& handle)
 // One triangle GAS per TriangleMesh, from the flat device arrays pathtrace.cu
 // uploaded: the whole vertex array serves as the vertex buffer and the mesh's
 // slice of the index array as the index buffer. Both faces stay hittable
-// (no culling flag), which a refractive mesh needs for the exit hit.
+// (no culling flag), which a refractive mesh needs for the exit hit. A mesh
+// keeps any-hit only if some instance of it has an ALPHA_MASK material;
+// buildIas then turns it off again on the instances that do not.
 bool buildMeshGases(const Scene* scene, const MeshBuffers& buffers, std::vector<OptixTraversableHandle>& handles)
 {
     d_meshGas.assign(scene->meshes.size(), 0);
     handles.assign(scene->meshes.size(), 0);
+    std::vector<bool> masked(scene->meshes.size(), false);
+    for (const Geom& g : scene->geoms)
+    {
+        if (isMasked(scene, g))
+        {
+            masked[g.meshId] = true;
+        }
+    }
     CUdeviceptr d_vertices = reinterpret_cast<CUdeviceptr>(buffers.positions);
-    const unsigned int flags[1] = { OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT };
     for (size_t i = 0; i < scene->meshes.size(); ++i)
     {
+        const unsigned int flags[1] = {
+            static_cast<unsigned int>(masked[i] ? OPTIX_GEOMETRY_FLAG_NONE : OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT) };
         const TriangleMesh& mesh = scene->meshes[i];
         OptixBuildInput input = {};
         input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
@@ -212,8 +232,10 @@ bool buildMeshGases(const Scene* scene, const MeshBuffers& buffers, std::vector<
 
 // One instance per Geom: the unit cube, unit sphere or one of the mesh GASes
 // under the Geom's transform. instanceId is the Geom's index, which the
-// closest-hit programs use to look up the InstanceRecord, and sbtOffset picks
-// the hit program (hit group record 0, 1 or 2).
+// hit programs use to look up the InstanceRecord, and sbtOffset picks the hit
+// program (hit group record 0, 1 or 2). Only ALPHA_MASK instances run the
+// any-hit program; the flag disables it on every other instance, which may
+// share a mesh GAS with a masked one.
 bool buildIas(const Scene* scene, OptixTraversableHandle cubeGas, OptixTraversableHandle sphereGas,
               const std::vector<OptixTraversableHandle>& meshGas)
 {
@@ -232,7 +254,7 @@ bool buildIas(const Scene* scene, OptixTraversableHandle cubeGas, OptixTraversab
         }
         inst.instanceId = static_cast<unsigned int>(i);
         inst.visibilityMask = 255;
-        inst.flags = OPTIX_INSTANCE_FLAG_NONE;
+        inst.flags = isMasked(scene, g) ? OPTIX_INSTANCE_FLAG_NONE : OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT;
         switch (g.type)
         {
         case SPHERE:
@@ -302,6 +324,8 @@ bool buildPipeline()
     descs[4].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;  // built-in triangle intersection, no IS
     descs[4].hitgroup.moduleCH = module;
     descs[4].hitgroup.entryFunctionNameCH = "__closesthit__mesh";
+    descs[4].hitgroup.moduleAH = module;
+    descs[4].hitgroup.entryFunctionNameAH = "__anyhit__mesh";
     OptixProgramGroupOptions groupOptions = {};
     logSize = sizeof(log);
     result = optixProgramGroupCreate(context, descs, kNumGroups, &groupOptions, log, &logSize, groups);
@@ -364,7 +388,8 @@ bool buildSbt()
     return true;
 }
 
-bool init(const Scene* scene, const MeshBuffers& buffers, bool validation)
+bool init(const Scene* scene, const MeshBuffers& buffers, const Material* materials,
+          const cudaTextureObject_t* textures, bool validation)
 {
     // optixInit loads the driver's OptiX library and fills the function
     // table; the version check against OPTIX_ABI_VERSION happens here.
@@ -401,14 +426,17 @@ bool init(const Scene* scene, const MeshBuffers& buffers, bool validation)
     }
     d_instances = reinterpret_cast<InstanceRecord*>(upload(records.data(), records.size() * sizeof(InstanceRecord)));
     meshBuffers = buffers;
+    d_materials = materials;
+    d_textures = textures;
     cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(OptixIntersectParams));
     return true;
 }
 }  // namespace
 
-bool optixIntersectInit(const Scene* scene, const MeshBuffers& buffers, bool validation)
+bool optixIntersectInit(const Scene* scene, const MeshBuffers& buffers, const Material* materials,
+                        const cudaTextureObject_t* textures, bool validation)
 {
-    if (init(scene, buffers, validation))
+    if (init(scene, buffers, materials, textures, validation))
     {
         return true;
     }
@@ -455,7 +483,9 @@ void optixIntersectFree()
     d_params = nullptr;
     cudaFree(d_instances);
     d_instances = nullptr;
-    meshBuffers = {};  // owned by pathtrace.cu, not freed here
+    meshBuffers = {};  // these three are owned by pathtrace.cu, not freed here
+    d_materials = nullptr;
+    d_textures = nullptr;
     iasHandle = 0;
     sbt = {};
 }
@@ -476,6 +506,8 @@ void optixIntersect(int numPaths, const PathSegment* paths,
     params.numMaterials = numMaterials;
     params.instances = d_instances;
     params.buffers = meshBuffers;
+    params.materials = d_materials;
+    params.textures = d_textures;
     params.handle = iasHandle;
     // The buffers ping-pong every bounce, so the parameters go up per launch.
     // The source is pageable, so the copy is staged before this returns and
