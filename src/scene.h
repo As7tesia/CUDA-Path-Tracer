@@ -53,7 +53,12 @@ public:
     // triangles are. Empty when the scene has no meshes.
     std::vector<glm::vec3> positions;
     std::vector<glm::vec3> normals;
+    std::vector<glm::vec2> uvs;
     std::vector<glm::ivec3> indices;
     std::vector<TriangleMesh> meshes;
+    // Images and the textures that read them, from glTF materials. Empty
+    // when no material has a texture.
+    std::vector<TextureImage> textureImages;
+    std::vector<Texture> textures;
     RenderState state;
 };

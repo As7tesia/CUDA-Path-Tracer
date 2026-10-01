@@ -23,10 +23,10 @@ struct Ray
 };
 
 // One glTF primitive: triCount consecutive triangles of the scene's flat
-// index array. Each index points into the flat vertex arrays (positions and
-// normals share it), already offset, so a triangle needs no base vertex. A
-// Geom of type MESH instances one of these under its transform; several
-// Geoms may share one (a mesh used by more than one glTF node).
+// index array. Each index points into the flat vertex arrays (positions,
+// normals and uvs share it), already offset, so a triangle needs no base
+// vertex. A Geom of type MESH instances one of these under its transform;
+// several Geoms may share one (a mesh used by more than one glTF node).
 struct TriangleMesh
 {
     int indexOffset;  // first triangle in the index array
@@ -36,13 +36,36 @@ struct TriangleMesh
 // Device pointers to the scene's flat mesh arrays, uploaded once by
 // pathtraceInit and read by both intersection paths (the naive kernel loops
 // over them; OptiX builds its acceleration structures from them and reads the
-// normals in its hit program). Read-only after the upload.
+// normals and uvs in its hit program). Read-only after the upload.
 struct MeshBuffers
 {
     glm::vec3* positions;
     glm::vec3* normals;     // per vertex, unit length, object space
-    glm::ivec3* indices;    // per triangle, into positions / normals
+    glm::vec2* uvs;         // per vertex, TEXCOORD_0; (0, 0) for a primitive without one
+    glm::ivec3* indices;    // per triangle, into positions / normals / uvs
     TriangleMesh* meshes;   // indexed by Geom::meshId
+};
+
+// A decoded glTF image: 8-bit RGBA, rows top to bottom. glTF puts uv (0, 0)
+// at the top left of the image, so a texture fetch at uv reads it as stored.
+struct TextureImage
+{
+    int width;
+    int height;
+    std::vector<unsigned char> rgba;  // width * height * 4
+};
+
+// One image as a material slot reads it: the glTF sampler's wrap and filter
+// modes, and whether the texels are sRGB-encoded color, which the texture
+// unit decodes to linear, or linear data. Becomes one CUDA texture object
+// (textures.cpp); several may share an image.
+struct Texture
+{
+    int image;  // into Scene::textureImages
+    cudaTextureAddressMode wrapU;
+    cudaTextureAddressMode wrapV;
+    cudaTextureFilterMode filter;
+    bool srgb;
 };
 
 struct Geom
@@ -77,6 +100,7 @@ struct Material
     } specular;
     float ior;
     float emittance;
+    int baseColorTexture = -1;  // into Scene::textures, multiplies color; -1 for none
 };
 
 struct Camera
@@ -118,6 +142,7 @@ struct ShadeableIntersection
 {
   float t;
   glm::vec3 surfaceNormal;
+  glm::vec2 uv;  // texture coordinates at the hit; (0, 0) on spheres and cubes
   int materialId;
   bool outside;
 };

@@ -75,6 +75,7 @@ set(headers
     src/pathtrace.h
     src/scene.h
     src/sceneStructs.h
+    src/textures.h
     src/tonemap.h
     src/utilities.h
     src/wavefront_ops.h
@@ -91,6 +92,7 @@ set(sources
     src/interactions.cu
     src/optix_intersect.cpp
     src/scene.cpp
+    src/textures.cpp
     src/utilities.cpp
     src/wavefront_ops.cu
 )

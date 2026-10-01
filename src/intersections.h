@@ -78,7 +78,8 @@ __host__ __device__ float sphereIntersectionTest(
  * the vertex normal interpolated at the hit, flipped to face the ray when the
  * ray hit the back face, like sphereIntersectionTest. `outside` is whether
  * the ray hit the front face (counterclockwise winding seen from the ray),
- * which for a closed mesh means the ray came from outside.
+ * which for a closed mesh means the ray came from outside. `uv` is the vertex
+ * uvs interpolated at the hit.
  *
  * @return  Ray parameter `t` value. -1 if no intersection.
  */
@@ -89,4 +90,5 @@ __host__ __device__ float meshIntersectionTest(
     Ray r,
     glm::vec3& intersectionPoint,
     glm::vec3& normal,
+    glm::vec2& uv,
     bool& outside);

@@ -2,17 +2,16 @@
 //
 // This is the one translation unit that compiles tinygltf's implementation.
 // The repo already has nlohmann's json.hpp, so tinygltf uses that instead of
-// its own copy. Textures are not loaded yet, so image decoding is compiled
-// out: image files referenced by URI are skipped (only the URI is kept),
-// embedded images go through the no-op callback below, and the glTF writer
-// is off. This also sidesteps the repo's stb_image being older than the
-// 16-bit loaders tinygltf's built-in image path calls.
+// its own copy. Images are decoded by tinygltf's built-in loader through
+// stb_image (implementation compiled in stb.cpp), whether they are external
+// files, data URIs or buffer views: every image comes out as RGBA, 8 or 16
+// bits per channel. An image file that is missing is a warning and the image
+// stays empty; one that exists and does not decode fails the whole load.
+// The glTF writer is off.
 
 #define TINYGLTF_IMPLEMENTATION
 #define TINYGLTF_NO_INCLUDE_JSON
-#define TINYGLTF_NO_STB_IMAGE
 #define TINYGLTF_NO_STB_IMAGE_WRITE
-#define TINYGLTF_NO_EXTERNAL_IMAGE
 #include "json.hpp"
 #include "tiny_gltf.h"
 
@@ -34,14 +33,6 @@
 
 namespace
 {
-// Image callback for images embedded in the file (data URIs, GLB chunks):
-// keeps the image entry and decodes nothing. External image files never get
-// here because of TINYGLTF_NO_EXTERNAL_IMAGE.
-bool skipImage(tinygltf::Image*, const int, std::string*, std::string*, int, int, const unsigned char*, int, void*)
-{
-    return true;
-}
-
 // A window onto one accessor's elements: glTF stores vertex attributes in
 // buffer views that may interleave several attributes, so element i sits at
 // data + i * stride, not at i * sizeof(element).
@@ -136,6 +127,49 @@ unsigned int readIndex(const AccessorView& v, size_t i)
         return *reinterpret_cast<const uint16_t*>(p);
     default:
         return *reinterpret_cast<const uint32_t*>(p);
+    }
+}
+
+// Texture coordinates come as floats, or as unsigned bytes or shorts that
+// glTF requires to be normalized to [0, 1]; readUv assumes one of the three.
+bool isUvType(int componentType)
+{
+    return componentType == TINYGLTF_COMPONENT_TYPE_FLOAT
+        || componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE
+        || componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT;
+}
+
+glm::vec2 readUv(const AccessorView& v, size_t i)
+{
+    const unsigned char* p = v.at(i);
+    switch (v.componentType)
+    {
+    case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+        return glm::vec2(p[0], p[1]) / 255.0f;
+    case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+    {
+        const uint16_t* s = reinterpret_cast<const uint16_t*>(p);
+        return glm::vec2(s[0], s[1]) / 65535.0f;
+    }
+    default:
+    {
+        const float* f = reinterpret_cast<const float*>(p);
+        return glm::vec2(f[0], f[1]);
+    }
+    }
+}
+
+// glTF sampler wrap mode to CUDA's. REPEAT is glTF's default.
+cudaTextureAddressMode addressMode(int gltfWrap)
+{
+    switch (gltfWrap)
+    {
+    case TINYGLTF_TEXTURE_WRAP_CLAMP_TO_EDGE:
+        return cudaAddressModeClamp;
+    case TINYGLTF_TEXTURE_WRAP_MIRRORED_REPEAT:
+        return cudaAddressModeMirror;
+    default:
+        return cudaAddressModeWrap;
     }
 }
 
@@ -253,6 +287,8 @@ struct Loader
     int materialOverride;
     std::map<int, int> materialIds;                    // glTF material index (-1 = none) -> Scene material
     std::map<std::pair<int, int>, int> meshIds;        // (glTF mesh, primitive) -> Scene mesh, -1 if unusable
+    std::map<std::pair<int, bool>, int> textureIds;    // (glTF texture, sRGB) -> Scene texture, -1 if unusable
+    std::map<int, int> imageIds;                       // glTF image -> Scene texture image, -1 if unusable
     std::optional<GltfCamera> camera;                  // the first usable camera the walk reached
 
     // A primitive this loader cannot use is skipped, not fatal: the rest of
@@ -262,8 +298,8 @@ struct Loader
         fprintf(stderr, "glTF %s: mesh %d primitive %d skipped: %s\n", path.c_str(), meshIndex, primIndex, what);
     }
 
-    // glTF materials become Diffuse with the base color factor for now; the
-    // base color texture and the metallic-roughness inputs wait for the GGX
+    // glTF materials become Diffuse with the base color factor times the base
+    // color texture for now; the metallic-roughness inputs wait for the GGX
     // step. A primitive without a material gets glTF's default, white.
     //
     // A material that emits becomes Emitting. glTF's emission is the emissive
@@ -272,9 +308,9 @@ struct Loader
     // onto color times emittance. Two things are missing until the material
     // model grows in the GGX step:
     // - An emitter only emits. The shade kernel ends a path at a light, so
-    //   the base color of an emitting material is dropped.
-    // - A material with an emissive texture does not emit. Textures are not
-    //   read yet, and the factor alone would light up the whole surface
+    //   the base color and its texture are dropped for an emitting material.
+    // - A material with an emissive texture does not emit. Emissive textures
+    //   are not read, and the factor alone would light up the whole surface
     //   (DamagedHelmet: factor 1, texture black except for a few lamps).
     int materialFor(int gltfMaterial)
     {
@@ -308,10 +344,112 @@ struct Loader
                 m.color = emissive;
                 m.emittance = strength;
             }
+            else
+            {
+                m.baseColorTexture = textureFor(source.pbrMetallicRoughness.baseColorTexture, true);
+            }
         }
         const int id = (int)scene.materials.size();
         scene.materials.push_back(m);
         materialIds[gltfMaterial] = id;
+        return id;
+    }
+
+    // The Scene texture for one of a material's texture slots, or -1 when
+    // the slot is empty or its image is unusable; the material then uses its
+    // factor alone. srgb says the slot holds color (base color) rather than
+    // data. Only TEXCOORD_0 is loaded, so a slot that names another set is
+    // read with TEXCOORD_0.
+    int textureFor(const tinygltf::TextureInfo& slot, bool srgb)
+    {
+        if (slot.index < 0)
+        {
+            return -1;
+        }
+        const std::pair<int, bool> key(slot.index, srgb);
+        auto found = textureIds.find(key);
+        if (found != textureIds.end())
+        {
+            return found->second;
+        }
+        if (slot.texCoord != 0)
+        {
+            fprintf(stderr, "glTF %s: texture %d reads TEXCOORD_%d, only TEXCOORD_0 is loaded\n",
+                path.c_str(), slot.index, slot.texCoord);
+        }
+        int id = -1;
+        const tinygltf::Texture* source = slot.index < (int)model.textures.size() ? &model.textures[slot.index] : nullptr;
+        const int image = imageFor(source != nullptr ? source->source : -1);
+        if (image >= 0)
+        {
+            Texture t;
+            t.image = image;
+            t.wrapU = cudaAddressModeWrap;
+            t.wrapV = cudaAddressModeWrap;
+            t.filter = cudaFilterModeLinear;
+            t.srgb = srgb;
+            if (source->sampler >= 0 && source->sampler < (int)model.samplers.size())
+            {
+                const tinygltf::Sampler& sampler = model.samplers[source->sampler];
+                t.wrapU = addressMode(sampler.wrapS);
+                t.wrapV = addressMode(sampler.wrapT);
+                // There are no mipmaps, so only the magnification filter
+                // applies. Minification needs none: the camera jitters its
+                // rays across the pixel, so samples average the texels a
+                // pixel covers.
+                t.filter = sampler.magFilter == TINYGLTF_TEXTURE_FILTER_NEAREST ? cudaFilterModePoint : cudaFilterModeLinear;
+            }
+            id = (int)scene.textures.size();
+            scene.textures.push_back(t);
+        }
+        textureIds[key] = id;
+        return id;
+    }
+
+    // The Scene image for a glTF image, or -1 when tinygltf has no pixels for
+    // it: the file is missing, or there is no image index (-1), which is what
+    // a texture whose image only an extension names (KTX2, WebP) has, as does
+    // a bad texture index. tinygltf decodes to RGBA; 16-bit images are
+    // rounded to 8 bits, (v + 128) / 257 mapping 0..65535 onto 0..255.
+    int imageFor(int gltfImage)
+    {
+        auto found = imageIds.find(gltfImage);
+        if (found != imageIds.end())
+        {
+            return found->second;
+        }
+        int id = -1;
+        const tinygltf::Image* source =
+            gltfImage >= 0 && gltfImage < (int)model.images.size() ? &model.images[gltfImage] : nullptr;
+        const bool usable = source != nullptr && source->width > 0 && source->height > 0 && source->component == 4
+            && (source->bits == 8 || source->bits == 16)
+            && source->image.size() == (size_t)source->width * source->height * 4 * (source->bits / 8);
+        if (!usable)
+        {
+            fprintf(stderr, "glTF %s: image %d has no pixels, textures using it are skipped\n", path.c_str(), gltfImage);
+        }
+        else
+        {
+            TextureImage image;
+            image.width = source->width;
+            image.height = source->height;
+            if (source->bits == 8)
+            {
+                image.rgba = source->image;
+            }
+            else
+            {
+                image.rgba.resize((size_t)image.width * image.height * 4);
+                const uint16_t* wide = reinterpret_cast<const uint16_t*>(source->image.data());
+                for (size_t i = 0; i < image.rgba.size(); ++i)
+                {
+                    image.rgba[i] = (unsigned char)((wide[i] + 128) / 257);
+                }
+            }
+            id = (int)scene.textureImages.size();
+            scene.textureImages.push_back(std::move(image));
+        }
+        imageIds[gltfImage] = id;
         return id;
     }
 
@@ -467,6 +605,29 @@ struct Loader
             }
         }
 
+        // Texture coordinates: TEXCOORD_0 when present and well formed, else
+        // (0, 0) at every vertex, which only matters to a textured material.
+        auto uvAttr = prim.attributes.find("TEXCOORD_0");
+        AccessorView uv;
+        std::string uvErr;
+        if (uvAttr != prim.attributes.end() && viewAccessor(model, uvAttr->second, uv, uvErr)
+            && uv.numComponents == 2 && isUvType(uv.componentType) && uv.count == pos.count)
+        {
+            for (size_t i = 0; i < uv.count; ++i)
+            {
+                scene.uvs.push_back(readUv(uv, i));
+            }
+        }
+        else
+        {
+            if (uvAttr != prim.attributes.end())
+            {
+                fprintf(stderr, "glTF %s: mesh %d primitive %d: TEXCOORD_0 unusable (%s), uvs set to 0\n", path.c_str(),
+                    meshIndex, primIndex, uvErr.empty() ? "unsupported layout" : uvErr.c_str());
+            }
+            scene.uvs.resize(scene.uvs.size() + pos.count, glm::vec2(0.0f));
+        }
+
         TriangleMesh mesh;
         mesh.indexOffset = indexOffset;
         mesh.triCount = triCount;
@@ -520,7 +681,6 @@ bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int mate
 {
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
-    loader.SetImageLoader(skipImage, nullptr);
     std::string err;
     std::string warn;
     std::string ext = path.size() >= 4 ? path.substr(path.size() - 4) : "";

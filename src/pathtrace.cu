@@ -14,6 +14,7 @@
 #include "interactions.h"
 #include "wavefront_ops.h"
 #include "optix_intersect.h"
+#include "textures.h"
 
 #define ERRORCHECK 1
 
@@ -85,6 +86,9 @@ static ShadeableIntersection* dev_intersections = NULL;
 // The scene's flat mesh arrays (see Scene), read by the naive kernel and by
 // OptiX. Null pointers when the scene has no meshes.
 static MeshBuffers dev_mesh = {};
+// Texture objects indexed like Scene::textures (textures.cpp), null when the
+// scene has none.
+static cudaTextureObject_t* dev_textures = NULL;
 
 // Device copy of a host vector, or null when it is empty.
 template <typename T>
@@ -155,8 +159,11 @@ void pathtraceInit(Scene* scene)
 
     dev_mesh.positions = uploadVector(scene->positions);
     dev_mesh.normals = uploadVector(scene->normals);
+    dev_mesh.uvs = uploadVector(scene->uvs);
     dev_mesh.indices = uploadVector(scene->indices);
     dev_mesh.meshes = uploadVector(scene->meshes);
+
+    dev_textures = texturesInit(*scene);
 
     // OptiX intersection stage: context, acceleration structures, pipeline
     // and shader binding table, built once for this scene. If the driver has
@@ -186,9 +193,12 @@ void pathtraceFree()
     }
     cudaFree(dev_mesh.positions);
     cudaFree(dev_mesh.normals);
+    cudaFree(dev_mesh.uvs);
     cudaFree(dev_mesh.indices);
     cudaFree(dev_mesh.meshes);
     dev_mesh = {};
+    texturesFree();
+    dev_textures = NULL;
     // Frees the spares. dev_paths / dev_intersections above may hold the
     // workspace's original buffers by now; the two sides still free each
     // allocation exactly once.
@@ -263,12 +273,14 @@ __global__ void computeIntersections(
         float t;
         glm::vec3 intersect_point;
         glm::vec3 normal;
+        glm::vec2 uv;
         float t_min = FLT_MAX;
         int hit_geom_index = -1;
         bool closest_outside;
 
         glm::vec3 tmp_intersect;
         glm::vec3 tmp_normal;
+        glm::vec2 tmp_uv;
         bool tmp_outside;
 
         // naive parse through global geoms
@@ -277,6 +289,8 @@ __global__ void computeIntersections(
         {
             Geom& geom = geoms[i];
 
+            // Only meshes have texture coordinates.
+            tmp_uv = glm::vec2(0.0f);
             if (geom.type == CUBE)
             {
                 t = boxIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, tmp_outside);
@@ -288,7 +302,7 @@ __global__ void computeIntersections(
             else  // MESH: every triangle of the instanced mesh
             {
                 t = meshIntersectionTest(geom, buffers.meshes[geom.meshId], buffers, pathSegment.ray,
-                    tmp_intersect, tmp_normal, tmp_outside);
+                    tmp_intersect, tmp_normal, tmp_uv, tmp_outside);
             }
 
             // Compute the minimum t from the intersection tests to determine what
@@ -299,6 +313,7 @@ __global__ void computeIntersections(
                 hit_geom_index = i;
                 intersect_point = tmp_intersect;
                 normal = tmp_normal;
+                uv = tmp_uv;
                 closest_outside = tmp_outside;
             }
         }
@@ -317,6 +332,7 @@ __global__ void computeIntersections(
             intersections[path_index].materialId = geoms[hit_geom_index].materialid;
             materialIDs[path_index] = geoms[hit_geom_index].materialid;
             intersections[path_index].surfaceNormal = normal;
+            intersections[path_index].uv = uv;
             intersections[path_index].outside = closest_outside;
         }
     }
@@ -354,6 +370,7 @@ __global__ void shadeMaterial(
     ShadeableIntersection* shadeableIntersections,
     PathSegment* pathSegments,
     Material* materials,
+    const cudaTextureObject_t* textures,
     glm::vec3* image)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -373,6 +390,15 @@ __global__ void shadeMaterial(
             // Set up the RNG
             thrust::default_random_engine rng = makeSeededRandomEngine(iter, seg.pixelIndex, seg.remainingBounces);
             Material material = materials[intersection.materialId];
+            // The texture unit has already decoded an sRGB base color to
+            // linear, and filters after decoding, so the sample scales the
+            // factor directly. scatterRay reads the result from material.color.
+            if (material.baseColorTexture >= 0)
+            {
+                const float4 texel = tex2D<float4>(textures[material.baseColorTexture],
+                    intersection.uv.x, intersection.uv.y);
+                material.color *= glm::vec3(texel.x, texel.y, texel.z);
+            }
             glm::vec3 materialColor = material.color;
             // glm::vec3 materialColor = intersection.surfaceNormal;
 
@@ -545,6 +571,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_intersections,
             dev_paths,
             dev_materials,
+            dev_textures,
             dev_image
         );
         // Stream compaction: keep only the live paths. Terminated ones have

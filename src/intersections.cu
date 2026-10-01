@@ -157,6 +157,7 @@ __host__ __device__ float meshIntersectionTest(
     Ray r,
     glm::vec3& intersectionPoint,
     glm::vec3& normal,
+    glm::vec2& uv,
     bool& outside)
 {
     // Object space, with the direction normalized like the other tests, so
@@ -221,6 +222,10 @@ __host__ __device__ float meshIntersectionTest(
             normal = -normal;
         }
     }
+
+    uv = (1.0f - hitU - hitV) * buffers.uvs[tri.x]
+       + hitU * buffers.uvs[tri.y]
+       + hitV * buffers.uvs[tri.z];
 
     intersectionPoint = multiplyMV(geom.transform, glm::vec4(o + tMin * d, 1.0f));
     return glm::length(r.origin - intersectionPoint);

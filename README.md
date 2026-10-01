@@ -15,7 +15,7 @@ project, and we will not be able to grade you without a good README.
 
 ### Status
 
-What works today, and what each missing piece needs before it can work. Last updated 2026-09-28.
+What works today, and what each missing piece needs before it can work. Last updated 2026-09-30.
 
 #### glTF
 
@@ -26,27 +26,27 @@ A `.gltf` or `.glb` file loads in two ways: as the whole scene when it is the sc
 | Geometry | Triangle lists with float positions, indexed or not. Normals come from the file, or are generated area-weighted when it has none. Node transforms as a matrix or as translation, rotation, scale. One instance per (node, primitive) pair |
 | Camera | The first perspective camera in the node tree gives position, direction and `yfov`. A camera transform that mirrors flips the image. A file without a camera gets one that frames the scene's bounding sphere |
 | Lights | Emissive surfaces: `emissiveFactor` times `KHR_materials_emissive_strength` |
-| Materials | Diffuse with the base color factor, or an emitter |
+| Materials | Diffuse with the base color factor times the base color texture, or an emitter |
+| Textures | Base color only. PNG and JPEG, as files next to the glTF, data URIs or buffer views, decoded by tinygltf through stb_image. 16-bit images are converted to 8 bits per channel. Texture coordinates from `TEXCOORD_0`, wrap modes and the magnification filter from the sampler, no mipmaps. The texture unit decodes sRGB to linear before filtering |
 | Render settings | glTF has none. Resolution and depth come from the flags, then from `extras.pbrt.render` when the file has it, then from the defaults (1024 high, depth 8). 5000 spp unless `--spp` is given |
 
 | glTF feature | What happens today | Needs |
 |---|---|---|
-| Base color texture | The base color factor is used alone, so textured scenes render white | Texture loading: image decoding, UVs carried through both intersection paths, textures on the GPU |
-| Metallic and roughness | Ignored. Every surface that does not emit is diffuse | GGX microfacet BSDF with the glTF metallic-roughness layering. Texture loading for the metallic-roughness map |
-| Normal map | Ignored | Texture loading, tangents (read from the file or generated), normal mapping in the shade kernel |
+| Metallic and roughness | Ignored. Every surface that does not emit is diffuse | GGX microfacet BSDF with the glTF metallic-roughness layering. The metallic-roughness map as a linear texture slot |
+| Normal map | Ignored | Tangents (read from the file or generated), the map as a linear texture slot, normal mapping in the shade kernel |
 | Glass: `KHR_materials_transmission`, `_ior`, `_volume` | Rendered as opaque diffuse | Microfacet transmission (GGX BTDF) and Beer-Lambert absorption in the material model |
-| Alpha mask | Ignored, masked surfaces are solid | Texture loading, and an any-hit program in OptiX with the same test in the naive kernel |
-| Emitter that also reflects | An emitting material only emits, its base color is dropped | A material struct that carries emission next to the BSDF inputs. Today a material has one type, and the shade kernel ends the path at a light |
-| Emissive texture | A material with one does not emit at all, since the factor alone would light the whole surface | Texture loading |
+| Alpha mask | Ignored, masked surfaces are solid | An any-hit program in OptiX that reads the base color texture's alpha, with the same test in the naive kernel |
+| Emitter that also reflects | An emitting material only emits, its base color and base color texture are dropped | A material struct that carries emission next to the BSDF inputs. Today a material has one type, and the shade kernel ends the path at a light |
+| Emissive texture | A material with one does not emit at all, since the factor alone would light the whole surface | The emissive slot as an sRGB texture, read like base color |
 | One-sided emitters (`doubleSided` false) | An emitter emits from both faces | A front-face test on emission in the shade kernel |
 | Environment light (PBRT infinite light in the research scenes) | Ignored, named on stderr | Environment lighting: radiance returned when a ray misses, from an HDRI map (`.exr`, `.pfm`) or a constant color |
 | Punctual lights (`KHR_lights_punctual`), PBRT distant lights | Ignored, named on stderr | Direct light sampling (next event estimation). These lights have no surface for a path to hit |
 | Scenes lit through a small opening (veach-ajar) | Mostly noise | Direct light sampling (next event estimation) |
 | Camera roll | Dropped, with a note printed | An interactive camera that keeps its own up vector. The orbit camera always uses world +Y |
 
-Of the 26 [glTF research scenes](https://github.com/ErfanMo77/gltf-research-scenes), 15 have an emissive surface and render, with every material diffuse. The other 11 render black: 10 are lit by an environment light, and dragon by a distant light alone.
+Of the 26 [glTF research scenes](https://github.com/ErfanMo77/gltf-research-scenes), 15 have an emissive surface and render, with every material diffuse and base color textures where the file has them. The other 11 render black: 10 are lit by an environment light, and dragon by a distant light alone.
 
-Skipped by the loader, with no work planned: alpha blend, occlusion maps, clearcoat, sheen and the other `KHR_materials_*` extensions.
+Skipped by the loader, with no work planned: alpha blend, occlusion maps, clearcoat, sheen and the other `KHR_materials_*` extensions, vertex colors, texture coordinate sets after `TEXCOORD_0`, `KHR_texture_transform`.
 
 ### Headless rendering
 Render without a viewport
@@ -99,13 +99,15 @@ glTF files load through [tinygltf](https://github.com/syoyo/tinygltf) (v2.9.7, t
 }
 ```
 
-The loader walks the file's default scene, multiplies node transforms down the tree, and makes one instance per (node, primitive) pair: the object's TRANS/ROTAT/SCALE times the node's world matrix. The positions, normals and triangle indices of every primitive go into one flat array each on the `Scene`, read through the accessor's buffer view and stride, with a per-primitive record of where its triangles start. A primitive without normals gets area-weighted vertex normals. `MATERIAL` is optional: without it the file's materials are appended to the scene's material list as diffuse with the base color factor. Textures, metallic-roughness and tangents are not read yet.
+The loader walks the file's default scene, multiplies node transforms down the tree, and makes one instance per (node, primitive) pair: the object's TRANS/ROTAT/SCALE times the node's world matrix. The positions, normals, texture coordinates and triangle indices of every primitive go into one flat array each on the `Scene`, read through the accessor's buffer view and stride, with a per-primitive record of where its triangles start. A primitive without normals gets area-weighted vertex normals, one without `TEXCOORD_0` gets (0, 0) at every vertex. `MATERIAL` is optional: without it the file's materials are appended to the scene's material list as diffuse with the base color factor and texture. Metallic-roughness and tangents are not read yet.
 
-Both intersection paths read the same arrays. The naive kernel loops over every triangle of every mesh instance in object space (two-sided Moller-Trumbore). OptiX builds one triangle GAS per primitive over the same buffers and one instance per scene object; its closest-hit program finds the triangle through a per-instance record and interpolates the vertex normal from the barycentrics. Same conventions on both sides: the geometric normal decides `outside`, the shading normal is flipped to face the ray on a back-face hit, so refraction through a mesh works the same as through the built-in sphere.
+Both intersection paths read the same arrays. The naive kernel loops over every triangle of every mesh instance in object space (two-sided Moller-Trumbore). OptiX builds one triangle GAS per primitive over the same buffers and one instance per scene object; its closest-hit program finds the triangle through a per-instance record and interpolates the vertex normal and uv from the barycentrics. Same conventions on both sides: the geometric normal decides `outside`, the shading normal is flipped to face the ray on a back-face hit, so refraction through a mesh works the same as through the built-in sphere.
+
+Each image a material uses becomes a CUDA array of `uchar4`, and each (image, sampler, color space) a texture object over it (`src/textures.cpp`). The shade kernel samples the base color texture with `tex2D` at the hit's uv and multiplies the factor by it. Base color is stored sRGB-encoded, and the texture object's `sRGB` flag has the texture unit decode each texel to linear before the bilinear blend, so memory keeps the 8-bit sRGB values and the shader gets linear floats. A 16-bit image is rounded to 8 bits per channel at load. There are no mipmaps: the camera jitters each pixel's ray, so the samples already average the texels a pixel covers.
 
 #### Test assets
 
-Models come from [KhronosGroup/glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets), folder `Models/<name>/glTF/`, and are expected under `scenes/assets/<name>/glTF/`. That folder is gitignored; the `.gltf` and `.bin` are enough since textures are not read yet.
+Models come from [KhronosGroup/glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets), folder `Models/<name>/glTF/`, and are expected under `scenes/assets/<name>/glTF/`. That folder is gitignored. Each model needs its `.gltf`, `.bin` and the image files next to them. A missing image is a warning, and the materials that use it fall back to their base color factor.
 
 | model | triangles | scene file | credit |
 |---|---|---|---|
@@ -114,6 +116,13 @@ Models come from [KhronosGroup/glTF-Sample-Assets](https://github.com/KhronosGro
 | Suzanne | 3,936 | `cornell_suzanne.json` | Norbert Nopper / UX3D, 2017, CC0 |
 | DamagedHelmet | 15,452 | `cornell_helmet.json` | theblueturtle_, 2016, CC BY-NC 4.0; glTF rebuild by ctxwing, 2018, CC BY 4.0 |
 | Sponza | 262,267 | `sponza.json` | Crytek (Frank Meinl), CryENGINE Limited License Agreement, glTF conversion from the Khronos repo |
+| Intel Sponza, main and curtains | 3,747,018 + 1,997,366 | `sponza_intel.json` | Frank Meinl and Anton Kaplanyan, Intel, 2022, CC BY 4.0; curtains add-on by the Sponza Addon Package Crew |
+| Bistro exterior | 2,829,226 | `assets/Bistro/Exterior/BistroExterior.gltf`, loaded directly | Amazon Lumberyard, July 2017, CC BY 4.0 |
+| Bistro interior | 1,043,077 | `assets/Bistro/Interior/BistroInterior.gltf`, loaded directly | Amazon Lumberyard, July 2017, CC BY 4.0 |
+
+The Intel Sponza comes from the [Intel Sample Library](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-processing-research/samples.html) as one zip per package. The glTF files, their `.bin` and `textures/` folders go under `scenes/assets/IntelSponza/<package>/`, keeping the zip's folder names (`main_sponza`, `pkg_a_curtains`, `pkg_d_10k_candles`). `sponza_intel.json` loads the main scene and the curtains package together, with the main file's first camera (`PhysCamera001`) and an emitting slab above the atrium in place of the sun, which is a punctual light. Cited as: Frank Meinl and Anton Kaplanyan, 2022, Intel Sample Library. The add-on packages also credit the Sponza Addon Package Crew: Katica Putica, Cristiano Siqueira, Timothy Heath, Justin Prazen, Sebastian Herholz, Bruce Cherniak, Anton Kaplanyan.
+
+The Bistro comes from NVIDIA's Open Research Content Archive as FBX with DDS textures (`Bistro_v5_2.zip`), cited as: Amazon Lumberyard Bistro, Open Research Content Archive (ORCA). Amazon Lumberyard, July 2017. http://developer.nvidia.com/orca/amazon-lumberyard-bistro. I converted it with Blender 5.2.2: FBX import, then a glTF Separate export into `scenes/assets/Bistro/Exterior/` and `scenes/assets/Bistro/Interior/`, which writes every DDS texture out as PNG. Bistro's "Specular" texture packs occlusion, roughness and metalness into R, G and B, and the FBX importer wires it to Specular IOR Level, which exports as `KHR_materials_specular`. In the saved `.blend` files a Separate Color node sends G to Roughness and B to Metallic instead, so the export writes the same image as glTF's `metallicRoughnessTexture` (glTF reads roughness from G and metalness from B too). Every Bistro emitter has an emissive texture, so both scenes render black until emissive textures are read.
 
 #### Naive loop vs OptiX by triangle count
 

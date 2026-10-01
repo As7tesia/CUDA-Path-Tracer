@@ -5,9 +5,9 @@
 // The programs produce exactly what computeIntersections in pathtrace.cu
 // produces, so shadeMaterial and the material sort cannot tell the two apart:
 // t along the normalized ray, the surface normal with the same orientation
-// convention as the naive tests, the material id, the outside flag, and the
-// sort key. There is no payload: every program knows its launch index and
-// writes straight into the intersection buffer.
+// convention as the naive tests, the uv, the material id, the outside flag,
+// and the sort key. There is no payload: every program knows its launch
+// index and writes straight into the intersection buffer.
 
 #include <optix.h>
 
@@ -63,13 +63,14 @@ static __forceinline__ __device__ InstanceRecord instance()
     return params.instances[optixGetInstanceId()];
 }
 
-static __forceinline__ __device__ void writeHit(int materialId, glm::vec3 normal, bool outside)
+static __forceinline__ __device__ void writeHit(int materialId, glm::vec3 normal, glm::vec2 uv, bool outside)
 {
     const unsigned int i = optixGetLaunchIndex().x;
 
     ShadeableIntersection isect;
     isect.t = optixGetRayTmax();
     isect.surfaceNormal = normal;
+    isect.uv = uv;
     isect.materialId = materialId;
     isect.outside = outside;
     params.intersections[i] = isect;
@@ -101,7 +102,7 @@ extern "C" __global__ void __closesthit__cube()
     {
         normal = -normal;
     }
-    writeHit(instance().materialId, normal, outside);
+    writeHit(instance().materialId, normal, glm::vec2(0.0f), outside);
 }
 
 // Unit sphere GAS: one custom primitive, center at the origin, radius 0.5,
@@ -175,7 +176,7 @@ extern "C" __global__ void __closesthit__sphere()
         normal = -normal;
     }
 
-    writeHit(instance().materialId, normal, outside);
+    writeHit(instance().materialId, normal, glm::vec2(0.0f), outside);
 }
 
 // Mesh GAS: OptiX's built-in triangle intersection reports which triangle of
@@ -183,7 +184,8 @@ extern "C" __global__ void __closesthit__sphere()
 // weighting vertices 1 and 2). The vertex data comes from the same flat
 // arrays the naive kernel reads. Same conventions as meshIntersectionTest:
 // the geometric normal decides outside, the interpolated vertex normal is
-// the shading normal, flipped to face the ray on a back-face hit.
+// the shading normal, flipped to face the ray on a back-face hit, and the uv
+// is interpolated with the same weights.
 extern "C" __global__ void __closesthit__mesh()
 {
     const InstanceRecord inst = instance();
@@ -221,5 +223,9 @@ extern "C" __global__ void __closesthit__mesh()
         }
     }
 
-    writeHit(inst.materialId, normal, outside);
+    const glm::vec2 uv = (1.0f - bary.x - bary.y) * params.buffers.uvs[tri.x]
+                       + bary.x * params.buffers.uvs[tri.y]
+                       + bary.y * params.buffers.uvs[tri.z];
+
+    writeHit(inst.materialId, normal, uv, outside);
 }
