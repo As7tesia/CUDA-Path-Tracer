@@ -565,3 +565,9 @@ img/test/
 
 # glTF test models (downloaded, see the README's asset list)
 scenes/assets/
+
+# profiling (plan step 3i): raw logs and Nsight reports stay local, the records and summary are tracked
+profiling/results/logs/
+profiling/results/nsys/
+profiling/results/ncu/
+profiling/results/*.log
