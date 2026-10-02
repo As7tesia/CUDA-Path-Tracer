@@ -25,7 +25,9 @@
 #include <ctime>
 #include <filesystem>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 static std::string startTimeString;
 static Options options;
@@ -54,9 +56,20 @@ static double lastX;
 static double lastY;
 
 static Scene* scene;
+static std::string sceneFile;   // the loaded scene's path, shown in the panel
+static std::string sceneTitle;  // its stem, for the window title
 static GuiDataContainer guiData;
 static RenderState* renderState;
 static int iteration;
+
+// The panel's scene section. The list is read once at startup; a load the
+// panel asks for happens after the frame that asked, so the "Loading"
+// line is on screen while the window is busy.
+static std::vector<SceneName> sceneList;
+static int selectedScene = -1;
+static char scenePath[1024] = "";
+static std::string requestedScene;
+static std::string loadError;       // why the last load failed, until the next one
 
 static int width;
 static int height;
@@ -74,6 +87,8 @@ static void runCuda();
 static void runHeadless();
 static void flyFromKeys(float seconds);
 static void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods);
+static void framebufferSizeCallback(GLFWwindow* window, int fbWidth, int fbHeight);
+static void switchScene(const std::string& argument);
 static void mousePositionCallback(GLFWwindow* window, double xpos, double ypos);
 static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
 static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset);
@@ -235,6 +250,7 @@ static bool init()
     glfwSetCursorPosCallback(window, mousePositionCallback);
     glfwSetMouseButtonCallback(window, mouseButtonCallback);
     glfwSetScrollCallback(window, scrollCallback);
+    glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
     // Unaccelerated mouse motion while a drag has the cursor disabled
     if (glfwRawMouseMotionSupported())
     {
@@ -277,10 +293,52 @@ static void renderImGui()
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
-    ImGui::Begin("Path Tracer Analytics");
+    // Sized to its content: the scene section below changes height
+    ImGui::Begin("Path Tracer Analytics", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
     ImGui::Text("Traced Depth %d", guiData.tracedDepth);
     ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
     ImGui::Text("Fly speed %.3g units/s (RMB + wheel)", flySpeed);
+
+    ImGui::Separator();
+    ImGui::Text("Scene: %s", sceneFile.c_str());
+    ImGui::SetNextItemWidth(240);
+    const char* preview = selectedScene >= 0 ? sceneList[selectedScene].name.c_str() : "pick a scene";
+    if (ImGui::BeginCombo("##scene", preview))
+    {
+        for (int i = 0; i < (int)sceneList.size(); ++i)
+        {
+            const SceneName& entry = sceneList[i];
+            // A catalog scene whose glTF is not downloaded is listed, grayed out
+            const std::string label = entry.available ? entry.name : entry.name + " (not downloaded)";
+            if (ImGui::Selectable(label.c_str(), i == selectedScene,
+                    entry.available ? ImGuiSelectableFlags_None : ImGuiSelectableFlags_Disabled))
+            {
+                selectedScene = i;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load") && selectedScene >= 0)
+    {
+        requestedScene = sceneList[selectedScene].name;
+    }
+    ImGui::SetNextItemWidth(240);
+    if (ImGui::InputTextWithHint("##path", "or a .json / .gltf / .glb path, Enter loads", scenePath,
+            sizeof scenePath, ImGuiInputTextFlags_EnterReturnsTrue) && scenePath[0] != '\0')
+    {
+        requestedScene = scenePath;
+    }
+    if (!requestedScene.empty())
+    {
+        ImGui::Text("Loading %s ...", requestedScene.c_str());
+    }
+    else if (!loadError.empty())
+    {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+        ImGui::TextColored(ImVec4(0.8f, 0.1f, 0.1f, 1.0f), "%s", loadError.c_str());
+        ImGui::PopTextWrapPos();
+    }
     ImGui::End();
 
     ImGui::Render();
@@ -310,7 +368,7 @@ static void mainLoop()
 
         runCuda();
 
-        std::string title = "CIS565 Path Tracer | " + std::to_string(iteration) + " Iterations";
+        std::string title = "CIS565 Path Tracer | " + sceneTitle + " | " + std::to_string(iteration) + " Iterations";
         glfwSetWindowTitle(window, title.c_str());
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
         glBindTexture(GL_TEXTURE_2D, displayImage);
@@ -327,6 +385,12 @@ static void mainLoop()
         renderImGui();
 
         glfwSwapBuffers(window);
+
+        if (!requestedScene.empty())
+        {
+            switchScene(requestedScene);
+            requestedScene.clear();
+        }
     }
 
     pathtraceFree();
@@ -341,30 +405,14 @@ static void mainLoop()
     cudaDeviceReset();
 }
 
-//-------------------------------
-//-------------MAIN--------------
-//-------------------------------
-
-int main(int argc, char** argv)
+// Makes s the scene being rendered: render state, image size, the viewport's
+// starting pose and the fly speed come from it. Startup and a switch in the
+// window both go through here. The old scene, if any, is the caller's.
+static void useScene(Scene* s, const std::string& file)
 {
-    startTimeString = currentTimeString();
-
-    options = parseArguments(argc, argv);
-    if (options.list)
-    {
-        listScenes();
-        return 0;
-    }
-    setRussianRoulette(options.russianRoulette);
-    setMaterialSort(options.materialSort);
-    setOptix(options.optix);
-    setOptixValidation(options.optixValidation);
-    setToneMap(options.toneMap, options.exposure);
-
-    // Load scene file
-    scene = new Scene(findSceneFile(options.sceneFile), options.overrides);
-
-    // Set up camera stuff from loaded path tracer settings
+    scene = s;
+    sceneFile = file;
+    sceneTitle = std::filesystem::path(file).stem().string();
     iteration = 0;
     renderState = &scene->state;
     Camera& cam = renderState->camera;
@@ -376,6 +424,92 @@ int main(int argc, char** argv)
     scenePose = poseFromCamera(cam);
     viewportPose = scenePose;
     applyPose(viewportPose, cam);
+    camchanged = true;
+
+    glm::vec3 lo, hi;
+    scene->bounds(0, scene->geoms.size(), lo, hi);
+    flySpeed = (lo.x <= hi.x ? glm::length(hi - lo) : 1.0f) / SECONDS_TO_CROSS_SCENE;
+}
+
+// Replaces the window's scene with the one argument names (a path or a
+// name, as on the command line; the same --res / --spp / --depth apply).
+// The new scene is read first, so a bad one leaves the old scene in place
+// with the error in the panel. Then the device buffers, the pixel buffer,
+// the display texture and the window are remade at the new resolution.
+static void switchScene(const std::string& argument)
+{
+    Scene* next;
+    std::string file;
+    try
+    {
+        file = findSceneFile(argument);
+        next = new Scene(file, options.overrides);
+    }
+    catch (const std::exception& e)
+    {
+        loadError = e.what();
+        fprintf(stderr, "error: %s\n", loadError.c_str());
+        return;
+    }
+    loadError.clear();
+    // The combo follows a scene the path field named, when it is in the list
+    selectedScene = -1;
+    for (int i = 0; i < (int)sceneList.size(); ++i)
+    {
+        if (sceneList[i].name == argument)
+        {
+            selectedScene = i;
+        }
+    }
+
+    pathtraceFree();
+    delete scene;
+    useScene(next, file);
+    pathtraceInit(scene);
+
+    cleanupCuda();
+    initTextures();
+    initPBO();
+    // The window follows the image; framebufferSizeCallback sets the viewport
+    glfwSetWindowSize(window, width, height);
+}
+
+//-------------------------------
+//-------------MAIN--------------
+//-------------------------------
+
+int main(int argc, char** argv)
+{
+    startTimeString = currentTimeString();
+
+    options = parseArguments(argc, argv);
+    setRussianRoulette(options.russianRoulette);
+    setMaterialSort(options.materialSort);
+    setOptix(options.optix);
+    setOptixValidation(options.optixValidation);
+    setToneMap(options.toneMap, options.exposure);
+
+    // Load the scene file. Loading reports its errors as exceptions so the
+    // window can keep its scene on a failed switch; here there is nothing
+    // to fall back to.
+    try
+    {
+        if (options.list)
+        {
+            listScenes();
+            return 0;
+        }
+        const std::string file = findSceneFile(options.sceneFile);
+        useScene(new Scene(file, options.overrides), file);
+        if (!options.headless)
+        {
+            sceneList = sceneNames();
+        }
+    }
+    catch (const std::exception& e)
+    {
+        fatal("%s", e.what());
+    }
 
     if (options.headless)
     {
@@ -383,16 +517,23 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    glm::vec3 lo, hi;
-    scene->bounds(0, scene->geoms.size(), lo, hi);
-    flySpeed = (lo.x <= hi.x ? glm::length(hi - lo) : 1.0f) / SECONDS_TO_CROSS_SCENE;
+    // The combo starts on the scene the command line named, when that is
+    // one of the list's names rather than a path
+    for (int i = 0; i < (int)sceneList.size(); ++i)
+    {
+        if (sceneList[i].name == options.sceneFile)
+        {
+            selectedScene = i;
+        }
+    }
 
     // Initialize CUDA and GL components
     if (!init())
     {
         fatal("cannot create the window and its OpenGL context");
     }
-    // Device buffers live for the whole run; camera changes only clear the image
+    // Device buffers live until exit or a scene switch; camera changes only
+    // clear the image
     pathtraceInit(scene);
     setGuiData(&guiData);
 
@@ -516,6 +657,12 @@ static void cameraMoved()
 {
     applyPose(viewportPose, renderState->camera);
     camchanged = true;
+}
+
+// The quad that shows the image fills the window, whatever size it has
+static void framebufferSizeCallback(GLFWwindow* window, int fbWidth, int fbHeight)
+{
+    glViewport(0, 0, fbWidth, fbHeight);
 }
 
 static bool altHeld()

@@ -39,13 +39,24 @@ struct CameraPose
 // is an existing file; for a bare name (no folder, no extension)
 // scenes/<name>.json, then the name's entry in scenes/catalog.json, which
 // gives short names to the glTF scenes under scenes/assets. Paths are
-// relative to the working directory, the repository root. Ends the program
-// when nothing matches.
+// relative to the working directory, the repository root. Throws a
+// std::runtime_error saying what was tried when nothing matches.
 std::string findSceneFile(const std::string& argument);
 
 // Prints the names findSceneFile takes: the scene JSONs in scenes/ and the
 // catalog's entries, marking those whose file is not downloaded.
 void listScenes();
+
+// A name findSceneFile takes, for the window's scene list. available is
+// false for a catalog entry whose glTF is not downloaded.
+struct SceneName
+{
+    std::string name;
+    bool available;
+};
+// The scene JSONs in scenes/, sorted, then the catalog's entries in file
+// order. Empty when there is no scenes/ folder.
+std::vector<SceneName> sceneNames();
 
 class Scene
 {
@@ -55,7 +66,9 @@ private:
     void initRenderState(const RenderSettings& settings, const CameraPose& pose);
 public:
     // filename is a scene JSON, or a glTF file (.gltf / .glb) that is the
-    // whole scene: geometry, materials, lights and camera.
+    // whole scene: geometry, materials, lights and camera. Throws a
+    // std::runtime_error, starting with the file's name, when the file
+    // cannot be read or is not a scene.
     Scene(std::string filename, const SceneOverrides& ov = SceneOverrides());
 
     // World-space bounding box of geoms [first, last): the transformed

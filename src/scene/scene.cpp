@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -32,6 +33,19 @@ const int DEFAULT_TRACE_DEPTH = 8;
 // Vertical field of view, in degrees, of the camera made for a glTF file
 // that has none.
 const float DEFAULT_FOVY = 45.0f;
+
+// Throws a std::runtime_error with the printf-style message. Loading reports
+// its errors this way rather than through fatal() so the window can show
+// the message and keep the scene it has; main() exits on them at startup.
+[[noreturn]] void sceneError(const char* format, ...)
+{
+    char message[1024];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof message, format, args);
+    va_end(args);
+    throw std::runtime_error(message);
+}
 
 // The command line wins over the scene file.
 RenderSettings withOverrides(RenderSettings settings, const SceneOverrides& ov)
@@ -86,9 +100,25 @@ std::vector<std::pair<std::string, std::string>> readCatalog()
     }
     catch (const std::exception& e)
     {
-        fatal("%s: %s", CATALOG.c_str(), e.what());
+        sceneError("%s: %s", CATALOG.c_str(), e.what());
     }
     return entries;
+}
+
+// The stems of the scene JSONs in scenes/, sorted.
+std::vector<std::string> sceneJsonNames()
+{
+    std::vector<std::string> names;
+    for (const auto& entry : std::filesystem::directory_iterator(SCENE_DIR))
+    {
+        if (entry.is_regular_file() && lowercaseExtension(entry.path().string()) == ".json"
+            && entry.path().filename() != "catalog.json")
+        {
+            names.push_back(entry.path().stem().string());
+        }
+    }
+    std::sort(names.begin(), names.end());
+    return names;
 }
 }  // namespace
 
@@ -101,7 +131,7 @@ std::string findSceneFile(const std::string& argument)
     const std::filesystem::path path(argument);
     if (path.has_extension() || path.has_parent_path())
     {
-        fatal("no scene file %s", argument.c_str());
+        sceneError("no scene file %s", argument.c_str());
     }
     const std::string sceneJson = SCENE_DIR + argument + ".json";
     if (std::filesystem::is_regular_file(sceneJson))
@@ -115,14 +145,32 @@ std::string findSceneFile(const std::string& argument)
             const std::string catalogFile = SCENE_DIR + file;
             if (!std::filesystem::is_regular_file(catalogFile))
             {
-                fatal("%s is %s, which is not downloaded (see the README's asset list)", argument.c_str(),
+                sceneError("%s is %s, which is not downloaded (see the README's asset list)", argument.c_str(),
                     catalogFile.c_str());
             }
             return catalogFile;
         }
     }
-    fatal("no scene named %s: neither %s nor an entry in %s (--list prints the names)", argument.c_str(),
+    sceneError("no scene named %s: neither %s nor an entry in %s (--list prints the names)", argument.c_str(),
         sceneJson.c_str(), CATALOG.c_str());
+}
+
+std::vector<SceneName> sceneNames()
+{
+    std::vector<SceneName> names;
+    if (!std::filesystem::is_directory(SCENE_DIR))
+    {
+        return names;
+    }
+    for (const std::string& name : sceneJsonNames())
+    {
+        names.push_back({name, true});
+    }
+    for (const auto& [name, file] : readCatalog())
+    {
+        names.push_back({name, std::filesystem::is_regular_file(SCENE_DIR + file)});
+    }
+    return names;
 }
 
 void listScenes()
@@ -159,26 +207,27 @@ Scene::Scene(string filename, const SceneOverrides& ov)
     cout << "Reading scene from " << filename << " ..." << endl;
     cout << " " << endl;
     const string ext = lowercaseExtension(filename);
-    if (ext == ".json")
+    // Every error while loading, the loaders' own and a missing key or a
+    // value of the wrong type in a JSON, leaves here as a runtime_error
+    // that starts with the scene file's name.
+    try
     {
-        // A missing key or a value of the wrong type throws while loading;
-        // it ends the program here, with the scene file's name.
-        try
+        if (ext == ".json")
         {
             loadFromJSON(filename, ov);
         }
-        catch (const std::exception& e)
+        else if (ext == ".gltf" || ext == ".glb")
         {
-            fatal("%s: %s", filename.c_str(), e.what());
+            loadFromGltf(filename, ov);
+        }
+        else
+        {
+            sceneError("not a scene file (.json, .gltf or .glb)");
         }
     }
-    else if (ext == ".gltf" || ext == ".glb")
+    catch (const std::exception& e)
     {
-        loadFromGltf(filename, ov);
-    }
-    else
-    {
-        fatal("%s: not a scene file (.json, .gltf or .glb)", filename.c_str());
+        throw std::runtime_error(filename + ": " + e.what());
     }
 }
 
@@ -222,7 +271,7 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
     std::ifstream f(jsonName);
     if (!f)
     {
-        fatal("cannot open %s", jsonName.c_str());
+        sceneError("cannot open");
     }
     const json data = json::parse(f);
     // Each material TYPE becomes parameters of the one material model
@@ -270,8 +319,8 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
         }
         else
         {
-            fatal("%s: material %s has an unknown TYPE \"%s\" (Diffuse, Emitting, Specular or Refractive)",
-                jsonName.c_str(), name.c_str(), type.c_str());
+            sceneError("material %s has an unknown TYPE \"%s\" (Diffuse, Emitting, Specular or Refractive)",
+                name.c_str(), type.c_str());
         }
         materialIdsByName[name] = materials.size();
         materials.emplace_back(newMaterial);
@@ -282,7 +331,7 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
         auto found = materialIdsByName.find(name);
         if (found == materialIdsByName.end())
         {
-            fatal("%s: unknown material %s", jsonName.c_str(), name.c_str());
+            sceneError("unknown material %s", name.c_str());
         }
         return (int)found->second;
     };
@@ -304,7 +353,7 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
             const std::string file = sceneDir + p.at("FILE").get<std::string>();
             if (!loadGltf(file, transform, materialOverride, *this))
             {
-                fatal("%s: cannot load %s", jsonName.c_str(), file.c_str());
+                sceneError("cannot load %s", file.c_str());
             }
             continue;
         }
@@ -320,7 +369,7 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
         }
         else
         {
-            fatal("%s: unknown object TYPE \"%s\" (cube, sphere or mesh)", jsonName.c_str(), type.c_str());
+            sceneError("unknown object TYPE \"%s\" (cube, sphere or mesh)", type.c_str());
         }
         newGeom.materialId = materialIndex(p.at("MATERIAL").get<std::string>());
         newGeom.meshId = -1;
@@ -353,11 +402,11 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
     GltfInfo info;
     if (!loadGltf(gltfName, glm::mat4(1.0f), -1, *this, &info))
     {
-        fatal("cannot load %s", gltfName.c_str());
+        sceneError("cannot load (the loader printed why)");
     }
     if (geoms.empty())
     {
-        fatal("%s: nothing to render", gltfName.c_str());
+        sceneError("nothing to render");
     }
     // Only a surface that emits lights a scene so far.
     if (std::none_of(materials.begin(), materials.end(), [](const Material& m) {
