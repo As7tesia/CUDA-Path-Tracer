@@ -37,11 +37,34 @@ A `.gltf` or `.glb` file loads in two ways: as the whole scene when it is the sc
 | Environment light (PBRT infinite light in the research scenes) | Ignored, named on stderr | Environment lighting: radiance returned when a ray misses, from an HDRI map (`.exr`, `.pfm`) or a constant color |
 | Punctual lights (`KHR_lights_punctual`), PBRT distant lights | Ignored, named on stderr | Direct light sampling (next event estimation). These lights have no surface for a path to hit |
 | Scenes lit through a small opening (veach-ajar) | Mostly noise | Direct light sampling (next event estimation) |
-| Camera roll | Dropped, with a note printed | An interactive camera that keeps its own up vector. The orbit camera always uses world +Y |
+| Camera roll | Dropped, with a note printed | An interactive camera that keeps its own up vector. The viewport camera always uses world +Y |
 
 Of the 26 [glTF research scenes](https://github.com/ErfanMo77/gltf-research-scenes), 15 have an emissive surface and render with their glTF materials. The other 11 render black: 10 are lit by an environment light, and dragon by a distant light alone. cornell-caustic renders nearly black too, as it did with every material diffuse: its `extras.pbrt.render` names SPPM as the integrator.
 
 Skipped by the loader, with no work planned: occlusion maps (they stand in for the shadowing a path tracer computes), the textures of `KHR_materials_specular` and `_clearcoat` (the clearcoat normal map among them), the thickness of `KHR_materials_volume`, sheen and the other `KHR_materials_*` extensions, vertex colors, texture coordinate sets after `TEXCOORD_0`, `KHR_texture_transform`. The loader names the extensions it skips, on the materials and on the texture slots it reads, and counts the blend materials on stderr.
+
+### Viewport controls
+
+The viewport navigates like the Unreal Engine 5 level editor: hold the right mouse button to look around and fly, or hold Alt for the Maya-style orbit. Any camera move restarts the accumulation.
+
+| Input | Action |
+|---|---|
+| RMB drag | Look around in place |
+| RMB + W / S | Fly forward / back |
+| RMB + A / D | Fly left / right |
+| RMB + E / Q | Fly up / down along world +Y |
+| RMB + wheel | Fly speed up / down, x1.25 per notch (shown in the ImGui panel) |
+| LMB drag | Up / down moves along the ground, left / right turns |
+| MMB drag, or LMB + RMB drag | Pan |
+| Wheel | Move forward / back in steps |
+| Alt + LMB drag | Orbit around the pivot |
+| Alt + RMB drag | Move toward / away from the pivot |
+| Alt + MMB drag | Pan |
+| F | Back to the scene file's camera |
+| Ctrl + S | Save the image |
+| Esc | Save the image and quit |
+
+The camera is a position, a yaw about world +Y, a pitch that stops just short of straight up or down, and a pivot distance. The orbit pivot sits on the view axis at that distance and travels with the camera. It starts at the scene's `LOOKAT`, or for a glTF camera at a point on its view axis near the middle of the scene. The default fly speed crosses the scene's bounding box diagonal in 4 seconds. A drag hides and locks the cursor, so it does not stop at the edge of the screen. Headless renders build their basis from the same pose as the window's first frame.
 
 ### Headless rendering
 Render without a viewport

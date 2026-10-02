@@ -46,6 +46,11 @@ public:
     // whole scene: geometry, materials, lights and camera.
     Scene(std::string filename, const SceneOverrides& ov = SceneOverrides());
 
+    // World-space bounding box of geoms [first, last): the transformed
+    // corners of the unit cube around a sphere or cube, the transformed
+    // vertices of a mesh. lo > hi when the range is empty.
+    void bounds(size_t first, size_t last, glm::vec3& lo, glm::vec3& hi) const;
+
     std::vector<Geom> geoms;
     std::vector<Material> materials;
     // Triangle meshes from glTF files, flattened: every primitive appends its

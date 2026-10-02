@@ -1093,23 +1093,8 @@ bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int mate
     }
 
     // World-space bounds of what was added, for placing the object in a scene.
-    glm::vec3 lo(FLT_MAX);
-    glm::vec3 hi(-FLT_MAX);
-    for (size_t g = firstGeom; g < scene.geoms.size(); ++g)
-    {
-        const Geom& geom = scene.geoms[g];
-        const TriangleMesh& mesh = scene.meshes[geom.meshId];
-        for (int t = 0; t < mesh.triCount; ++t)
-        {
-            const glm::ivec3 tri = scene.indices[mesh.indexOffset + t];
-            for (int k = 0; k < 3; ++k)
-            {
-                const glm::vec3 p = glm::vec3(geom.transform * glm::vec4(scene.positions[tri[k]], 1.0f));
-                lo = glm::min(lo, p);
-                hi = glm::max(hi, p);
-            }
-        }
-    }
+    glm::vec3 lo, hi;
+    scene.bounds(firstGeom, scene.geoms.size(), lo, hi);
     printf("glTF %s: %zu triangles in %zu primitives, %zu instances, bounds (%.3f, %.3f, %.3f) to (%.3f, %.3f, %.3f)\n",
         path.c_str(), scene.indices.size() - firstTriangle, scene.meshes.size() - firstMesh,
         scene.geoms.size() - firstGeom, lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);

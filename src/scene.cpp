@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cfloat>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -71,6 +72,41 @@ Scene::Scene(string filename, const SceneOverrides& ov)
     {
         cout << "Couldn't read from " << filename << endl;
         exit(-1);
+    }
+}
+
+void Scene::bounds(size_t first, size_t last, glm::vec3& lo, glm::vec3& hi) const
+{
+    lo = glm::vec3(FLT_MAX);
+    hi = glm::vec3(-FLT_MAX);
+    auto grow = [&](const Geom& geom, const glm::vec3& p) {
+        const glm::vec3 world = glm::vec3(geom.transform * glm::vec4(p, 1.0f));
+        lo = glm::min(lo, world);
+        hi = glm::max(hi, world);
+    };
+    for (size_t g = first; g < last; ++g)
+    {
+        const Geom& geom = geoms[g];
+        if (geom.type == MESH)
+        {
+            const TriangleMesh& mesh = meshes[geom.meshId];
+            for (int t = 0; t < mesh.triCount; ++t)
+            {
+                const glm::ivec3 tri = indices[mesh.indexOffset + t];
+                for (int k = 0; k < 3; ++k)
+                {
+                    grow(geom, positions[tri[k]]);
+                }
+            }
+        }
+        else
+        {
+            // A sphere has radius 0.5 and a cube half-width 0.5 before the transform.
+            for (int c = 0; c < 8; ++c)
+            {
+                grow(geom, glm::vec3(c & 1 ? 0.5f : -0.5f, c & 2 ? 0.5f : -0.5f, c & 4 ? 0.5f : -0.5f));
+            }
+        }
     }
 }
 
@@ -252,11 +288,11 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
         }
         pose.lookAt = c.position + ahead * c.view;
 
-        // The interactive camera (updateCameraFromOrbit in main.cpp) orbits
-        // with world +Y up, so its right is always level: perpendicular to
-        // view and +Y, or +X when it looks straight up or down. A glTF camera
-        // whose right points elsewhere is rolled about its view axis, and
-        // the roll is lost.
+        // The viewport camera (applyPose in main.cpp) keeps world +Y up, so
+        // its right is always level: perpendicular to view and +Y, or +X
+        // when it looks straight up or down. A glTF camera whose right
+        // points elsewhere is rolled about its view axis, and the roll is
+        // lost.
         glm::vec3 level = glm::cross(c.view, glm::vec3(0.0f, 1.0f, 0.0f));
         level = glm::length(level) < 1e-3f ? glm::vec3(1.0f, 0.0f, 0.0f) : glm::normalize(level);
         if (glm::dot(glm::normalize(glm::cross(c.view, c.up)), level) < 0.9999f)
