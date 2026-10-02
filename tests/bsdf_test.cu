@@ -6,7 +6,7 @@
 // prints a line, and the exit code is nonzero when one fails. Built by the
 // bsdf_test target (CMakeLists.txt, outside the default build); the README's
 // "Checking the BSDF" table comes from its output.
-#include "bsdf.cu"
+#include "render/bsdf.cu"
 
 #include <cstdio>
 #include <cmath>

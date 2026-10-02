@@ -1,6 +1,6 @@
-#include "bsdf.h"
+#include "render/bsdf.h"
 
-#include "sampling.h"
+#include "render/sampling.h"
 #include "utilities.h"
 
 #include <thrust/random.h>

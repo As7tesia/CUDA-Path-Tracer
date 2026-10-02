@@ -1,4 +1,4 @@
-#include "image.h"
+#include "app/image.h"
 
 #include <stb_image_write.h>
 

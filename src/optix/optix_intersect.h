@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sceneStructs.h"
+#include "scene/sceneStructs.h"
 
 #include <cuda_runtime.h>
 

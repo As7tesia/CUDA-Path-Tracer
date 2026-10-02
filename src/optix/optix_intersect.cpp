@@ -6,10 +6,10 @@
 
 #define NOMINMAX  // optix_stubs.h includes windows.h, whose min/max macros break glm
 
-#include "optix_intersect.h"
+#include "optix/optix_intersect.h"
 
-#include "optix_params.h"
-#include "scene.h"
+#include "optix/optix_params.h"
+#include "scene/scene.h"
 #include "utilities.h"
 
 #include <optix.h>

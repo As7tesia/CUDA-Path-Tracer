@@ -1,4 +1,4 @@
-#include "cli.h"
+#include "app/cli.h"
 
 #include "utilities.h"
 
@@ -9,10 +9,13 @@
 namespace
 {
 const char* const USAGE =
-    "Usage: %s SCENEFILE [--headless] [--spp N] [--res WxH] [--depth N] [--out PATH.png]\n"
+    "Usage: %s SCENE [--headless] [--spp N] [--res WxH] [--depth N] [--out PATH.png]\n"
     "                     [--no-rr] [--no-sort] [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
     "                     [--no-optix] [--optix-validate]\n"
-    "  SCENEFILE        a scene .json, or a .gltf / .glb file that is the whole scene\n"
+    "       %s --list\n"
+    "  SCENE            a scene .json, a .gltf / .glb file that is the whole scene, or a scene name:\n"
+    "                   scenes/<name>.json or an entry of scenes/catalog.json\n"
+    "  --list           print the scene names and exit\n"
     "  --headless       render without a window and exit after saving\n"
     "  --spp N          override the scene's ITERATIONS\n"
     "  --res WxH        override the scene's RES\n"
@@ -52,6 +55,10 @@ Options parseArguments(int argc, char** argv)
         if (a == "--headless")
         {
             options.headless = true;
+        }
+        else if (a == "--list")
+        {
+            options.list = true;
         }
         else if (a == "--spp")
         {
@@ -114,7 +121,7 @@ Options parseArguments(int argc, char** argv)
         }
         else if (a.size() > 2 && a.substr(0, 2) == "--")
         {
-            fprintf(stderr, USAGE, argv[0]);
+            fprintf(stderr, USAGE, argv[0], argv[0]);
             fatal("unknown option %s", argv[i]);
         }
         else
@@ -123,10 +130,10 @@ Options parseArguments(int argc, char** argv)
         }
     }
 
-    if (options.sceneFile.empty())
+    if (options.sceneFile.empty() && !options.list)
     {
-        fprintf(stderr, USAGE, argv[0]);
-        fatal("no scene file given");
+        fprintf(stderr, USAGE, argv[0], argv[0]);
+        fatal("no scene given");
     }
     return options;
 }

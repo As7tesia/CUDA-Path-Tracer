@@ -1,6 +1,6 @@
-#include "intersections.h"
+#include "render/intersections.h"
 
-#include "mesh_hit.h"
+#include "render/mesh_hit.h"
 
 #include <cfloat>
 

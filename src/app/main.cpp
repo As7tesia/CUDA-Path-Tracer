@@ -1,11 +1,11 @@
-#include "cli.h"
-#include "glslUtility.hpp"
-#include "image.h"
-#include "pathtrace.h"
-#include "scene.h"
-#include "sceneStructs.h"
+#include "app/cli.h"
+#include "app/glslUtility.hpp"
+#include "app/image.h"
+#include "render/pathtrace.h"
+#include "scene/scene.h"
+#include "scene/sceneStructs.h"
 #include "utilities.h"
-#include "viewport_camera.h"
+#include "app/viewport_camera.h"
 
 #include <glm/glm.hpp>
 
@@ -350,6 +350,11 @@ int main(int argc, char** argv)
     startTimeString = currentTimeString();
 
     options = parseArguments(argc, argv);
+    if (options.list)
+    {
+        listScenes();
+        return 0;
+    }
     setRussianRoulette(options.russianRoulette);
     setMaterialSort(options.materialSort);
     setOptix(options.optix);
@@ -357,7 +362,7 @@ int main(int argc, char** argv)
     setToneMap(options.toneMap, options.exposure);
 
     // Load scene file
-    scene = new Scene(options.sceneFile, options.overrides);
+    scene = new Scene(findSceneFile(options.sceneFile), options.overrides);
 
     // Set up camera stuff from loaded path tracer settings
     iteration = 0;

@@ -11,8 +11,8 @@
 
 #include <optix.h>
 
-#include "mesh_hit.h"
-#include "optix_params.h"
+#include "render/mesh_hit.h"
+#include "optix/optix_params.h"
 
 extern "C"
 {

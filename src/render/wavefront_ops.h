@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sceneStructs.h"
+#include "scene/sceneStructs.h"
 
 // Device-wide operations on the wavefront's path array (stream compaction and
 // material sort). Kept in their own translation unit for build time only: a

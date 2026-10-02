@@ -7,7 +7,7 @@
 
 #include <cuda_runtime.h>
 
-#include "sceneStructs.h"
+#include "scene/sceneStructs.h"
 
 #include <glm/glm.hpp>
 

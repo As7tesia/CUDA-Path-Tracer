@@ -1,7 +1,7 @@
 #pragma once
 
-#include "scene.h"
-#include "tonemap.h"
+#include "scene/scene.h"
+#include "render/tonemap.h"
 
 // What pathtrace() reports to the viewport's ImGui panel.
 struct GuiDataContainer

@@ -7,7 +7,7 @@
 
 #include <cuda_runtime.h>
 
-#include "sceneStructs.h"
+#include "scene/sceneStructs.h"
 
 #include <glm/glm.hpp>
 
@@ -24,10 +24,12 @@ struct PbrSurface
     glm::vec3 coatNormal;  // the clearcoat's: the mesh normal, which the normal map does not touch
 };
 
-// A texture slot's value at uv, or `fallback` when the slot is empty.
-__device__ __forceinline__ float4 sampleSlot(const cudaTextureObject_t* textures, int slot, glm::vec2 uv, float4 fallback)
+// A texture slot's value at uv, or 1 in every channel when the slot is
+// empty, so the factor the texture multiplies stands alone (glTF reads a
+// missing texture as 1).
+__device__ __forceinline__ float4 sampleSlot(const cudaTextureObject_t* textures, int slot, glm::vec2 uv)
 {
-    return slot >= 0 ? tex2D<float4>(textures[slot], uv.x, uv.y) : fallback;
+    return slot >= 0 ? tex2D<float4>(textures[slot], uv.x, uv.y) : make_float4(1.0f, 1.0f, 1.0f, 1.0f);
 }
 
 // The normal from a normal map texel, in world space and facing the ray like
@@ -92,7 +94,7 @@ __host__ __device__ __forceinline__ glm::vec3 schlickFresnel(glm::vec3 f0, float
 __device__ __forceinline__ glm::vec3 pbrEmission(const Material& m, const ShadeableIntersection& isect, glm::vec3 wo,
     const cudaTextureObject_t* textures)
 {
-    const float4 emissive = sampleSlot(textures, m.emissiveTexture, isect.uv, make_float4(1.0f, 1.0f, 1.0f, 1.0f));
+    const float4 emissive = sampleSlot(textures, m.emissiveTexture, isect.uv);
     glm::vec3 emission = m.emission * glm::vec3(emissive.x, emissive.y, emissive.z);
     if (hasClearcoat(m, isect.outside))
     {
@@ -108,18 +110,17 @@ __device__ __forceinline__ glm::vec3 pbrEmission(const Material& m, const Shadea
 __device__ __forceinline__ PbrSurface pbrSurface(const Material& m, const ShadeableIntersection& isect, glm::vec3 wo,
     const cudaTextureObject_t* textures)
 {
-    const float4 one = make_float4(1.0f, 1.0f, 1.0f, 1.0f);
     const glm::vec2 uv = isect.uv;
     PbrSurface s;
 
-    const float4 base = sampleSlot(textures, m.baseColorTexture, uv, one);
+    const float4 base = sampleSlot(textures, m.baseColorTexture, uv);
     s.baseColor = m.baseColor * glm::vec3(base.x, base.y, base.z);
 
     // glTF packs roughness in G and metallic in B (R is free for occlusion).
-    const float4 mr = sampleSlot(textures, m.metallicRoughnessTexture, uv, one);
+    const float4 mr = sampleSlot(textures, m.metallicRoughnessTexture, uv);
     s.roughness = glm::clamp(m.roughness * mr.y, 0.0f, 1.0f);
     s.metallic = glm::clamp(m.metallic * mr.z, 0.0f, 1.0f);
-    s.transmission = glm::clamp(m.transmission * sampleSlot(textures, m.transmissionTexture, uv, one).x, 0.0f, 1.0f);
+    s.transmission = glm::clamp(m.transmission * sampleSlot(textures, m.transmissionTexture, uv).x, 0.0f, 1.0f);
 
     s.emission = pbrEmission(m, isect, wo, textures);
 

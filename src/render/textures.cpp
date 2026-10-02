@@ -1,8 +1,8 @@
 // The scene's textures on the GPU. See textures.h.
 
-#include "textures.h"
+#include "render/textures.h"
 
-#include "scene.h"
+#include "scene/scene.h"
 #include "utilities.h"
 
 #include <vector>

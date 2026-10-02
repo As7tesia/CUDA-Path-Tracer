@@ -7,7 +7,7 @@
 
 #include <optix.h>
 
-#include "sceneStructs.h"
+#include "scene/sceneStructs.h"
 
 // What a hit program needs to know about the instance it hit, indexed by
 // optixGetInstanceId() (the Geom's index). A compact record rather than the

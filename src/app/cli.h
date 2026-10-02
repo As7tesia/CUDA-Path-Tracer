@@ -1,14 +1,15 @@
 #pragma once
 
-#include "scene.h"
-#include "tonemap.h"
+#include "scene/scene.h"
+#include "render/tonemap.h"
 
 #include <string>
 
 // What the command line asks for. The usage text in cli.cpp lists the flags.
 struct Options
 {
-    std::string sceneFile;
+    std::string sceneFile;       // a path, or a name for findSceneFile (scene.h)
+    bool list = false;           // --list: print the scene names and exit
     SceneOverrides overrides;    // --res, --spp, --depth
     bool headless = false;
     std::string outPath;         // empty: img/auto_saved/<FILE>.<time>.<spp>samp.png

@@ -1,20 +1,20 @@
-#include "pathtrace.h"
+#include "render/pathtrace.h"
 
 #include <cstdio>
 #include <cmath>
 #include <thrust/random.h>
 
-#include "sceneStructs.h"
-#include "scene.h"
+#include "scene/sceneStructs.h"
+#include "scene/scene.h"
 #include "glm/glm.hpp"
 #include "utilities.h"
-#include "intersections.h"
-#include "bsdf.h"
-#include "pbr_surface.h"
-#include "sampling.h"
-#include "wavefront_ops.h"
-#include "optix_intersect.h"
-#include "textures.h"
+#include "render/intersections.h"
+#include "render/bsdf.h"
+#include "render/pbr_surface.h"
+#include "render/sampling.h"
+#include "render/wavefront_ops.h"
+#include "optix/optix_intersect.h"
+#include "render/textures.h"
 
 // After kernel launches: waits for the device and ends the program, naming
 // msg, if anything launched since the last check failed (the error a kernel

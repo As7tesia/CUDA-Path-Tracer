@@ -71,44 +71,48 @@ include_directories(${OPTIX_INCLUDE_DIR})
 set(MIKKTSPACE_DIR "${CMAKE_SOURCE_DIR}/external/mikktspace")
 include_directories(${MIKKTSPACE_DIR})
 
+# src/ by role: app/ (command line, window, viewport camera, image files),
+# scene/ (scene data and loaders), render/ (the path tracing kernels and what
+# they read on the device), optix/ (the OptiX intersection stage), and the
+# shared utilities at the top. Includes name the folder: "scene/scene.h".
 set(headers
-    src/bsdf.h
-    src/cli.h
-    src/gltf_loader.h
-    src/image.h
-    src/intersections.h
-    src/mesh_hit.h
-    src/glslUtility.hpp
-    src/optix_intersect.h
-    src/optix_params.h
-    src/pathtrace.h
-    src/pbr_surface.h
-    src/sampling.h
-    src/scene.h
-    src/sceneStructs.h
-    src/textures.h
-    src/tonemap.h
+    src/app/cli.h
+    src/app/glslUtility.hpp
+    src/app/image.h
+    src/app/viewport_camera.h
+    src/optix/optix_intersect.h
+    src/optix/optix_params.h
+    src/render/bsdf.h
+    src/render/intersections.h
+    src/render/mesh_hit.h
+    src/render/pathtrace.h
+    src/render/pbr_surface.h
+    src/render/sampling.h
+    src/render/textures.h
+    src/render/tonemap.h
+    src/render/wavefront_ops.h
+    src/scene/gltf_loader.h
+    src/scene/scene.h
+    src/scene/sceneStructs.h
     src/utilities.h
-    src/viewport_camera.h
-    src/wavefront_ops.h
 )
 
 set(sources
-    src/main.cpp
-    src/cli.cpp
+    src/app/cli.cpp
+    src/app/glslUtility.cpp
+    src/app/image.cpp
+    src/app/main.cpp
+    src/app/viewport_camera.cpp
+    src/optix/optix_intersect.cpp
+    src/render/bsdf.cu
+    src/render/intersections.cu
+    src/render/pathtrace.cu
+    src/render/textures.cpp
+    src/render/wavefront_ops.cu
+    src/scene/gltf_loader.cpp
+    src/scene/scene.cpp
     src/stb.cpp
-    src/gltf_loader.cpp
-    src/image.cpp
-    src/glslUtility.cpp
-    src/pathtrace.cu
-    src/bsdf.cu
-    src/intersections.cu
-    src/optix_intersect.cpp
-    src/scene.cpp
-    src/textures.cpp
     src/utilities.cpp
-    src/viewport_camera.cpp
-    src/wavefront_ops.cu
 )
 
 set(imgui_headers
@@ -138,8 +142,7 @@ list(SORT sources)
 list(SORT imgui_headers)
 list(SORT imgui_sources)
 
-source_group("Headers" FILES ${headers})
-source_group("Sources" FILES ${sources})
+source_group(TREE "${CMAKE_SOURCE_DIR}/src" PREFIX "src" FILES ${headers} ${sources})
 source_group("ImGui\\Headers" FILES ${imgui_headers})
 source_group("ImGui\\Sources" FILES ${imgui_sources})
 
@@ -147,6 +150,7 @@ add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers} ${imgui_sources} ${im
     ${MIKKTSPACE_DIR}/mikktspace.c ${MIKKTSPACE_DIR}/mikktspace.h)
 source_group("MikkTSpace" FILES ${MIKKTSPACE_DIR}/mikktspace.c ${MIKKTSPACE_DIR}/mikktspace.h)
 target_link_libraries(${CMAKE_PROJECT_NAME} ${GL_LIBRARIES})
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE src)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CUDA_ARCHITECTURES native)
 
@@ -166,19 +170,20 @@ target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<CONFIG:Release>:$<DEVICE_
 # compiled into the executable, so optixModuleCreate reads the programs from
 # memory rather than from a file next to the binary. sm_75 is the oldest RTX
 # generation; the driver specializes the IR for the GPU it runs on.
-set(optix_programs "${CMAKE_SOURCE_DIR}/src/optix_programs.cu")
+set(optix_programs "${CMAKE_SOURCE_DIR}/src/optix/optix_programs.cu")
 set(optix_ir "${CMAKE_BINARY_DIR}/optix_programs.optixir")
 set(optix_ir_cpp "${CMAKE_BINARY_DIR}/optix_programs_ir.cpp")
+# nvcc also writes every header the programs include into a depfile (-MD),
+# which CMake reads, so editing any of them rebuilds the IR.
 add_custom_command(
     OUTPUT ${optix_ir}
     COMMAND ${CMAKE_CUDA_COMPILER} -optix-ir -arch=sm_75 -rdc=true -std=c++17 -m64 -lineinfo
             -ccbin "${CMAKE_CXX_COMPILER}"
             "-I${OPTIX_INCLUDE_DIR}" "-I${GLM_INCLUDE_DIRS}" "-I${CMAKE_SOURCE_DIR}/src"
+            -MD -MF ${optix_ir}.d -MT ${optix_ir}
             -o ${optix_ir} ${optix_programs}
     DEPENDS ${optix_programs}
-            "${CMAKE_SOURCE_DIR}/src/optix_params.h"
-            "${CMAKE_SOURCE_DIR}/src/sceneStructs.h"
-            "${CMAKE_SOURCE_DIR}/src/mesh_hit.h"
+    DEPFILE ${optix_ir}.d
     COMMENT "nvcc -optix-ir optix_programs.cu"
     VERBATIM)
 add_custom_command(
@@ -191,10 +196,10 @@ add_custom_command(
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${optix_ir_cpp} ${optix_programs})
 # Listed so it shows in the IDE; nvcc must not build it as an ordinary CUDA file.
 set_source_files_properties(${optix_programs} PROPERTIES HEADER_FILE_ONLY ON)
-source_group("OptiX" FILES ${optix_programs})
+source_group("src\\optix" FILES ${optix_programs})
 
 # Host-side check of scatterPbr (tests/bsdf_test.cu), not part of the default
-# build. It includes bsdf.cu itself, so it is one translation unit:
+# build. It includes render/bsdf.cu itself, so it is one translation unit:
 #   cmake --build build --config Release --target bsdf_test
 #   build/bin/Release/bsdf_test.exe
 # The exit code is nonzero when a check fails.

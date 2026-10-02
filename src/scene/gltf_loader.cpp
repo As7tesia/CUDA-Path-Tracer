@@ -15,8 +15,8 @@
 #include "json.hpp"
 #include "tiny_gltf.h"
 
-#include "gltf_loader.h"
-#include "scene.h"
+#include "scene/gltf_loader.h"
+#include "scene/scene.h"
 #include "utilities.h"
 
 #include "mikktspace.h"
@@ -519,6 +519,13 @@ struct Loader
             m.metallic = (float)pbr.metallicFactor;
             m.roughness = (float)pbr.roughnessFactor;
             m.baseColorTexture = textureFor(pbr.baseColorTexture.index, pbr.baseColorTexture.texCoord, true);
+            if (m.baseColorTexture < 0 && pbr.baseColorTexture.index >= 0)
+            {
+                // The slot names a texture whose image cannot be used: the
+                // surface shows magenta, so a broken asset is visible in the
+                // render and not only on stderr.
+                m.baseColorTexture = missingTexture();
+            }
             m.metallicRoughnessTexture = textureFor(pbr.metallicRoughnessTexture.index, pbr.metallicRoughnessTexture.texCoord, false);
             m.normalTexture = textureFor(source.normalTexture.index, source.normalTexture.texCoord, false);
             m.normalScale = (float)source.normalTexture.scale;
@@ -581,7 +588,10 @@ struct Loader
 
     // The Scene texture for one of a material's texture slots (glTF texture
     // index and texture coordinate set), or -1 when the slot is empty or its
-    // image is unusable; the material then uses its factor alone. srgb says
+    // image is unusable. An empty slot leaves the factor alone; for an
+    // unusable image materialFor gives the base color slot the magenta
+    // texture and leaves the other slots to their factor, since magenta there
+    // would mean a mirror, a sideways normal or a glowing surface. srgb says
     // the slot holds color (base color, emissive) rather than data. Only
     // TEXCOORD_0 is loaded, so a slot that names another set is read with
     // TEXCOORD_0.
@@ -631,6 +641,30 @@ struct Loader
         return id;
     }
 
+    // The scene's magenta texture (Scene::missingTexture), made the first time
+    // a base color slot needs it: one opaque texel, so a masked surface stays
+    // visible.
+    int missingTexture()
+    {
+        if (scene.missingTexture < 0)
+        {
+            TextureImage image;
+            image.width = 1;
+            image.height = 1;
+            image.rgba = { 255, 0, 255, 255 };
+            Texture t;
+            t.image = (int)scene.textureImages.size();
+            t.wrapU = cudaAddressModeWrap;
+            t.wrapV = cudaAddressModeWrap;
+            t.filter = cudaFilterModePoint;
+            t.srgb = true;
+            scene.textureImages.push_back(std::move(image));
+            scene.missingTexture = (int)scene.textures.size();
+            scene.textures.push_back(t);
+        }
+        return scene.missingTexture;
+    }
+
     // The Scene image for a glTF image, or -1 when tinygltf has no pixels for
     // it: the file is missing, or there is no image index (-1), which is what
     // a texture whose image only an extension names (KTX2, WebP) has, as does
@@ -651,7 +685,9 @@ struct Loader
             && source->image.size() == (size_t)source->width * source->height * 4 * (source->bits / 8);
         if (!usable)
         {
-            fprintf(stderr, "glTF %s: image %d has no pixels, textures using it are skipped\n", path.c_str(), gltfImage);
+            fprintf(stderr,
+                "glTF %s: image %d has no pixels: a base color slot that uses it shows magenta, other slots use their factor\n",
+                path.c_str(), gltfImage);
         }
         else
         {

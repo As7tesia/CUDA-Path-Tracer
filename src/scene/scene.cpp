@@ -1,6 +1,6 @@
-#include "scene.h"
+#include "scene/scene.h"
 
-#include "gltf_loader.h"
+#include "scene/gltf_loader.h"
 #include "utilities.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
@@ -9,12 +9,14 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 using namespace std;
 using json = nlohmann::json;
@@ -60,7 +62,97 @@ glm::vec3 vec3At(const json& object, const char* key)
     }
     return glm::vec3(v[0].get<float>(), v[1].get<float>(), v[2].get<float>());
 }
+
+const std::string SCENE_DIR = "scenes/";
+const std::string CATALOG = "scenes/catalog.json";
+
+// The catalog's (name, path relative to scenes/) pairs in file order; none
+// when the file is missing.
+std::vector<std::pair<std::string, std::string>> readCatalog()
+{
+    std::vector<std::pair<std::string, std::string>> entries;
+    std::ifstream f(CATALOG);
+    if (!f)
+    {
+        return entries;
+    }
+    try
+    {
+        const json catalog = json::parse(f);
+        for (const auto& item : catalog.items())
+        {
+            entries.emplace_back(item.key(), item.value().get<std::string>());
+        }
+    }
+    catch (const std::exception& e)
+    {
+        fatal("%s: %s", CATALOG.c_str(), e.what());
+    }
+    return entries;
+}
 }  // namespace
+
+std::string findSceneFile(const std::string& argument)
+{
+    if (std::filesystem::is_regular_file(argument))
+    {
+        return argument;
+    }
+    const std::filesystem::path path(argument);
+    if (path.has_extension() || path.has_parent_path())
+    {
+        fatal("no scene file %s", argument.c_str());
+    }
+    const std::string sceneJson = SCENE_DIR + argument + ".json";
+    if (std::filesystem::is_regular_file(sceneJson))
+    {
+        return sceneJson;
+    }
+    for (const auto& [name, file] : readCatalog())
+    {
+        if (name == argument)
+        {
+            const std::string catalogFile = SCENE_DIR + file;
+            if (!std::filesystem::is_regular_file(catalogFile))
+            {
+                fatal("%s is %s, which is not downloaded (see the README's asset list)", argument.c_str(),
+                    catalogFile.c_str());
+            }
+            return catalogFile;
+        }
+    }
+    fatal("no scene named %s: neither %s nor an entry in %s (--list prints the names)", argument.c_str(),
+        sceneJson.c_str(), CATALOG.c_str());
+}
+
+void listScenes()
+{
+    if (!std::filesystem::is_directory(SCENE_DIR))
+    {
+        fatal("no %s folder here; run from the repository root", SCENE_DIR.c_str());
+    }
+    std::vector<std::string> names;
+    for (const auto& entry : std::filesystem::directory_iterator(SCENE_DIR))
+    {
+        if (entry.is_regular_file() && lowercaseExtension(entry.path().string()) == ".json"
+            && entry.path().filename() != "catalog.json")
+        {
+            names.push_back(entry.path().stem().string());
+        }
+    }
+    std::sort(names.begin(), names.end());
+    printf("Scene JSONs in %s:\n", SCENE_DIR.c_str());
+    for (const std::string& name : names)
+    {
+        printf("  %s\n", name.c_str());
+    }
+    printf("glTF scenes in %s:\n", CATALOG.c_str());
+    for (const auto& [name, file] : readCatalog())
+    {
+        const bool downloaded = std::filesystem::is_regular_file(SCENE_DIR + file);
+        printf("  %-20s %s%s\n", name.c_str(), file.c_str(), downloaded ? "" : "  (not downloaded)");
+    }
+}
 
 Scene::Scene(string filename, const SceneOverrides& ov)
 {
