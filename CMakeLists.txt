@@ -195,5 +195,18 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${optix_ir_cpp} ${optix_programs})
 set_source_files_properties(${optix_programs} PROPERTIES HEADER_FILE_ONLY ON)
 source_group("OptiX" FILES ${optix_programs})
 
+# Host-side check of scatterPbr (tests/bsdf_test.cu), not part of the default
+# build. It includes bsdf.cu itself, so it is one translation unit:
+#   cmake --build build --config Release --target bsdf_test
+#   build/bin/Release/bsdf_test.exe
+# The exit code is nonzero when a check fails.
+add_executable(bsdf_test EXCLUDE_FROM_ALL tests/bsdf_test.cu)
+target_include_directories(bsdf_test PRIVATE src)
+set_target_properties(bsdf_test PROPERTIES CUDA_ARCHITECTURES native)
+if(MSVC)
+    # C4819: the CUDA headers hold characters outside the system code page.
+    target_compile_options(bsdf_test PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4819>")
+endif()
+
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${CMAKE_PROJECT_NAME})
 

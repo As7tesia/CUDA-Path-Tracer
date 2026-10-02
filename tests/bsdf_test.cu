@@ -1,0 +1,311 @@
+// Host-side check of scatterPbr: the mean sample weight is the lobe's
+// directional albedo, integral of f * cos over directions. Compares it to a
+// brute-force integral of the analytic BSDF (uniform sphere sampling) for
+// metal, plastic, glass and clearcoat at a few view angles and roughnesses,
+// and fuzzes random inputs for NaN / Inf / negative weights. Every check
+// prints a line, and the exit code is nonzero when one fails. Built by the
+// bsdf_test target (CMakeLists.txt, outside the default build); the README's
+// "Checking the BSDF" table comes from its output.
+#include "bsdf.cu"
+#include "interactions.cu"
+
+#include <cstdio>
+#include <cmath>
+
+// Two estimates agree when they differ by at most this many combined
+// standard errors. The seeds are fixed, so a pass or a failure repeats on
+// every run.
+static const double MAX_SIGMA = 5.0;
+
+// Running sums for the mean of a per-channel quantity and its standard error.
+struct Estimate
+{
+    glm::dvec3 sum = glm::dvec3(0.0);
+    glm::dvec3 sumSq = glm::dvec3(0.0);
+
+    void add(glm::dvec3 x)
+    {
+        sum += x;
+        sumSq += x * x;
+    }
+    glm::dvec3 mean(double n) const { return sum / n; }
+    glm::dvec3 standardError(double n) const
+    {
+        const glm::dvec3 m = sum / n;
+        return glm::sqrt(glm::max(sumSq / n - m * m, glm::dvec3(0.0)) / n);
+    }
+};
+
+static int checks = 0;
+static int failures = 0;
+
+static bool check(bool ok)
+{
+    ++checks;
+    failures += ok ? 0 : 1;
+    return ok;
+}
+
+static float D(float cosH, float a)
+{
+    if (cosH <= 0) return 0;
+    const float a2 = a * a;
+    const float d = cosH * cosH * (a2 - 1) + 1;
+    return a2 / (PI * d * d);
+}
+static float lambda(float c, float a) { return ggxLambda(fabsf(c), a); }
+static float G2(float co, float ci, float a) { return 1.0f / (1.0f + lambda(co, a) + lambda(ci, a)); }
+
+static glm::vec3 schlickRef(glm::vec3 f0, float c) { return schlickFresnel(f0, c); }
+
+struct Case
+{
+    const char* name;
+    Material m;
+    PbrSurface s;
+};
+
+// Analytic f(wo, wi) * |cos wi| for the material, normal (0, 0, 1), wo outside.
+static glm::vec3 fcos(const Case& c, glm::vec3 wo, glm::vec3 wi)
+{
+    const glm::vec3 n(0, 0, 1);
+    const float co = wo.z;
+    const float ci = wi.z;
+    const float a = c.s.roughness * c.s.roughness;
+    glm::vec3 coat(0.0f);
+    float coatW = 0;
+    if (c.m.clearcoat > 0)
+    {
+        coatW = c.m.clearcoat * schlickRef(glm::vec3(0.04f), co).x;
+        const float ca = c.m.clearcoatRoughness * c.m.clearcoatRoughness;
+        if (ci > 0)
+        {
+            const glm::vec3 h = glm::normalize(wo + wi);
+            coat = glm::vec3(D(h.z, ca) * G2(co, ci, ca) / (4 * co * ci) * ci);
+        }
+    }
+    glm::vec3 base(0.0f);
+    const float metal = c.s.metallic;
+    const glm::vec3 f0 = glm::min(iorF0(c.m.ior) * c.m.specularColorFactor, glm::vec3(1.0f));
+    const float w = c.m.specularFactor;
+    if (ci > 0)
+    {
+        const glm::vec3 h = glm::normalize(wo + wi);
+        const float spec = D(h.z, a) * G2(co, ci, a) / (4 * co * ci) * ci;
+        base += metal * schlickRef(c.s.baseColor, glm::dot(wo, h)) * spec;
+        const glm::vec3 F = w * schlickRef(f0, glm::dot(wo, h));
+        const float maxF = maxComponent(F);
+        // plastic
+        base += (1 - metal) * (1 - c.s.transmission) * (F * spec + (1 - maxF) * c.s.baseColor / PI * ci);
+        // glass reflection (outside, no TIR)
+        base += (1 - metal) * c.s.transmission * F * spec;
+    }
+    else if (c.s.transmission > 0)
+    {
+        // glass transmission, PBRT-v4 dielectric BTDF without the 1/eta^2 radiance factor
+        const float etap = c.m.ior;  // n_t / n_i, wo outside
+        glm::vec3 wm = glm::normalize(wi * etap + wo);
+        if (wm.z < 0) wm = -wm;
+        if (glm::dot(wm, wi) * ci > 0 && glm::dot(wm, wo) * co > 0)
+        {
+            const float denom = (glm::dot(wi, wm) + glm::dot(wo, wm) / etap);
+            const float F = w * schlickRef(f0, glm::dot(wo, wm)).x;  // white specular color in the glass cases
+            const float ft = (1 - F) * D(wm.z, a) * G2(co, ci, a)
+                           * fabsf(glm::dot(wi, wm) * glm::dot(wo, wm) / (denom * denom * ci * co));
+            base += (1 - metal) * c.s.transmission * ft * fabsf(ci) * c.s.baseColor;
+        }
+    }
+    return (1 - coatW) * base + coatW * coat;
+}
+
+int main()
+{
+    std::vector<Case> cases;
+    auto add = [&](const char* name, float metallic, float rough, float trans, glm::vec3 base, float spec, float cc, float ccr) {
+        Case c{};
+        c.name = name;
+        c.m.type = PBR;
+        c.m.ior = 1.5f;
+        c.m.specularFactor = spec;
+        c.m.specularColorFactor = glm::vec3(1.0f);
+        c.m.clearcoat = cc;
+        c.m.clearcoatRoughness = ccr;
+        c.s.baseColor = base;
+        c.s.metallic = metallic;
+        c.s.roughness = rough;
+        c.s.transmission = trans;
+        c.s.normal = c.s.coatNormal = glm::vec3(0, 0, 1);
+        cases.push_back(c);
+    };
+    for (float r : { 0.3f, 0.6f, 1.0f })
+    {
+        add("metal", 1, r, 0, glm::vec3(1.0f, 0.7f, 0.3f), 1, 0, 0);
+        add("plastic", 0, r, 0, glm::vec3(0.5f, 0.8f, 0.2f), 1, 0, 0);
+        add("plastic spec0", 0, r, 0, glm::vec3(0.5f, 0.8f, 0.2f), 0, 0, 0);
+        add("glass", 0, r, 1, glm::vec3(1.0f), 1, 0, 0);
+        add("mixed", 0.4f, r, 0.3f, glm::vec3(0.9f, 0.6f, 0.4f), 0.7f, 0, 0);
+        add("coated plastic", 0, r, 0, glm::vec3(0.5f, 0.1f, 0.1f), 1, 1.0f, 0.3f);
+    }
+
+    // z is the largest per-channel difference over the combined standard
+    // error; a case fails above MAX_SIGMA.
+    const int N = 1 << 21;
+    printf("%-15s %5s %6s  %-26s %-26s %5s\n", "case", "rough", "theta", "sampled albedo", "reference albedo", "z");
+    for (const Case& c : cases)
+    {
+        for (float theta : { 0.1f, 0.8f, 1.3f })
+        {
+            const glm::vec3 wo(sinf(theta), 0, cosf(theta));
+            thrust::default_random_engine rng(1234);
+            thrust::uniform_real_distribution<float> u01(0, 1);
+            Estimate sampled;
+            for (int i = 0; i < N; ++i)
+            {
+                PathSegment p{};
+                p.ray.direction = -wo;
+                p.color = glm::vec3(1.0f);
+                if (scatterPbr(p, glm::vec3(0.0f), glm::vec3(0, 0, 1), true, c.m, c.s, rng))
+                {
+                    sampled.add(glm::dvec3(p.color));
+                }
+            }
+            Estimate ref;
+            for (int i = 0; i < N * 4; ++i)
+            {
+                // uniform sphere
+                const float z = 1 - 2 * u01(rng);
+                const float r = sqrtf(fmaxf(0, 1 - z * z));
+                const float phi = TWO_PI * u01(rng);
+                const glm::vec3 wi(r * cosf(phi), r * sinf(phi), z);
+                ref.add(glm::dvec3(fcos(c, wo, wi)) * (4.0 * PI));
+            }
+            const glm::dvec3 sampledMean = sampled.mean(N);
+            const glm::dvec3 refMean = ref.mean(N * 4.0);
+            const glm::dvec3 sampledSe = sampled.standardError(N);
+            const glm::dvec3 refSe = ref.standardError(N * 4.0);
+            const glm::dvec3 se = glm::sqrt(sampledSe * sampledSe + refSe * refSe);
+            double zMax = 0.0;
+            for (int k = 0; k < 3; ++k)
+            {
+                // A channel neither estimate has any variance in must match exactly.
+                const double diff = fabs(sampledMean[k] - refMean[k]);
+                zMax = fmax(zMax, se[k] > 0.0 ? diff / se[k] : (diff > 1e-12 ? INFINITY : 0.0));
+            }
+            const bool ok = check(zMax <= MAX_SIGMA);
+            printf("%-15s %5.2f %6.2f  %.4f %.4f %.4f    %.4f %.4f %.4f    %5.2f%s\n", c.name, c.s.roughness, theta,
+                sampledMean.x, sampledMean.y, sampledMean.z, refMean.x, refMean.y, refMean.z, zMax, ok ? "" : "  FAIL");
+        }
+    }
+
+    // Smooth limits: exact albedos.
+    {
+        Case c = cases[0];
+        c.s.roughness = 0;
+        thrust::default_random_engine rng(7);
+        PathSegment p{};
+        const glm::vec3 wo = glm::normalize(glm::vec3(0.5f, 0.2f, 0.8f));
+        p.ray.direction = -wo;
+        p.color = glm::vec3(1);
+        const bool scattered = scatterPbr(p, glm::vec3(0), glm::vec3(0, 0, 1), true, c.m, c.s, rng);
+        const glm::vec3 F = schlickFresnel(c.s.baseColor, wo.z);
+        const glm::vec3 mirror(-wo.x, -wo.y, wo.z);
+        const bool ok = check(scattered && glm::length(p.color - F) < 1e-6f && glm::length(p.ray.direction - mirror) < 1e-6f);
+        printf("smooth metal: weight %.4f %.4f %.4f expected %.4f %.4f %.4f, dir %.4f %.4f %.4f%s\n", p.color.x, p.color.y,
+            p.color.z, F.x, F.y, F.z, p.ray.direction.x, p.ray.direction.y, p.ray.direction.z, ok ? "" : "  FAIL");
+    }
+    {
+        // smooth glass from inside at a TIR angle and at a transmitting angle
+        Case c = cases[3];
+        c.s.roughness = 0;
+        for (float theta : { 0.3f, 0.9f })
+        {
+            thrust::default_random_engine rng(11);
+            glm::dvec3 sum(0);
+            int refl = 0;
+            const int M = 100000;
+            for (int i = 0; i < M; ++i)
+            {
+                PathSegment p{};
+                const glm::vec3 wo(sinf(theta), 0, cosf(theta));
+                p.ray.direction = -wo;
+                p.color = glm::vec3(1);
+                if (scatterPbr(p, glm::vec3(0), glm::vec3(0, 0, 1), false, c.m, c.s, rng))
+                {
+                    sum += glm::dvec3(p.color);
+                    refl += p.ray.direction.z > 0;
+                }
+            }
+            // Every sample weighs exactly 1 (white glass, the Fresnel term
+            // cancels). The reflected share is Schlick at the transmitted
+            // angle below the critical angle, and all of it above.
+            const float sin2T = 1.5f * 1.5f * sinf(theta) * sinf(theta);
+            const double expected = sin2T >= 1.0f ? 1.0 : schlickFresnel(glm::vec3(iorF0(1.5f)), sqrtf(1.0f - sin2T)).x;
+            const double reflected = refl / (double)M;
+            const double se = sqrt(expected * (1.0 - expected) / M);
+            const bool ok = check(sum.x == M && fabs(reflected - expected) <= MAX_SIGMA * se);
+            printf("smooth glass inside, theta %.2f: albedo %.4f, reflected %.4f expected %.4f (TIR above %.3f rad)%s\n",
+                theta, sum.x / M, reflected, expected, asinf(1 / 1.5f), ok ? "" : "  FAIL");
+        }
+    }
+
+    // Fuzz: random parameters and directions, including grazing ones and tilted shading normals.
+    {
+        thrust::default_random_engine rng(99);
+        thrust::uniform_real_distribution<float> u01(0, 1);
+        int bad = 0, big = 0, bigTypical = 0;
+        double maxWeight = 0, maxTypical = 0;
+        for (int i = 0; i < 2000000; ++i)
+        {
+            Case c = cases[0];
+            c.m.ior = u01(rng) < 0.05f ? 0.0f : 1.0f + u01(rng);
+            c.m.specularFactor = u01(rng);
+            c.m.specularColorFactor = glm::vec3(u01(rng), u01(rng), u01(rng)) * 2.0f;
+            c.m.clearcoat = u01(rng) < 0.5f ? 0 : u01(rng);
+            c.m.clearcoatRoughness = u01(rng);
+            c.s.baseColor = glm::vec3(u01(rng), u01(rng), u01(rng));
+            c.s.metallic = u01(rng) < 0.3f ? 0 : u01(rng);
+            c.s.roughness = u01(rng) < 0.2f ? 0 : u01(rng);
+            c.s.transmission = u01(rng) < 0.5f ? 0 : u01(rng);
+            const glm::vec3 n(0, 0, 1);
+            const float ct = u01(rng) < 0.1f ? 1e-4f * u01(rng) : u01(rng);
+            const float ph = TWO_PI * u01(rng);
+            const glm::vec3 wo(sqrtf(1 - ct * ct) * cosf(ph), sqrtf(1 - ct * ct) * sinf(ph), ct);
+            // shading normal tilted toward wo's side, still facing wo
+            glm::vec3 sn = glm::normalize(n + 0.6f * glm::vec3(u01(rng) - 0.5f, u01(rng) - 0.5f, 0));
+            if (u01(rng) < 0.5f || glm::dot(sn, wo) <= 0) sn = n;
+            const bool typical = ct > 0.1f && sn == n;
+            c.s.normal = sn;
+            c.s.coatNormal = n;
+            PathSegment p{};
+            p.ray.direction = -wo;
+            p.color = glm::vec3(1);
+            const bool outside = u01(rng) < 0.5f;
+            if (scatterPbr(p, glm::vec3(0), n, outside, c.m, c.s, rng))
+            {
+                const glm::vec3 w = p.color;
+                const glm::vec3 d = p.ray.direction;
+                if (!(std::isfinite(w.x) && std::isfinite(w.y) && std::isfinite(w.z)) || w.x < 0 || w.y < 0 || w.z < 0
+                    || !(std::isfinite(d.x) && std::isfinite(d.y) && std::isfinite(d.z)) || fabsf(glm::length(d) - 1) > 1e-3f)
+                {
+                    if (bad < 5) printf("bad sample %d: w %g %g %g d %g %g %g\n", i, w.x, w.y, w.z, d.x, d.y, d.z);
+                    ++bad;
+                }
+                maxWeight = std::max(maxWeight, (double)maxComponent(w));
+                const float mw = maxComponent(w);
+                big += mw > 4.0f;
+                if (typical) { bigTypical += mw > 4.0f; maxTypical = std::max(maxTypical, (double)mw); }
+            }
+        }
+        const bool ok = check(bad == 0);
+        printf("fuzz: %d bad samples, %d weights above 4, max weight %.3f; typical views: %d above 4, max %.3f%s\n", bad,
+            big, maxWeight, bigTypical, maxTypical, ok ? "" : "  FAIL");
+    }
+
+    if (failures > 0)
+    {
+        printf("FAIL: %d of %d checks\n", failures, checks);
+        return 1;
+    }
+    printf("PASS: %d checks\n", checks);
+    return 0;
+}
