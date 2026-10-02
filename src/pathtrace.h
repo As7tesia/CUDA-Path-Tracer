@@ -2,9 +2,16 @@
 
 #include "scene.h"
 #include "tonemap.h"
-#include "utilities.h"
 
-void InitDataContainer(GuiDataContainer* guiData);
+// What pathtrace() reports to the viewport's ImGui panel.
+struct GuiDataContainer
+{
+    int tracedDepth = 0;
+};
+
+// Where pathtrace() writes its report; nothing is written until this is set
+// (headless renders never set it).
+void setGuiData(GuiDataContainer* data);
 // pathtraceInit allocates every device buffer for the scene's resolution;
 // call it once at startup and pathtraceFree once at exit. pathtraceReset
 // clears the accumulation buffer so the next iteration starts a fresh image
@@ -15,7 +22,10 @@ void pathtraceReset();
 // Copies the accumulation buffer into scene->state.image. Only saveImage needs
 // the host copy, so it is done on demand rather than every iteration.
 void pathtraceDownloadImage();
-void pathtrace(uchar4 *pbo, int frame, int iteration);
+// One sample per pixel, added to the accumulation buffer. With a pixel
+// buffer (the viewport; null when headless) it also writes the tone-mapped
+// average of iterations 1 to iteration into it.
+void pathtrace(uchar4 *pbo, int iteration);
 
 // Feature toggles (default on). Safe to flip between iterations.
 void setRussianRoulette(bool enabled);

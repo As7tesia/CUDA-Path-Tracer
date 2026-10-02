@@ -11,7 +11,7 @@
 
 #include <optix.h>
 
-#include "material_textures.h"
+#include "mesh_hit.h"
 #include "optix_params.h"
 
 extern "C"
@@ -207,33 +207,15 @@ extern "C" __global__ void __closesthit__mesh()
     const glm::vec3 geometricNormal = glm::cross(p1 - p0, p2 - p0);
     const bool outside = glm::dot(geometricNormal, d) < 0.0f;
 
+    // Shading normal, uv and tangent the same way meshIntersectionTest makes
+    // them (mesh_hit.h), with the hit instance's transforms.
+    const auto normalToWorld = [](glm::vec3 n) { return toVec3(optixTransformNormalFromObjectToWorldSpace(toFloat3(n))); };
+    const auto vectorToWorld = [](glm::vec3 t) { return toVec3(optixTransformVectorFromObjectToWorldSpace(toFloat3(t))); };
     const float2 bary = optixGetTriangleBarycentrics();
-    const glm::vec3 n = interpolate(params.buffers.normals, tri, bary.x, bary.y);
-    glm::vec3 normal = glm::normalize(toVec3(optixTransformNormalFromObjectToWorldSpace(toFloat3(n))));
-    if (!outside)
-    {
-        normal = -normal;
-    }
-    // Same fallback as meshIntersectionTest: a smooth vertex normal near a
-    // silhouette can point away from the ray even on a front-face hit, and
-    // the shade kernel needs one that faces it, so use the geometric normal there.
-    if (glm::dot(normal, toVec3(optixGetWorldRayDirection())) > 0.0f)
-    {
-        normal = glm::normalize(toVec3(optixTransformNormalFromObjectToWorldSpace(toFloat3(geometricNormal))));
-        if (!outside)
-        {
-            normal = -normal;
-        }
-    }
-
+    const glm::vec3 normal = meshShadingNormal(interpolate(params.buffers.normals, tri, bary.x, bary.y), geometricNormal,
+        outside, toVec3(optixGetWorldRayDirection()), normalToWorld);
     const glm::vec2 uv = interpolate(params.buffers.uvs, tri, bary.x, bary.y);
-
-    // Like meshIntersectionTest: the tangent goes to world space with the
-    // transform itself, and the bitangent sign flips under a mirroring one
-    // (inst.tangentSign, computed at load).
-    const glm::vec3 t(interpolate(params.buffers.tangents, tri, bary.x, bary.y));
-    const glm::vec4 tangent(toVec3(optixTransformVectorFromObjectToWorldSpace(toFloat3(t))),
-                            inst.tangentSign * params.buffers.tangents[tri.x].w);
+    const glm::vec4 tangent = meshTangent(params.buffers.tangents, tri, bary.x, bary.y, inst.tangentSign, vectorToWorld);
 
     writeHit(inst.materialId, normal, uv, tangent, outside);
 }

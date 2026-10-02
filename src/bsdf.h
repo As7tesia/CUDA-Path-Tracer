@@ -16,7 +16,7 @@
 // out whether or not the material has KHR_materials_volume, which only adds
 // absorption (applied by the shade kernel).
 
-#include "material_textures.h"
+#include "pbr_surface.h"
 #include "sceneStructs.h"
 
 #include <glm/glm.hpp>

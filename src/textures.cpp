@@ -3,14 +3,15 @@
 #include "textures.h"
 
 #include "scene.h"
+#include "utilities.h"
 
 #include <vector>
 
 namespace
 {
-std::vector<cudaArray_t> arrays;                // one per Scene::textureImages entry
-std::vector<cudaTextureObject_t> objects;       // one per Scene::textures entry
-cudaTextureObject_t* deviceObjects = nullptr;   // objects, on the device
+std::vector<cudaArray_t> arrays;                     // one per Scene::textureImages entry
+std::vector<cudaTextureObject_t> objects;            // one per Scene::textures entry
+cudaTextureObject_t* dev_textureObjects = nullptr;   // objects, on the device
 }  // namespace
 
 cudaTextureObject_t* texturesInit(const Scene& scene)
@@ -24,9 +25,10 @@ cudaTextureObject_t* texturesInit(const Scene& scene)
     for (const TextureImage& image : scene.textureImages)
     {
         cudaArray_t array = nullptr;
-        cudaMallocArray(&array, &format, image.width, image.height);
+        CUDA_CHECK(cudaMallocArray(&array, &format, image.width, image.height));
         const size_t rowBytes = (size_t)image.width * 4;
-        cudaMemcpy2DToArray(array, 0, 0, image.rgba.data(), rowBytes, rowBytes, image.height, cudaMemcpyHostToDevice);
+        CUDA_CHECK(cudaMemcpy2DToArray(array, 0, 0, image.rgba.data(), rowBytes, rowBytes, image.height,
+            cudaMemcpyHostToDevice));
         arrays.push_back(array);
     }
 
@@ -45,13 +47,14 @@ cudaTextureObject_t* texturesInit(const Scene& scene)
         desc.normalizedCoords = 1;                    // uv in [0, 1] spans the image
 
         cudaTextureObject_t object = 0;
-        cudaCreateTextureObject(&object, &resource, &desc, nullptr);
+        CUDA_CHECK(cudaCreateTextureObject(&object, &resource, &desc, nullptr));
         objects.push_back(object);
     }
 
-    cudaMalloc(&deviceObjects, objects.size() * sizeof(cudaTextureObject_t));
-    cudaMemcpy(deviceObjects, objects.data(), objects.size() * sizeof(cudaTextureObject_t), cudaMemcpyHostToDevice);
-    return deviceObjects;
+    CUDA_CHECK(cudaMalloc(&dev_textureObjects, objects.size() * sizeof(cudaTextureObject_t)));
+    CUDA_CHECK(cudaMemcpy(dev_textureObjects, objects.data(), objects.size() * sizeof(cudaTextureObject_t),
+        cudaMemcpyHostToDevice));
+    return dev_textureObjects;
 }
 
 void texturesFree()
@@ -64,8 +67,8 @@ void texturesFree()
     {
         cudaFreeArray(array);
     }
-    cudaFree(deviceObjects);  // no-op if null
+    cudaFree(dev_textureObjects);  // no-op if null
     objects.clear();
     arrays.clear();
-    deviceObjects = nullptr;
+    dev_textureObjects = nullptr;
 }

@@ -1,11 +1,11 @@
 #include "wavefront_ops.h"
 
+#include "utilities.h"
+
 #include <cub/device/device_radix_sort.cuh>
 #include <cub/device/device_select.cuh>
 
 #include <algorithm>
-#include <cstdio>
-#include <cstdlib>
 #include <utility>
 
 namespace
@@ -19,8 +19,6 @@ struct IsAlive
     }
 };
 
-const int blockSize = 128;
-
 // Workspace, allocated by wavefrontInit. The spare buffers trade places with
 // the caller's buffers on every swap (ping pong)
 int capacity = 0;
@@ -33,20 +31,14 @@ int* dev_numAlive = nullptr;       // compaction's output count
 void* dev_cubTemp = nullptr;
 size_t cubTempBytes = 0;
 
-void check(bool ok, const char* msg)
-{
-    if (!ok)
-    {
-        fprintf(stderr, "wavefront_ops: %s\n", msg);
-        exit(EXIT_FAILURE);
-    }
-}
-
 // Also catches a missing wavefrontInit: CUB treats a null temp pointer as a
 // size query and would return success without doing any work.
 void checkCapacity(int numPaths)
 {
-    check(numPaths <= capacity, "more paths than the workspace was sized for");
+    if (numPaths > capacity)
+    {
+        fatal("wavefront_ops: %d paths, the workspace holds %d", numPaths, capacity);
+    }
 }
 
 __global__ void fillIndices(int n, int* indices)
@@ -71,29 +63,29 @@ __global__ void gatherByIndex(int n, const int* sortedIndices,
         intersectionsOut[i] = intersectionsIn[src];
     }
 }
-}
-// allocate the scratch space memory cub algos need
+}  // namespace
+
 void wavefrontInit(int maxPaths)
 {
     capacity = maxPaths;
-    cudaMalloc(&dev_sparePaths, maxPaths * sizeof(PathSegment));
-    cudaMalloc(&dev_spareIntersections, maxPaths * sizeof(ShadeableIntersection));
-    cudaMalloc(&dev_indices, maxPaths * sizeof(int));
-    cudaMalloc(&dev_sortedIndices, maxPaths * sizeof(int));
-    cudaMalloc(&dev_sortedKeys, maxPaths * sizeof(int));
-    cudaMalloc(&dev_numAlive, sizeof(int));
+    CUDA_CHECK(cudaMalloc(&dev_sparePaths, maxPaths * sizeof(PathSegment)));
+    CUDA_CHECK(cudaMalloc(&dev_spareIntersections, maxPaths * sizeof(ShadeableIntersection)));
+    CUDA_CHECK(cudaMalloc(&dev_indices, maxPaths * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&dev_sortedIndices, maxPaths * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&dev_sortedKeys, maxPaths * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&dev_numAlive, sizeof(int)));
 
     // With a null temp pointer CUB only reports how much temporary storage it
     // needs. Ask both algorithms at the largest input and keep the larger
     // size.
     size_t selectBytes = 0;
-    cub::DeviceSelect::If(nullptr, selectBytes, dev_sparePaths, dev_sparePaths,
-        dev_numAlive, maxPaths, IsAlive());
+    CUDA_CHECK(cub::DeviceSelect::If(nullptr, selectBytes, dev_sparePaths, dev_sparePaths,
+        dev_numAlive, maxPaths, IsAlive()));
     size_t sortBytes = 0;
-    cub::DeviceRadixSort::SortPairs(nullptr, sortBytes, dev_sortedKeys, dev_sortedKeys,
-        dev_indices, dev_sortedIndices, maxPaths);
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(nullptr, sortBytes, dev_sortedKeys, dev_sortedKeys,
+        dev_indices, dev_sortedIndices, maxPaths));
     cubTempBytes = std::max(selectBytes, sortBytes);
-    cudaMalloc(&dev_cubTemp, cubTempBytes);
+    CUDA_CHECK(cudaMalloc(&dev_cubTemp, cubTempBytes));
 }
 
 void wavefrontFree()
@@ -117,24 +109,21 @@ void wavefrontFree()
     capacity = 0;
 }
 
-
 int compactPaths(PathSegment*& paths, int numPaths, cudaStream_t stream)
 {
     checkCapacity(numPaths);
 
     size_t bytes = cubTempBytes;
-    // copies every path where isAlive is true froim paths to front of dev_sparepaths
-    // and writes the count to dev_numAlive
-    cudaError_t err = cub::DeviceSelect::If(dev_cubTemp, bytes, paths, dev_sparePaths,
-        dev_numAlive, numPaths, IsAlive(), stream);
-    check(err == cudaSuccess, cudaGetErrorString(err));
+    // Copies every live path from paths to the front of dev_sparePaths and
+    // writes their count to dev_numAlive.
+    CUDA_CHECK(cub::DeviceSelect::If(dev_cubTemp, bytes, paths, dev_sparePaths,
+        dev_numAlive, numPaths, IsAlive(), stream));
 
     // The host loop needs the count to size the next launches, so this is the
     // one synchronization per bounce that cannot be avoided.
     int numAlive = 0;
-    // copy the count of alive paths to host
-    cudaMemcpyAsync(&numAlive, dev_numAlive, sizeof(int), cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
+    CUDA_CHECK(cudaMemcpyAsync(&numAlive, dev_numAlive, sizeof(int), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 
     std::swap(paths, dev_sparePaths);
     return numAlive;
@@ -146,21 +135,20 @@ void sortMaterials(int numPaths, int keyBits, const int* materialIds,
 {
     checkCapacity(numPaths);
 
-    const int numBlocks = (numPaths + blockSize - 1) / blockSize;
-    // write 0, 1, 2, 3.... into dev_indices, used as value in sorting
-    fillIndices<<<numBlocks, blockSize, 0, stream>>>(numPaths, dev_indices);
+    const int numBlocks = (numPaths + PATH_BLOCK_SIZE - 1) / PATH_BLOCK_SIZE;
+    // 0, 1, 2, ... into dev_indices, the values the sort carries along
+    fillIndices<<<numBlocks, PATH_BLOCK_SIZE, 0, stream>>>(numPaths, dev_indices);
 
     // Only the low keyBits bits take part: one radix pass instead of four for
     // a small scene, because CUB's radix sorts 8 bits per pass and sorting
     // bits 0-31 would take 4 passes.
     size_t bytes = cubTempBytes;
-    cudaError_t err = cub::DeviceRadixSort::SortPairs(dev_cubTemp, bytes,
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(dev_cubTemp, bytes,
         materialIds, dev_sortedKeys, dev_indices, dev_sortedIndices,
-        numPaths, 0, keyBits, stream);
-    check(err == cudaSuccess, cudaGetErrorString(err));
+        numPaths, 0, keyBits, stream));
 
     // Move the paths themselves, so shadeMaterial's reads stay coalesced.
-    gatherByIndex<<<numBlocks, blockSize, 0, stream>>>(numPaths, dev_sortedIndices,
+    gatherByIndex<<<numBlocks, PATH_BLOCK_SIZE, 0, stream>>>(numPaths, dev_sortedIndices,
         paths, intersections, dev_sparePaths, dev_spareIntersections);
 
     std::swap(paths, dev_sparePaths);

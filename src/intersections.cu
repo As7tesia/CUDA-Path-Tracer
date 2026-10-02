@@ -1,6 +1,6 @@
 #include "intersections.h"
 
-#include "material_textures.h"
+#include "mesh_hit.h"
 
 #include <cfloat>
 
@@ -17,29 +17,26 @@ __host__ __device__ float boxIntersectionTest(
 
     float tmin = -1e38f;
     float tmax = 1e38f;
-    glm::vec3 tmin_n;
-    glm::vec3 tmax_n;
+    glm::vec3 tminNormal;
+    glm::vec3 tmaxNormal;
     for (int xyz = 0; xyz < 3; ++xyz)
     {
         float qdxyz = q.direction[xyz];
-        /*if (glm::abs(qdxyz) > 0.00001f)*/
+        float t1 = (-0.5f - q.origin[xyz]) / qdxyz;
+        float t2 = (+0.5f - q.origin[xyz]) / qdxyz;
+        float ta = glm::min(t1, t2);
+        float tb = glm::max(t1, t2);
+        glm::vec3 n(0.0f);
+        n[xyz] = t2 < t1 ? +1 : -1;
+        if (ta > 0 && ta > tmin)
         {
-            float t1 = (-0.5f - q.origin[xyz]) / qdxyz;
-            float t2 = (+0.5f - q.origin[xyz]) / qdxyz;
-            float ta = glm::min(t1, t2);
-            float tb = glm::max(t1, t2);
-            glm::vec3 n(0.0f);
-            n[xyz] = t2 < t1 ? +1 : -1;
-            if (ta > 0 && ta > tmin)
-            {
-                tmin = ta;
-                tmin_n = n;
-            }
-            if (tb < tmax)
-            {
-                tmax = tb;
-                tmax_n = n;
-            }
+            tmin = ta;
+            tminNormal = n;
+        }
+        if (tb < tmax)
+        {
+            tmax = tb;
+            tmaxNormal = n;
         }
     }
 
@@ -49,11 +46,11 @@ __host__ __device__ float boxIntersectionTest(
         if (tmin <= 0)
         {
             tmin = tmax;
-            tmin_n = tmax_n;
+            tminNormal = tmaxNormal;
             outside = false;
         }
         intersectionPoint = multiplyMV(box.transform, glm::vec4(getPointOnRay(q, tmin), 1.0f));
-        normal = glm::normalize(multiplyMV(box.invTranspose, glm::vec4(tmin_n, 0.0f)));
+        normal = glm::normalize(multiplyMV(box.invTranspose, glm::vec4(tminNormal, 0.0f)));
         return glm::length(r.origin - intersectionPoint);
     }
 
@@ -217,34 +214,15 @@ __device__ float meshIntersectionTest(
     const glm::vec3 geometricNormal = glm::cross(p1 - p0, p2 - p0);
     outside = glm::dot(geometricNormal, d) < 0.0f;
 
-    // Shading normal: vertex normals weighted by the barycentrics, taken to
-    // world space with the inverse transpose like the other tests.
-    const glm::vec3 n = interpolate(buffers.normals, tri, hitU, hitV);
-    normal = glm::normalize(multiplyMV(geom.invTranspose, glm::vec4(n, 0.0f)));
-    if (!outside)
-    {
-        normal = -normal;
-    }
-    // Near a silhouette a smooth vertex normal can lean past the surface and
-    // point away from the ray even on a front-face hit. The shade kernel needs
-    // a normal facing the ray, so those hits fall back to the geometric normal.
-    if (glm::dot(normal, r.direction) > 0.0f)
-    {
-        normal = glm::normalize(multiplyMV(geom.invTranspose, glm::vec4(geometricNormal, 0.0f)));
-        if (!outside)
-        {
-            normal = -normal;
-        }
-    }
-
+    // Shading normal, uv and tangent the same way __closesthit__mesh makes
+    // them (mesh_hit.h), with the instance's matrices: normals go to
+    // world space with the inverse transpose, tangents with the transform.
+    const auto normalToWorld = [&](glm::vec3 n) { return multiplyMV(geom.invTranspose, glm::vec4(n, 0.0f)); };
+    const auto vectorToWorld = [&](glm::vec3 t) { return multiplyMV(geom.transform, glm::vec4(t, 0.0f)); };
+    normal = meshShadingNormal(interpolate(buffers.normals, tri, hitU, hitV), geometricNormal, outside, r.direction,
+        normalToWorld);
     uv = interpolate(buffers.uvs, tri, hitU, hitV);
-
-    // A tangent lies in the surface, so it goes to world space with the
-    // transform itself. A mirroring transform flips the bitangent the cross
-    // product gives, so the sign flips with it (geom.tangentSign, computed
-    // at load). The sign is the same at all three vertices of a triangle.
-    const glm::vec3 tObject(interpolate(buffers.tangents, tri, hitU, hitV));
-    tangent = glm::vec4(multiplyMV(geom.transform, glm::vec4(tObject, 0.0f)), geom.tangentSign * buffers.tangents[tri.x].w);
+    tangent = meshTangent(buffers.tangents, tri, hitU, hitV, geom.tangentSign, vectorToWorld);
 
     intersectionPoint = multiplyMV(geom.transform, glm::vec4(o + tMin * d, 1.0f));
     return glm::length(r.origin - intersectionPoint);

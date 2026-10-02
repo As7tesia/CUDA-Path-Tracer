@@ -10,6 +10,7 @@
 
 #include "optix_params.h"
 #include "scene.h"
+#include "utilities.h"
 
 #include <optix.h>
 #include <optix_function_table_definition.h>  // exactly one translation unit defines the table
@@ -19,7 +20,6 @@
 #include <cuda_runtime.h>
 
 #include <cstdio>
-#include <cstdlib>
 #include <vector>
 
 // The device programs from optix_programs.cu, compiled to OptiX-IR by nvcc
@@ -31,31 +31,31 @@ namespace
 {
 // Everything OptiX owns for the lifetime of the scene, created by
 // optixIntersectInit and released by optixIntersectFree.
-constexpr int kNumGroups = 5;        // raygen, miss, cube hit, sphere hit, mesh hit
-constexpr int kNumHitGroups = 3;     // sbtOffset 0 = cube, 1 = sphere, 2 = mesh
+constexpr int NUM_GROUPS = 5;         // raygen, miss, cube hit, sphere hit, mesh hit
+constexpr int NUM_HIT_GROUPS = 3;     // sbtOffset 0 = cube, 1 = sphere, 2 = mesh
 
 OptixDeviceContext context = nullptr;
 OptixModule module = nullptr;        // every program: raygen, miss, sphere intersection, closest hits
-OptixProgramGroup groups[kNumGroups] = {};
+OptixProgramGroup groups[NUM_GROUPS] = {};
 OptixPipeline pipeline = nullptr;
 OptixShaderBindingTable sbt = {};
-CUdeviceptr d_sbtRecords = 0;
-CUdeviceptr d_cubeGas = 0;
-CUdeviceptr d_sphereGas = 0;
-std::vector<CUdeviceptr> d_meshGas;  // one GAS per TriangleMesh
-CUdeviceptr d_ias = 0;
+CUdeviceptr dev_sbtRecords = 0;
+CUdeviceptr dev_cubeGas = 0;
+CUdeviceptr dev_sphereGas = 0;
+std::vector<CUdeviceptr> dev_meshGas;  // one GAS per TriangleMesh
+CUdeviceptr dev_ias = 0;
 OptixTraversableHandle iasHandle = 0;
-OptixIntersectParams* d_params = nullptr;
-InstanceRecord* d_instances = nullptr;  // instance id -> material and mesh
+OptixIntersectParams* dev_params = nullptr;
+InstanceRecord* dev_instances = nullptr;  // instance id -> material and mesh
 // pathtrace.cu's device arrays, passed through to the hit programs
 MeshBuffers meshBuffers = {};
-const Material* d_materials = nullptr;
-const cudaTextureObject_t* d_textures = nullptr;
+const Material* dev_materials = nullptr;
+const cudaTextureObject_t* dev_textures = nullptr;
 
 // Whether a Geom's hits go through the any-hit alpha test.
 bool isMasked(const Scene* scene, const Geom& g)
 {
-    return g.type == MESH && scene->materials[g.materialid].alphaMode == ALPHA_MASK;
+    return g.type == GeomType::MESH && scene->materials[g.materialId].alphaMode == ALPHA_MASK;
 }
 
 bool check(OptixResult result, const char* call)
@@ -91,8 +91,8 @@ void logCallback(unsigned int level, const char* tag, const char* message, void*
 CUdeviceptr upload(const void* data, size_t bytes)
 {
     void* d = nullptr;
-    cudaMalloc(&d, bytes);
-    cudaMemcpy(d, data, bytes, cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMalloc(&d, bytes));
+    CUDA_CHECK(cudaMemcpy(d, data, bytes, cudaMemcpyHostToDevice));
     return reinterpret_cast<CUdeviceptr>(d);
 }
 
@@ -107,15 +107,15 @@ void release(CUdeviceptr& d)
 bool buildAccel(const OptixBuildInput& input, CUdeviceptr& output, OptixTraversableHandle& handle)
 {
     OptixAccelBuildOptions options = {};
-    options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;    // prefer trace speed > build speed, theres another flag that does opposite
+    options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;  // trace speed over build speed (PREFER_FAST_BUILD is the opposite)
     options.operation = OPTIX_BUILD_OPERATION_BUILD;
 
     OptixAccelBufferSizes sizes = {};
     OPTIX_TRY(optixAccelComputeMemoryUsage(context, &options, &input, 1, &sizes));
 
     CUdeviceptr temp = 0;
-    cudaMalloc(reinterpret_cast<void**>(&temp), sizes.tempSizeInBytes);
-    cudaMalloc(reinterpret_cast<void**>(&output), sizes.outputSizeInBytes);
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&temp), sizes.tempSizeInBytes));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&output), sizes.outputSizeInBytes));
     OptixResult result = optixAccelBuild(context, 0, &options, &input, 1,
         temp, sizes.tempSizeInBytes, output, sizes.outputSizeInBytes, &handle, nullptr, 0);
     release(temp);  // cudaFree waits for the build, which runs on stream 0
@@ -143,25 +143,25 @@ bool buildCubeGas(OptixTraversableHandle& handle)
         {0, 2, 3}, {0, 3, 1},   // -z
         {4, 7, 6}, {4, 5, 7},   // +z
     };
-    CUdeviceptr d_vertices = upload(vertices, sizeof(vertices));
-    CUdeviceptr d_triangles = upload(triangles, sizeof(triangles));
+    CUdeviceptr dev_vertices = upload(vertices, sizeof(vertices));
+    CUdeviceptr dev_triangles = upload(triangles, sizeof(triangles));
 
     const unsigned int flags[1] = { OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT };
     OptixBuildInput input = {};
     input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
     input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
-    input.triangleArray.vertexBuffers = &d_vertices;
+    input.triangleArray.vertexBuffers = &dev_vertices;
     input.triangleArray.numVertices = 8;
     input.triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
-    input.triangleArray.indexBuffer = d_triangles;
+    input.triangleArray.indexBuffer = dev_triangles;
     input.triangleArray.numIndexTriplets = 12;
     input.triangleArray.flags = flags;
     input.triangleArray.numSbtRecords = 1;
 
-    bool ok = buildAccel(input, d_cubeGas, handle);
+    bool ok = buildAccel(input, dev_cubeGas, handle);
     // The build copies what it needs; the inputs are not read at trace time.
-    release(d_vertices);
-    release(d_triangles);
+    release(dev_vertices);
+    release(dev_triangles);
     return ok;
 }
 
@@ -172,18 +172,18 @@ bool buildCubeGas(OptixTraversableHandle& handle)
 bool buildSphereGas(OptixTraversableHandle& handle)
 {
     const OptixAabb bounds = { -0.5f, -0.5f, -0.5f, 0.5f, 0.5f, 0.5f };
-    CUdeviceptr d_bounds = upload(&bounds, sizeof(bounds));
+    CUdeviceptr dev_bounds = upload(&bounds, sizeof(bounds));
 
     const unsigned int flags[1] = { OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT };
     OptixBuildInput input = {};
     input.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
-    input.customPrimitiveArray.aabbBuffers = &d_bounds;
+    input.customPrimitiveArray.aabbBuffers = &dev_bounds;
     input.customPrimitiveArray.numPrimitives = 1;
     input.customPrimitiveArray.flags = flags;
     input.customPrimitiveArray.numSbtRecords = 1;
 
-    bool ok = buildAccel(input, d_sphereGas, handle);
-    release(d_bounds);
+    bool ok = buildAccel(input, dev_sphereGas, handle);
+    release(dev_bounds);
     return ok;
 }
 
@@ -195,7 +195,7 @@ bool buildSphereGas(OptixTraversableHandle& handle)
 // buildIas then turns it off again on the instances that do not.
 bool buildMeshGases(const Scene* scene, const MeshBuffers& buffers, std::vector<OptixTraversableHandle>& handles)
 {
-    d_meshGas.assign(scene->meshes.size(), 0);
+    dev_meshGas.assign(scene->meshes.size(), 0);
     handles.assign(scene->meshes.size(), 0);
     std::vector<bool> masked(scene->meshes.size(), false);
     for (const Geom& g : scene->geoms)
@@ -205,7 +205,7 @@ bool buildMeshGases(const Scene* scene, const MeshBuffers& buffers, std::vector<
             masked[g.meshId] = true;
         }
     }
-    CUdeviceptr d_vertices = reinterpret_cast<CUdeviceptr>(buffers.positions);
+    CUdeviceptr dev_vertices = reinterpret_cast<CUdeviceptr>(buffers.positions);
     for (size_t i = 0; i < scene->meshes.size(); ++i)
     {
         const unsigned int flags[1] = {
@@ -214,7 +214,7 @@ bool buildMeshGases(const Scene* scene, const MeshBuffers& buffers, std::vector<
         OptixBuildInput input = {};
         input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
         input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
-        input.triangleArray.vertexBuffers = &d_vertices;
+        input.triangleArray.vertexBuffers = &dev_vertices;
         input.triangleArray.numVertices = static_cast<unsigned int>(scene->positions.size());
         // glm::ivec3 holds non-negative indices, so it reads as uint3.
         input.triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
@@ -222,7 +222,7 @@ bool buildMeshGases(const Scene* scene, const MeshBuffers& buffers, std::vector<
         input.triangleArray.numIndexTriplets = static_cast<unsigned int>(mesh.triCount);
         input.triangleArray.flags = flags;
         input.triangleArray.numSbtRecords = 1;
-        if (!buildAccel(input, d_meshGas[i], handles[i]))
+        if (!buildAccel(input, dev_meshGas[i], handles[i]))
         {
             return false;
         }
@@ -257,11 +257,11 @@ bool buildIas(const Scene* scene, OptixTraversableHandle cubeGas, OptixTraversab
         inst.flags = isMasked(scene, g) ? OPTIX_INSTANCE_FLAG_NONE : OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT;
         switch (g.type)
         {
-        case SPHERE:
+        case GeomType::SPHERE:
             inst.sbtOffset = 1;
             inst.traversableHandle = sphereGas;
             break;
-        case MESH:
+        case GeomType::MESH:
             inst.sbtOffset = 2;
             inst.traversableHandle = meshGas[g.meshId];
             break;
@@ -271,15 +271,15 @@ bool buildIas(const Scene* scene, OptixTraversableHandle cubeGas, OptixTraversab
             break;
         }
     }
-    CUdeviceptr d_instances = upload(instances.data(), instances.size() * sizeof(OptixInstance));
+    CUdeviceptr dev_optixInstances = upload(instances.data(), instances.size() * sizeof(OptixInstance));
 
     OptixBuildInput input = {};
     input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
-    input.instanceArray.instances = d_instances;
+    input.instanceArray.instances = dev_optixInstances;
     input.instanceArray.numInstances = static_cast<unsigned int>(instances.size());
 
-    bool ok = buildAccel(input, d_ias, iasHandle);
-    release(d_instances);
+    bool ok = buildAccel(input, dev_ias, iasHandle);
+    release(dev_optixInstances);
     return ok;
 }
 
@@ -306,7 +306,7 @@ bool buildPipeline()
         return false;
     }
 
-    OptixProgramGroupDesc descs[kNumGroups] = {};
+    OptixProgramGroupDesc descs[NUM_GROUPS] = {};
     descs[0].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
     descs[0].raygen.module = module;
     descs[0].raygen.entryFunctionName = "__raygen__paths";
@@ -328,7 +328,7 @@ bool buildPipeline()
     descs[4].hitgroup.entryFunctionNameAH = "__anyhit__mesh";
     OptixProgramGroupOptions groupOptions = {};
     logSize = sizeof(log);
-    result = optixProgramGroupCreate(context, descs, kNumGroups, &groupOptions, log, &logSize, groups);
+    result = optixProgramGroupCreate(context, descs, NUM_GROUPS, &groupOptions, log, &logSize, groups);
     printLog("program group", result, log, logSize);
     if (!check(result, "optixProgramGroupCreate"))
     {
@@ -338,7 +338,7 @@ bool buildPipeline()
     OptixPipelineLinkOptions linkOptions = {};
     linkOptions.maxTraceDepth = 1;  // raygen traces once; nothing traces from a hit
     logSize = sizeof(log);
-    result = optixPipelineCreate(context, &pipelineOptions, &linkOptions, groups, kNumGroups,
+    result = optixPipelineCreate(context, &pipelineOptions, &linkOptions, groups, NUM_GROUPS,
         log, &logSize, &pipeline);
     printLog("pipeline", result, log, logSize);
     if (!check(result, "optixPipelineCreate"))
@@ -371,20 +371,20 @@ struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) Record
 
 bool buildSbt()
 {
-    Record records[kNumGroups];
-    for (int i = 0; i < kNumGroups; ++i)
+    Record records[NUM_GROUPS];
+    for (int i = 0; i < NUM_GROUPS; ++i)
     {
         OPTIX_TRY(optixSbtRecordPackHeader(groups[i], &records[i]));
     }
-    d_sbtRecords = upload(records, sizeof(records));
+    dev_sbtRecords = upload(records, sizeof(records));
 
-    sbt.raygenRecord = d_sbtRecords;
-    sbt.missRecordBase = d_sbtRecords + sizeof(Record);
+    sbt.raygenRecord = dev_sbtRecords;
+    sbt.missRecordBase = dev_sbtRecords + sizeof(Record);
     sbt.missRecordStrideInBytes = sizeof(Record);
     sbt.missRecordCount = 1;
-    sbt.hitgroupRecordBase = d_sbtRecords + 2 * sizeof(Record);
+    sbt.hitgroupRecordBase = dev_sbtRecords + 2 * sizeof(Record);
     sbt.hitgroupRecordStrideInBytes = sizeof(Record);
-    sbt.hitgroupRecordCount = kNumHitGroups;  // cube, sphere, mesh
+    sbt.hitgroupRecordCount = NUM_HIT_GROUPS;  // cube, sphere, mesh
     return true;
 }
 
@@ -421,15 +421,15 @@ bool init(const Scene* scene, const MeshBuffers& buffers, const Material* materi
     std::vector<InstanceRecord> records(scene->geoms.size());
     for (size_t i = 0; i < records.size(); ++i)
     {
-        records[i].materialId = scene->geoms[i].materialid;
+        records[i].materialId = scene->geoms[i].materialId;
         records[i].meshId = scene->geoms[i].meshId;
         records[i].tangentSign = scene->geoms[i].tangentSign;
     }
-    d_instances = reinterpret_cast<InstanceRecord*>(upload(records.data(), records.size() * sizeof(InstanceRecord)));
+    dev_instances = reinterpret_cast<InstanceRecord*>(upload(records.data(), records.size() * sizeof(InstanceRecord)));
     meshBuffers = buffers;
-    d_materials = materials;
-    d_textures = textures;
-    cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(OptixIntersectParams));
+    dev_materials = materials;
+    dev_textures = textures;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dev_params), sizeof(OptixIntersectParams)));
     return true;
 }
 }  // namespace
@@ -471,22 +471,22 @@ void optixIntersectFree()
         optixDeviceContextDestroy(context);
         context = nullptr;
     }
-    release(d_sbtRecords);
-    release(d_cubeGas);
-    release(d_sphereGas);
-    for (CUdeviceptr& gas : d_meshGas)
+    release(dev_sbtRecords);
+    release(dev_cubeGas);
+    release(dev_sphereGas);
+    for (CUdeviceptr& gas : dev_meshGas)
     {
         release(gas);
     }
-    d_meshGas.clear();
-    release(d_ias);
-    cudaFree(d_params);
-    d_params = nullptr;
-    cudaFree(d_instances);
-    d_instances = nullptr;
+    dev_meshGas.clear();
+    release(dev_ias);
+    cudaFree(dev_params);
+    dev_params = nullptr;
+    cudaFree(dev_instances);
+    dev_instances = nullptr;
     meshBuffers = {};  // these three are owned by pathtrace.cu, not freed here
-    d_materials = nullptr;
-    d_textures = nullptr;
+    dev_materials = nullptr;
+    dev_textures = nullptr;
     iasHandle = 0;
     sbt = {};
 }
@@ -505,20 +505,20 @@ void optixIntersect(int numPaths, const PathSegment* paths,
     params.intersections = intersections;
     params.materialIds = materialIds;
     params.numMaterials = numMaterials;
-    params.instances = d_instances;
+    params.instances = dev_instances;
     params.buffers = meshBuffers;
-    params.materials = d_materials;
-    params.textures = d_textures;
+    params.materials = dev_materials;
+    params.textures = dev_textures;
     params.handle = iasHandle;
     // The buffers ping-pong every bounce, so the parameters go up per launch.
     // The source is pageable, so the copy is staged before this returns and
     // the stack variable can go out of scope.
-    cudaMemcpyAsync(d_params, &params, sizeof(params), cudaMemcpyHostToDevice, stream);
+    CUDA_CHECK(cudaMemcpyAsync(dev_params, &params, sizeof(params), cudaMemcpyHostToDevice, stream));
 
-    OptixResult result = optixLaunch(pipeline, stream, reinterpret_cast<CUdeviceptr>(d_params),
+    OptixResult result = optixLaunch(pipeline, stream, reinterpret_cast<CUdeviceptr>(dev_params),
         sizeof(OptixIntersectParams), &sbt, numPaths, 1, 1);
-    if (!check(result, "optixLaunch"))
+    if (result != OPTIX_SUCCESS)
     {
-        exit(EXIT_FAILURE);
+        fatal("optixLaunch failed: %s (%s)", optixGetErrorName(result), optixGetErrorString(result));
     }
 }

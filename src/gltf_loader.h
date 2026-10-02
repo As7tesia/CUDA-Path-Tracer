@@ -48,13 +48,12 @@ struct GltfInfo
 // and triangles go into the scene's flat mesh arrays (see Scene).
 //
 // Materials go into Scene::materials, unless materialOverride is a material
-// index, which every primitive then uses. A material that emits (emissive
-// factor times KHR_materials_emissive_strength) becomes an Emitting material,
-// any other a Diffuse with the base color factor.
+// index, which every primitive then uses: each glTF material becomes a
+// Material with its factors and texture slots, the images the slots read go
+// into Scene::textureImages and the slots themselves into Scene::textures.
 //
-// Only triangle-list primitives with float positions are loaded; textures
-// are not read yet. Prints a summary line, or the error and returns false
-// when the file cannot be loaded. info, when given, receives the rest of
-// what the file holds.
+// Only triangle-list primitives with float positions are loaded. Prints a
+// summary line, or the error and returns false when the file cannot be
+// loaded. info, when given, receives the rest of what the file holds.
 bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int materialOverride, Scene& scene,
     GltfInfo* info = nullptr);

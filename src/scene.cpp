@@ -4,16 +4,15 @@
 #include "utilities.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
-#include <glm/gtx/string_cast.hpp>
 #include "json.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <cfloat>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 
@@ -49,20 +48,37 @@ RenderSettings withOverrides(RenderSettings settings, const SceneOverrides& ov)
     }
     return settings;
 }
+
+// A scene JSON array of three numbers. Throws, like json::at, when the key is
+// missing or holds something else.
+glm::vec3 vec3At(const json& object, const char* key)
+{
+    const json& v = object.at(key);
+    if (!v.is_array() || v.size() != 3)
+    {
+        throw std::runtime_error(std::string(key) + " is not an array of three numbers");
+    }
+    return glm::vec3(v[0].get<float>(), v[1].get<float>(), v[2].get<float>());
+}
 }  // namespace
 
 Scene::Scene(string filename, const SceneOverrides& ov)
 {
     cout << "Reading scene from " << filename << " ..." << endl;
     cout << " " << endl;
-    string ext = std::filesystem::path(filename).extension().string();
-    for (char& c : ext)
-    {
-        c = (char)tolower((unsigned char)c);
-    }
+    const string ext = lowercaseExtension(filename);
     if (ext == ".json")
     {
-        loadFromJSON(filename, ov);
+        // A missing key or a value of the wrong type throws while loading;
+        // it ends the program here, with the scene file's name.
+        try
+        {
+            loadFromJSON(filename, ov);
+        }
+        catch (const std::exception& e)
+        {
+            fatal("%s: %s", filename.c_str(), e.what());
+        }
     }
     else if (ext == ".gltf" || ext == ".glb")
     {
@@ -70,8 +86,7 @@ Scene::Scene(string filename, const SceneOverrides& ov)
     }
     else
     {
-        cout << "Couldn't read from " << filename << endl;
-        exit(-1);
+        fatal("%s: not a scene file (.json, .gltf or .glb)", filename.c_str());
     }
 }
 
@@ -87,7 +102,7 @@ void Scene::bounds(size_t first, size_t last, glm::vec3& lo, glm::vec3& hi) cons
     for (size_t g = first; g < last; ++g)
     {
         const Geom& geom = geoms[g];
-        if (geom.type == MESH)
+        if (geom.type == GeomType::MESH)
         {
             const TriangleMesh& mesh = meshes[geom.meshId];
             for (int t = 0; t < mesh.triCount; ++t)
@@ -113,7 +128,11 @@ void Scene::bounds(size_t first, size_t last, glm::vec3& lo, glm::vec3& hi) cons
 void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
 {
     std::ifstream f(jsonName);
-    json data = json::parse(f);
+    if (!f)
+    {
+        fatal("cannot open %s", jsonName.c_str());
+    }
+    const json data = json::parse(f);
     // Each material TYPE becomes parameters of the one material model
     // (Material), starting from glTF's default material:
     //   Diffuse     base color RGB and no specular layer: pure Lambert
@@ -122,124 +141,116 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
     //   Specular    metal with base color RGB and roughness ROUGHNESS
     //               (optional, 0 = a perfect mirror)
     //   Refractive  smooth glass of index IOR, the refraction tinted by RGB
-    const auto& materialsData = data["Materials"];
-    std::unordered_map<std::string, uint32_t> MatNameToID;
-    for (const auto& item : materialsData.items())
+    std::unordered_map<std::string, uint32_t> materialIdsByName;
+    for (const auto& item : data.at("Materials").items())
     {
         const auto& name = item.key();
         const auto& p = item.value();
-        const auto& col = p["RGB"];
-        const glm::vec3 rgb(col[0], col[1], col[2]);
-        const std::string type = p["TYPE"];
+        const glm::vec3 rgb = vec3At(p, "RGB");
+        const std::string type = p.at("TYPE");
         Material newMaterial{};
         if (type == "Diffuse")
         {
-            newMaterial.color = rgb;
+            newMaterial.baseColor = rgb;
             newMaterial.metallic = 0.0f;
             newMaterial.specularFactor = 0.0f;
         }
         else if (type == "Emitting")
         {
-            newMaterial.color = glm::vec3(0.0f);
+            newMaterial.baseColor = glm::vec3(0.0f);
             newMaterial.metallic = 0.0f;
             newMaterial.specularFactor = 0.0f;
-            newMaterial.emission = rgb * p["EMITTANCE"].get<float>();
+            newMaterial.emission = rgb * p.at("EMITTANCE").get<float>();
         }
         else if (type == "Specular")
         {
-            newMaterial.color = rgb;
+            newMaterial.baseColor = rgb;
             newMaterial.metallic = 1.0f;
             newMaterial.roughness = p.value("ROUGHNESS", 0.0f);
         }
         else if (type == "Refractive")
         {
-            newMaterial.color = rgb;
+            newMaterial.baseColor = rgb;
             newMaterial.metallic = 0.0f;
             newMaterial.roughness = 0.0f;
             newMaterial.transmission = 1.0f;
-            newMaterial.ior = p["IOR"];
+            newMaterial.ior = p.at("IOR").get<float>();
         }
         else
         {
-            cout << "Unknown material TYPE " << type << " for " << name << endl;
-            exit(-1);
+            fatal("%s: material %s has an unknown TYPE \"%s\" (Diffuse, Emitting, Specular or Refractive)",
+                jsonName.c_str(), name.c_str(), type.c_str());
         }
-        MatNameToID[name] = materials.size();
+        materialIdsByName[name] = materials.size();
         materials.emplace_back(newMaterial);
     }
     // Material by name. The map's operator[] would silently insert 0 for a
     // typo, which is the light in every Cornell scene.
     auto materialIndex = [&](const std::string& name) -> int {
-        auto found = MatNameToID.find(name);
-        if (found == MatNameToID.end())
+        auto found = materialIdsByName.find(name);
+        if (found == materialIdsByName.end())
         {
-            cout << "Unknown material " << name << endl;
-            exit(-1);
+            fatal("%s: unknown material %s", jsonName.c_str(), name.c_str());
         }
         return (int)found->second;
     };
 
     // FILE paths in the scene are relative to the scene file's folder.
     const std::string sceneDir = jsonName.substr(0, jsonName.find_last_of("/\\") + 1);
-    const auto& objectsData = data["Objects"];
-    for (const auto& p : objectsData)
+    for (const auto& p : data.at("Objects"))
     {
-        const auto& type = p["TYPE"];
-        const auto& trans = p["TRANS"];
-        const auto& rotat = p["ROTAT"];
-        const auto& scale = p["SCALE"];
-        const glm::vec3 translation(trans[0], trans[1], trans[2]);
-        const glm::vec3 rotation(rotat[0], rotat[1], rotat[2]);
-        const glm::vec3 scaling(scale[0], scale[1], scale[2]);
-        const glm::mat4 transform = utilityCore::buildTransformationMatrix(translation, rotation, scaling);
+        const std::string type = p.at("TYPE");
+        const glm::mat4 transform =
+            buildTransformationMatrix(vec3At(p, "TRANS"), vec3At(p, "ROTAT"), vec3At(p, "SCALE"));
 
         if (type == "mesh")
         {
             // A glTF file: its nodes and primitives become Geoms of type MESH
             // under this transform. MATERIAL, when given, replaces the file's
             // materials; without it they are appended to the material list.
-            if (!p.contains("FILE"))
+            const int materialOverride = p.contains("MATERIAL") ? materialIndex(p.at("MATERIAL").get<std::string>()) : -1;
+            const std::string file = sceneDir + p.at("FILE").get<std::string>();
+            if (!loadGltf(file, transform, materialOverride, *this))
             {
-                cout << "Mesh object without a FILE" << endl;
-                exit(-1);
-            }
-            const int materialOverride = p.contains("MATERIAL") ? materialIndex(p["MATERIAL"].get<std::string>()) : -1;
-            if (!loadGltf(sceneDir + std::string(p["FILE"]), transform, materialOverride, *this))
-            {
-                exit(-1);
+                fatal("%s: cannot load %s", jsonName.c_str(), file.c_str());
             }
             continue;
         }
 
         Geom newGeom{};
-        newGeom.type = (type == "cube") ? CUBE : SPHERE;
-        newGeom.materialid = materialIndex(p["MATERIAL"].get<std::string>());
+        if (type == "cube")
+        {
+            newGeom.type = GeomType::CUBE;
+        }
+        else if (type == "sphere")
+        {
+            newGeom.type = GeomType::SPHERE;
+        }
+        else
+        {
+            fatal("%s: unknown object TYPE \"%s\" (cube, sphere or mesh)", jsonName.c_str(), type.c_str());
+        }
+        newGeom.materialId = materialIndex(p.at("MATERIAL").get<std::string>());
         newGeom.meshId = -1;
-        newGeom.translation = translation;
-        newGeom.rotation = rotation;
-        newGeom.scale = scaling;
         newGeom.transform = transform;
         newGeom.inverseTransform = glm::inverse(transform);
         newGeom.invTranspose = glm::inverseTranspose(transform);
 
         geoms.push_back(newGeom);
     }
-    const auto& cameraData = data["Camera"];
-    const auto& res = cameraData["RES"];
+    const json& cameraData = data.at("Camera");
+    const json& res = cameraData.at("RES");
     RenderSettings settings;
-    settings.resolution = glm::ivec2(res[0].get<int>(), res[1].get<int>());
-    settings.iterations = cameraData["ITERATIONS"].get<int>();
-    settings.traceDepth = cameraData["DEPTH"].get<int>();
-    settings.imageName = cameraData["FILE"].get<std::string>();
+    settings.resolution = glm::ivec2(res.at(0).get<int>(), res.at(1).get<int>());
+    settings.iterations = cameraData.at("ITERATIONS").get<int>();
+    settings.traceDepth = cameraData.at("DEPTH").get<int>();
+    settings.imageName = cameraData.at("FILE").get<std::string>();
 
-    const auto& pos = cameraData["EYE"];
-    const auto& lookat = cameraData["LOOKAT"];
-    const auto& up = cameraData["UP"];
     CameraPose pose;
-    pose.eye = glm::vec3(pos[0], pos[1], pos[2]);
-    pose.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
-    pose.up = glm::vec3(up[0], up[1], up[2]);
-    pose.fovy = cameraData["FOVY"];
+    pose.eye = vec3At(cameraData, "EYE");
+    pose.lookAt = vec3At(cameraData, "LOOKAT");
+    pose.up = vec3At(cameraData, "UP");
+    pose.fovy = cameraData.at("FOVY").get<float>();
     pose.mirrored = false;
 
     initRenderState(withOverrides(settings, ov), pose);
@@ -250,19 +261,18 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
     GltfInfo info;
     if (!loadGltf(gltfName, glm::mat4(1.0f), -1, *this, &info))
     {
-        exit(-1);
+        fatal("cannot load %s", gltfName.c_str());
     }
     if (geoms.empty())
     {
-        cout << "Nothing to render in " << gltfName << endl;
-        exit(-1);
+        fatal("%s: nothing to render", gltfName.c_str());
     }
     // Only a surface that emits lights a scene so far.
     if (std::none_of(materials.begin(), materials.end(), [](const Material& m) {
             return maxComponent(m.emission) > 0.0f;
         }))
     {
-        cout << "No emissive material in " << gltfName << ": the render will be black" << endl;
+        cerr << "No emissive material in " << gltfName << ": the render will be black" << endl;
     }
 
     // The file's hints where it has them, the defaults elsewhere.
@@ -318,7 +328,7 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
         level = glm::length(level) < 1e-3f ? glm::vec3(1.0f, 0.0f, 0.0f) : glm::normalize(level);
         if (glm::dot(glm::normalize(glm::cross(c.view, c.up)), level) < 0.9999f)
         {
-            cout << "The camera in " << gltfName << " is rolled about its view axis; the roll is not kept" << endl;
+            cerr << "The camera in " << gltfName << " is rolled about its view axis; the roll is not kept" << endl;
         }
     }
     else
@@ -355,8 +365,6 @@ void Scene::initRenderState(const RenderSettings& settings, const CameraPose& po
     // sets the image plane's half height at unit distance.
     float yscaled = tan(0.5f * pose.fovy * (PI / 180));
     float xscaled = (yscaled * camera.resolution.x) / camera.resolution.y;
-    float fovx = (2 * atan(xscaled) * 180) / PI;
-    camera.fov = glm::vec2(fovx, pose.fovy);
     camera.pixelLength = glm::vec2(2 * xscaled / (float)camera.resolution.x,
         2 * yscaled / (float)camera.resolution.y);
 

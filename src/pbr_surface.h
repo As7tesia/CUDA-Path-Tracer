@@ -1,10 +1,9 @@
 #pragma once
 
-// The parts of a glTF material that come from textures, read on the device.
-// Both intersection paths use the alpha test (the naive mesh test and the
-// OptiX any-hit program), and the shade kernel uses the PBR inputs at a hit.
-// Everything here is inline in the header: the OptiX programs are compiled
-// on their own to OptiX-IR and cannot call into the other .cu files.
+// A material at one hit, read on the device: its texture lookups, the
+// normal map, and the Fresnel and clearcoat rules the emission shares with
+// the BSDF (bsdf.cu). The shade kernel calls pbrSurface or pbrEmission once
+// per hit.
 
 #include <cuda_runtime.h>
 
@@ -12,42 +11,8 @@
 
 #include <glm/glm.hpp>
 
-// a[tri.x], a[tri.y] and a[tri.z] weighted by the barycentrics u and v of
-// vertices 1 and 2: the one expression both intersection paths interpolate
-// vertex attributes with, so they agree bit for bit.
-template <typename T>
-__device__ __forceinline__ T interpolate(const T* attribute, glm::ivec3 tri, float u, float v)
-{
-    return (1.0f - u - v) * attribute[tri.x] + u * attribute[tri.y] + v * attribute[tri.z];
-}
-
-// A texture slot's value at uv, or `fallback` when the slot is empty.
-__device__ __forceinline__ float4 sampleSlot(const cudaTextureObject_t* textures, int slot, glm::vec2 uv, float4 fallback)
-{
-    return slot >= 0 ? tex2D<float4>(textures[slot], uv.x, uv.y) : fallback;
-}
-
-// Whether a hit at uv falls in a cut-out of an ALPHA_MASK material, where
-// the ray goes on as if nothing was there. glTF's alpha is the base color
-// factor's alpha times the base color texture's; the texture unit reads alpha
-// linearly even from an sRGB texture (checked: a texel of 128 reads 0.502
-// with sRGB on, while its color reads 0.216).
-__device__ __forceinline__ bool alphaCutOut(const Material& m, glm::vec2 uv, const cudaTextureObject_t* textures)
-{
-    if (m.alphaMode != ALPHA_MASK)
-    {
-        return false;
-    }
-    float alpha = m.alpha;
-    if (m.baseColorTexture >= 0)
-    {
-        alpha *= tex2D<float4>(textures[m.baseColorTexture], uv.x, uv.y).w;
-    }
-    return alpha < m.alphaCutoff;
-}
-
-// A PBR material at one hit after its texture lookups: the inputs
-// scatterPbr (bsdf.h) samples and the emission the shade kernel adds.
+// A material at one hit after its texture lookups: the inputs scatterPbr
+// (bsdf.h) samples and the emission the shade kernel adds.
 struct PbrSurface
 {
     glm::vec3 baseColor;
@@ -58,6 +23,12 @@ struct PbrSurface
     glm::vec3 normal;      // shading normal: normal-mapped, facing the incoming ray
     glm::vec3 coatNormal;  // the clearcoat's: the mesh normal, which the normal map does not touch
 };
+
+// A texture slot's value at uv, or `fallback` when the slot is empty.
+__device__ __forceinline__ float4 sampleSlot(const cudaTextureObject_t* textures, int slot, glm::vec2 uv, float4 fallback)
+{
+    return slot >= 0 ? tex2D<float4>(textures[slot], uv.x, uv.y) : fallback;
+}
 
 // The normal from a normal map texel, in world space and facing the ray like
 // isect.surfaceNormal. The tangent frame is built on the front-face normal,
@@ -113,7 +84,7 @@ __host__ __device__ __forceinline__ glm::vec3 schlickFresnel(glm::vec3 f0, float
     return f0 + (glm::vec3(1.0f) - f0) * (m2 * m2 * m);
 }
 
-// What a PBR material emits at a hit: the emissive factor times its texture,
+// What a material emits at a hit: the emissive factor times its texture,
 // darkened by the clearcoat above it (KHR_materials_clearcoat puts the coat
 // above the emission, so the light the coat reflects is light the surface
 // does not emit). On its own for a hit the path ends at, which needs nothing
@@ -131,9 +102,9 @@ __device__ __forceinline__ glm::vec3 pbrEmission(const Material& m, const Shadea
     return emission;
 }
 
-// The PBR inputs at a hit. wo points from the hit back along the incoming
-// ray. Texture values multiply their factors; metallic, roughness and
-// transmission are clamped to [0, 1] as glTF defines them.
+// A material's inputs at a hit. wo points from the hit back along the
+// incoming ray. Texture values multiply their factors; metallic, roughness
+// and transmission are clamped to [0, 1] as glTF defines them.
 __device__ __forceinline__ PbrSurface pbrSurface(const Material& m, const ShadeableIntersection& isect, glm::vec3 wo,
     const cudaTextureObject_t* textures)
 {
@@ -142,7 +113,7 @@ __device__ __forceinline__ PbrSurface pbrSurface(const Material& m, const Shadea
     PbrSurface s;
 
     const float4 base = sampleSlot(textures, m.baseColorTexture, uv, one);
-    s.baseColor = m.color * glm::vec3(base.x, base.y, base.z);
+    s.baseColor = m.baseColor * glm::vec3(base.x, base.y, base.z);
 
     // glTF packs roughness in G and metallic in B (R is free for occlusion).
     const float4 mr = sampleSlot(textures, m.metallicRoughnessTexture, uv, one);

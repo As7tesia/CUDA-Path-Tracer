@@ -14,6 +14,11 @@
 // allocation after every call. The spare buffers and CUB's temporary storage
 // are shared by both ops, so all calls must go to the same stream.
 
+// Threads per block of the 1D kernels over the path array: the naive
+// intersection kernel and shadeMaterial in pathtrace.cu, the sort's helper
+// kernels here.
+constexpr int PATH_BLOCK_SIZE = 128;
+
 // Allocates the workspace for up to maxPaths paths: a spare PathSegment and
 // ShadeableIntersection buffer, the sort's index and key arrays, the live
 // count, and CUB temporary storage sized once for both algorithms. Called from
@@ -31,7 +36,7 @@ void wavefrontFree();
 int compactPaths(PathSegment*& paths, int numPaths, cudaStream_t stream = 0);
 
 // Sorts the first numPaths paths and their intersections by materialIds (one
-// int key per path, written by computeIntersections: materialId on hit,
+// int key per path, written by the intersection stage: materialId on hit,
 // numMaterials on miss). Radix-sorts (key, path index) pairs on only the low
 // keyBits bits (the caller computes the width of its largest key once, see
 // bitsToHold in pathtrace.cu), then gathers paths and intersections into the

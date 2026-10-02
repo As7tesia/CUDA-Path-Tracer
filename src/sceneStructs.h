@@ -7,9 +7,7 @@
 #include <string>
 #include <vector>
 
-#define BACKGROUND_COLOR (glm::vec3(0.0f))
-
-enum GeomType
+enum class GeomType
 {
     SPHERE,
     CUBE,
@@ -75,15 +73,12 @@ struct Texture
 
 struct Geom
 {
-    enum GeomType type;
-    int materialid;
+    GeomType type;
+    int materialId;
     int meshId;  // MESH only: which TriangleMesh; -1 for the primitives
     // MESH only: -1 when transform mirrors (negative determinant), which
     // flips the bitangent sign of the mesh's tangents; 1 otherwise
     float tangentSign;
-    glm::vec3 translation;
-    glm::vec3 rotation;
-    glm::vec3 scale;
     glm::mat4 transform;
     glm::mat4 inverseTransform;
     glm::mat4 invTranspose;
@@ -104,7 +99,7 @@ enum AlphaMode
 // none), and the texture value multiplies the factor it belongs to.
 struct Material
 {
-    glm::vec3 color = glm::vec3(1.0f);            // base color factor
+    glm::vec3 baseColor = glm::vec3(1.0f);        // base color factor
     float ior = 1.5f;                             // KHR_materials_ior; 0 means a Fresnel term of 1
     float alpha = 1.0f;                           // base color factor alpha
     AlphaMode alphaMode = ALPHA_OPAQUE;
@@ -136,7 +131,6 @@ struct Camera
     glm::vec3 view;
     glm::vec3 up;
     glm::vec3 right;
-    glm::vec2 fov;
     glm::vec2 pixelLength;
     // right is -cross(view, up) instead of cross(view, up), so the image is
     // flipped left to right. Set by a glTF camera whose transform mirrors.

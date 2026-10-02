@@ -25,7 +25,6 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-#include <cctype>
 #include <cfloat>
 #include <cstdint>
 #include <cstdio>
@@ -277,7 +276,7 @@ tinygltf::TextureInfo extensionTexture(const tinygltf::Material& material, const
 }
 
 // The material extensions this loader reads. Others are named once per file.
-const char* const kReadExtensions[] = {
+const char* const READ_EXTENSIONS[] = {
     "KHR_materials_emissive_strength",
     "KHR_materials_ior",
     "KHR_materials_transmission",
@@ -288,7 +287,7 @@ const char* const kReadExtensions[] = {
 
 bool isReadExtension(const std::string& name)
 {
-    for (const char* read : kReadExtensions)
+    for (const char* read : READ_EXTENSIONS)
     {
         if (name == read)
         {
@@ -492,7 +491,7 @@ struct Loader
     // Every glTF material becomes a Material (the model bsdf.h describes):
     // the core metallic-roughness factors and texture slots (base color,
     // metallic-roughness, normal, emissive), the alpha mode, and the factors
-    // of the extensions in kReadExtensions. Of the extensions' textures only
+    // of the extensions in READ_EXTENSIONS. Of the extensions' textures only
     // transmissionTexture is read. A primitive without a material gets glTF's
     // default material, which is Material's default: white, fully metallic,
     // fully rough.
@@ -514,7 +513,7 @@ struct Loader
             const tinygltf::PbrMetallicRoughness& pbr = source.pbrMetallicRoughness;
             if (pbr.baseColorFactor.size() == 4)
             {
-                m.color = glm::vec3((float)pbr.baseColorFactor[0], (float)pbr.baseColorFactor[1], (float)pbr.baseColorFactor[2]);
+                m.baseColor = glm::vec3((float)pbr.baseColorFactor[0], (float)pbr.baseColorFactor[1], (float)pbr.baseColorFactor[2]);
                 m.alpha = (float)pbr.baseColorFactor[3];
             }
             m.metallic = (float)pbr.metallicFactor;
@@ -1007,11 +1006,9 @@ struct Loader
                 {
                     continue;
                 }
-                // translation / rotation / scale stay zero: the matrix holds
-                // the whole transform and nothing reads the parts.
                 Geom g{};
-                g.type = MESH;
-                g.materialid = materialFor(mesh.primitives[p].material);
+                g.type = GeomType::MESH;
+                g.materialId = materialFor(mesh.primitives[p].material);
                 g.meshId = meshId;
                 g.transform = world;
                 g.inverseTransform = glm::inverse(world);
@@ -1035,12 +1032,7 @@ bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int mate
     tinygltf::TinyGLTF loader;
     std::string err;
     std::string warn;
-    std::string ext = path.size() >= 4 ? path.substr(path.size() - 4) : "";
-    for (char& c : ext)
-    {
-        c = (char)tolower((unsigned char)c);
-    }
-    const bool binary = ext == ".glb";
+    const bool binary = lowercaseExtension(path) == ".glb";
     const bool loaded = binary ? loader.LoadBinaryFromFile(&model, &err, &warn, path)
                                : loader.LoadASCIIFromFile(&model, &err, &warn, path);
     if (!warn.empty())

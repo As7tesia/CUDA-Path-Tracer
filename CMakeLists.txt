@@ -73,24 +73,29 @@ include_directories(${MIKKTSPACE_DIR})
 
 set(headers
     src/bsdf.h
+    src/cli.h
     src/gltf_loader.h
     src/image.h
     src/intersections.h
-    src/material_textures.h
+    src/mesh_hit.h
     src/glslUtility.hpp
     src/optix_intersect.h
     src/optix_params.h
     src/pathtrace.h
+    src/pbr_surface.h
+    src/sampling.h
     src/scene.h
     src/sceneStructs.h
     src/textures.h
     src/tonemap.h
     src/utilities.h
+    src/viewport_camera.h
     src/wavefront_ops.h
 )
 
 set(sources
     src/main.cpp
+    src/cli.cpp
     src/stb.cpp
     src/gltf_loader.cpp
     src/image.cpp
@@ -102,6 +107,7 @@ set(sources
     src/scene.cpp
     src/textures.cpp
     src/utilities.cpp
+    src/viewport_camera.cpp
     src/wavefront_ops.cu
 )
 
@@ -137,16 +143,10 @@ source_group("Sources" FILES ${sources})
 source_group("ImGui\\Headers" FILES ${imgui_headers})
 source_group("ImGui\\Sources" FILES ${imgui_sources})
 
-#add_subdirectory(src/ImGui)
-#add_subdirectory(stream_compaction)  # TODO: uncomment if using your stream compaction
-
 add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers} ${imgui_sources} ${imgui_headers}
     ${MIKKTSPACE_DIR}/mikktspace.c ${MIKKTSPACE_DIR}/mikktspace.h)
 source_group("MikkTSpace" FILES ${MIKKTSPACE_DIR}/mikktspace.c ${MIKKTSPACE_DIR}/mikktspace.h)
-target_link_libraries(${CMAKE_PROJECT_NAME}
-    ${GL_LIBRARIES}
-    #stream_compaction  # TODO: uncomment if using your stream compaction
-)
+target_link_libraries(${CMAKE_PROJECT_NAME} ${GL_LIBRARIES})
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CUDA_ARCHITECTURES native)
 
@@ -178,7 +178,7 @@ add_custom_command(
     DEPENDS ${optix_programs}
             "${CMAKE_SOURCE_DIR}/src/optix_params.h"
             "${CMAKE_SOURCE_DIR}/src/sceneStructs.h"
-            "${CMAKE_SOURCE_DIR}/src/material_textures.h"
+            "${CMAKE_SOURCE_DIR}/src/mesh_hit.h"
     COMMENT "nvcc -optix-ir optix_programs.cu"
     VERBATIM)
 add_custom_command(
