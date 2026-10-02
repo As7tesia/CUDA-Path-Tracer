@@ -1,10 +1,23 @@
 #pragma once
 
 #include "sceneStructs.h"
+#include "utilities.h"
 
 #include <glm/glm.hpp>
 
 #include <thrust/random.h>
+
+// Where a ray leaving a surface starts: hitPoint pushed off along normal
+// (unit length, pointing to the side the ray leaves on) by EPSILON scaled with
+// the hit point's magnitude. A fixed EPSILON is below one float ulp once
+// coordinates pass about 170, as in Bistro, and origin + t * dir carries a
+// few ulp of error anyway, so the next trace would find the same triangle
+// again at t near 0 (both intersection paths accept any t > 0).
+__host__ __device__ inline glm::vec3 offsetOrigin(glm::vec3 hitPoint, glm::vec3 normal)
+{
+    const float scale = fmaxf(1.0f, maxComponent(glm::abs(hitPoint)));
+    return hitPoint + normal * (EPSILON * scale);
+}
 
 // CHECKITOUT
 /**

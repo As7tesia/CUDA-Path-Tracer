@@ -53,7 +53,7 @@ __host__ __device__ void scatterRay(
     thrust::default_random_engine &rng)
 {
     // Every case must do two things:
-    //   1. set pathSegment.ray (origin nudged off the surface, new direction)
+    //   1. set pathSegment.ray (origin nudged off the surface by offsetOrigin, new direction)
     //   2. multiply pathSegment.color by f * cos(theta) / pdf for that direction
     const glm::vec3 in = pathSegment.ray.direction;
 
@@ -63,7 +63,7 @@ __host__ __device__ void scatterRay(
     {
         // f = albedo/pi, pdf = cos/pi, so the weight is just albedo
         pathSegment.ray.direction = calculateRandomDirectionInHemisphere(normal, rng);
-        pathSegment.ray.origin = intersect + normal * EPSILON;
+        pathSegment.ray.origin = offsetOrigin(intersect, normal);
         pathSegment.color *= m.color;
         break;
     }
@@ -71,7 +71,7 @@ __host__ __device__ void scatterRay(
     {
         // perfect mirror just reflect the ray
         pathSegment.ray.direction = glm::reflect(pathSegment.ray.direction, normal);
-        pathSegment.ray.origin = intersect + normal * EPSILON;
+        pathSegment.ray.origin = offsetOrigin(intersect, normal);
         pathSegment.color *= m.specular.color;
         break;
     }
@@ -101,13 +101,13 @@ __host__ __device__ void scatterRay(
         {
             // reflected branch
             pathSegment.ray.direction = glm::reflect(in, normal);
-            pathSegment.ray.origin = intersect + normal * EPSILON;
+            pathSegment.ray.origin = offsetOrigin(intersect, normal);
         }
         else
         {
             // refracted branch
             pathSegment.ray.direction = glm::refract(in, normal, eta);
-            pathSegment.ray.origin = intersect - normal * EPSILON;
+            pathSegment.ray.origin = offsetOrigin(intersect, -normal);
         }
         pathSegment.color *= m.color;
         break;

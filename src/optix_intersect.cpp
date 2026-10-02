@@ -423,6 +423,7 @@ bool init(const Scene* scene, const MeshBuffers& buffers, const Material* materi
     {
         records[i].materialId = scene->geoms[i].materialid;
         records[i].meshId = scene->geoms[i].meshId;
+        records[i].tangentSign = scene->geoms[i].tangentSign;
     }
     d_instances = reinterpret_cast<InstanceRecord*>(upload(records.data(), records.size() * sizeof(InstanceRecord)));
     meshBuffers = buffers;

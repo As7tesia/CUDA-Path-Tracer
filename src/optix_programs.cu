@@ -208,9 +208,7 @@ extern "C" __global__ void __closesthit__mesh()
     const bool outside = glm::dot(geometricNormal, d) < 0.0f;
 
     const float2 bary = optixGetTriangleBarycentrics();
-    const glm::vec3 n = (1.0f - bary.x - bary.y) * params.buffers.normals[tri.x]
-                      + bary.x * params.buffers.normals[tri.y]
-                      + bary.y * params.buffers.normals[tri.z];
+    const glm::vec3 n = interpolate(params.buffers.normals, tri, bary.x, bary.y);
     glm::vec3 normal = glm::normalize(toVec3(optixTransformNormalFromObjectToWorldSpace(toFloat3(n))));
     if (!outside)
     {
@@ -228,23 +226,14 @@ extern "C" __global__ void __closesthit__mesh()
         }
     }
 
-    const glm::vec2 uv = (1.0f - bary.x - bary.y) * params.buffers.uvs[tri.x]
-                       + bary.x * params.buffers.uvs[tri.y]
-                       + bary.y * params.buffers.uvs[tri.z];
+    const glm::vec2 uv = interpolate(params.buffers.uvs, tri, bary.x, bary.y);
 
     // Like meshIntersectionTest: the tangent goes to world space with the
-    // transform itself, and the bitangent sign flips under a mirroring one.
-    const glm::vec4* tangents = params.buffers.tangents;
-    const glm::vec3 t = (1.0f - bary.x - bary.y) * glm::vec3(tangents[tri.x])
-                      + bary.x * glm::vec3(tangents[tri.y])
-                      + bary.y * glm::vec3(tangents[tri.z]);
-    float m[12];
-    optixGetObjectToWorldTransformMatrix(m);  // rows of the 3x4 matrix
-    const float det = m[0] * (m[5] * m[10] - m[6] * m[9])
-                    - m[1] * (m[4] * m[10] - m[6] * m[8])
-                    + m[2] * (m[4] * m[9] - m[5] * m[8]);
+    // transform itself, and the bitangent sign flips under a mirroring one
+    // (inst.tangentSign, computed at load).
+    const glm::vec3 t(interpolate(params.buffers.tangents, tri, bary.x, bary.y));
     const glm::vec4 tangent(toVec3(optixTransformVectorFromObjectToWorldSpace(toFloat3(t))),
-                            (det < 0.0f ? -1.0f : 1.0f) * tangents[tri.x].w);
+                            inst.tangentSign * params.buffers.tangents[tri.x].w);
 
     writeHit(inst.materialId, normal, uv, tangent, outside);
 }
@@ -259,9 +248,7 @@ extern "C" __global__ void __anyhit__mesh()
     const TriangleMesh mesh = params.buffers.meshes[inst.meshId];
     const glm::ivec3 tri = params.buffers.indices[mesh.indexOffset + optixGetPrimitiveIndex()];
     const float2 bary = optixGetTriangleBarycentrics();
-    const glm::vec2 uv = (1.0f - bary.x - bary.y) * params.buffers.uvs[tri.x]
-                       + bary.x * params.buffers.uvs[tri.y]
-                       + bary.y * params.buffers.uvs[tri.z];
+    const glm::vec2 uv = interpolate(params.buffers.uvs, tri, bary.x, bary.y);
     if (alphaCutOut(params.materials[inst.materialId], uv, params.textures))
     {
         optixIgnoreIntersection();

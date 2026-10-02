@@ -17,6 +17,7 @@
 
 #include "gltf_loader.h"
 #include "scene.h"
+#include "utilities.h"
 
 #include "mikktspace.h"
 
@@ -29,6 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -306,12 +308,42 @@ void reportUnsupportedMaterialFeatures(const tinygltf::Model& model, const std::
     int blend = 0;
     for (const tinygltf::Material& material : model.materials)
     {
+        // Counted once per material, however many of its slots carry them.
+        std::set<std::string> unread;
         for (const auto& e : material.extensions)
         {
             if (!isReadExtension(e.first))
             {
-                ++extensions[e.first];
+                unread.insert(e.first);
             }
+        }
+        // Texture-level extensions (KHR_texture_transform) sit on the slots
+        // the loader reads, not on the material; none of them is applied.
+        const tinygltf::ExtensionMap* slots[] = {
+            &material.pbrMetallicRoughness.baseColorTexture.extensions,
+            &material.pbrMetallicRoughness.metallicRoughnessTexture.extensions,
+            &material.normalTexture.extensions,
+            &material.emissiveTexture.extensions,
+        };
+        for (const tinygltf::ExtensionMap* slot : slots)
+        {
+            for (const auto& e : *slot)
+            {
+                unread.insert(e.first);
+            }
+        }
+        const tinygltf::Value& transmissionSlot =
+            member(member(extension(material, "KHR_materials_transmission"), "transmissionTexture"), "extensions");
+        if (transmissionSlot.IsObject())
+        {
+            for (const std::string& key : transmissionSlot.Keys())
+            {
+                unread.insert(key);
+            }
+        }
+        for (const std::string& name : unread)
+        {
+            ++extensions[name];
         }
         blend += material.alphaMode == "BLEND";
     }
@@ -500,7 +532,7 @@ struct Loader
             const std::vector<double>& e = source.emissiveFactor;
             const glm::vec3 emissive = e.size() == 3 ? glm::vec3((float)e[0], (float)e[1], (float)e[2]) : glm::vec3(0.0f);
             m.emission = emissive * extensionNumber(source, "KHR_materials_emissive_strength", "emissiveStrength", 1.0f);
-            if (glm::max(m.emission.r, glm::max(m.emission.g, m.emission.b)) > 0.0f)
+            if (maxComponent(m.emission) > 0.0f)
             {
                 m.emissiveTexture = textureFor(source.emissiveTexture.index, source.emissiveTexture.texCoord, true);
             }
@@ -806,9 +838,11 @@ struct Loader
         auto uvAttr = prim.attributes.find("TEXCOORD_0");
         AccessorView uv;
         std::string uvErr;
+        bool hasUv = false;
         if (uvAttr != prim.attributes.end() && viewAccessor(model, uvAttr->second, uv, uvErr)
             && uv.numComponents == 2 && isUvType(uv.componentType) && uv.count == pos.count)
         {
+            hasUv = true;
             for (size_t i = 0; i < uv.count; ++i)
             {
                 scene.uvs.push_back(readUv(uv, i));
@@ -826,7 +860,8 @@ struct Loader
 
         // Tangents, which only a normal map uses: TANGENT when present and
         // well formed, else generated when the primitive's material has a
-        // normal map, else zero (the shade kernel skips the map then).
+        // normal map and the primitive has texture coordinates to generate
+        // them from, else zero (the shade kernel skips the map then).
         auto tanAttr = prim.attributes.find("TANGENT");
         AccessorView tan;
         std::string tanErr;
@@ -846,7 +881,7 @@ struct Loader
                 fprintf(stderr, "glTF %s: mesh %d primitive %d: TANGENT unusable (%s), generating it\n", path.c_str(),
                     meshIndex, primIndex, tanErr.empty() ? "unsupported layout" : tanErr.c_str());
             }
-            const bool normalMapped = materialOverride < 0 && prim.material >= 0 && prim.material < (int)model.materials.size()
+            const bool normalMapped = hasUv && materialOverride < 0 && prim.material >= 0 && prim.material < (int)model.materials.size()
                 && model.materials[prim.material].normalTexture.index >= 0;
             if (normalMapped)
             {
@@ -983,6 +1018,7 @@ struct Loader
                 g.transform = world;
                 g.inverseTransform = glm::inverse(world);
                 g.invTranspose = glm::inverseTranspose(world);
+                g.tangentSign = glm::determinant(glm::mat3(world)) < 0.0f ? -1.0f : 1.0f;
                 scene.geoms.push_back(g);
             }
         }

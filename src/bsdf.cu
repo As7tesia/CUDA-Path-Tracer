@@ -12,11 +12,6 @@ namespace
 // mirror reflection or a clean refraction.
 constexpr float MIN_ALPHA = 1e-4f;
 
-__host__ __device__ float maxComponent(glm::vec3 v)
-{
-    return glm::max(v.x, glm::max(v.y, v.z));
-}
-
 // Unit vectors t, b so that (t, b, n) is an orthonormal frame, for unit n
 // (Duff et al. 2017, "Building an Orthonormal Basis, Revisited"). The BSDF
 // is isotropic, so any frame around n works.
@@ -33,7 +28,9 @@ __host__ __device__ void frameAround(glm::vec3 n, glm::vec3& t, glm::vec3& b)
 // the macro normal (cosTheta > 0).
 __host__ __device__ float ggxLambda(float cosTheta, float alpha)
 {
-    const float cos2 = cosTheta * cosTheta;
+    // Floored: a cosine of exactly 0 would make Lambda infinite and G2/G1
+    // (1 + inf) / (1 + inf + x), a NaN that would reach the image.
+    const float cos2 = fmaxf(cosTheta * cosTheta, 1e-8f);
     const float tan2 = fmaxf(1.0f - cos2, 0.0f) / cos2;
     return 0.5f * (sqrtf(1.0f + alpha * alpha * tan2) - 1.0f);
 }
@@ -121,12 +118,13 @@ __host__ __device__ bool scatterPbr(
     // so the weight cancels. The specular layer's Fresnel weight depends on
     // the microfacet normal, so it is picked with an estimate made from wo
     // and its weight divided by that probability.
-    if (m.clearcoat > 0.0f
+    if (hasClearcoat(m, outside)
         && u01(rng) < m.clearcoat * schlickFresnel(glm::vec3(0.04f), glm::dot(s.coatNormal, wo)).x)
     {
-        // Clearcoat: a GGX lobe of its own roughness about the mesh normal.
-        // fresnel_coat weights it with a Fresnel term at the macro normal,
-        // which is the probability it was picked with.
+        // Clearcoat: a GGX lobe of its own roughness about the mesh normal,
+        // on the air side of the surface only (hasClearcoat). fresnel_coat
+        // weights it with a Fresnel term at the macro normal, which is the
+        // probability it was picked with.
         const float coatAlpha = m.clearcoatRoughness * m.clearcoatRoughness;
         lobeNormal = s.coatNormal;
         const glm::vec3 h = sampleMicrofacetNormal(lobeNormal, wo, coatAlpha, rng);
@@ -232,7 +230,7 @@ __host__ __device__ bool scatterPbr(
     }
 
     path.ray.direction = glm::normalize(wi);
-    path.ray.origin = hitPoint + side * surfaceNormal * EPSILON;
+    path.ray.origin = offsetOrigin(hitPoint, side * surfaceNormal);
     path.color *= weight;
     return true;
 }

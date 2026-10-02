@@ -251,6 +251,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 
         segment.pixelIndex = index;
         segment.remainingBounces = traceDepth;
+        segment.medium = -1;  // the camera sits in air
     }
 }
 
@@ -405,6 +406,16 @@ __global__ void shadeMaterial(
             const Material& material = materials[intersection.materialId];
             const glm::vec3 hitPoint = seg.ray.origin + intersection.t * seg.ray.direction;
 
+            // Inside a volume (the path refracted into a PBR material and has
+            // not refracted out), the segment that just ended was absorbed
+            // along its length t (Beer-Lambert), whatever it ended on.
+            if (seg.medium >= 0) {
+                const glm::vec3 absorption = materials[seg.medium].absorption;
+                if (absorption != glm::vec3(0.0f)) {
+                    seg.color *= glm::exp(-absorption * intersection.t);
+                }
+            }
+
             // A scene file's light only emits, so the path ends on it
             if (material.type == EMISSIVE) {
                 seg.color *= (material.color * material.emittance);
@@ -412,19 +423,20 @@ __global__ void shadeMaterial(
             }
             else {
                 // A glTF material: the texture lookups happen once per hit.
-                // A back-face hit means the path crossed the inside of the
-                // object to get here, and a volume absorbed part of it on the
-                // way (Beer-Lambert over the distance t). An emissive surface
-                // adds its light now and the path goes on: glTF emitters also
-                // reflect, like any other surface.
+                // An emissive surface adds its light now and the path goes
+                // on: glTF emitters also reflect, like any other surface.
                 PbrSurface surface;
                 if (material.type == PBR) {
-                    surface = pbrSurface(material, intersection, -seg.ray.direction, textures);
-                    if (!intersection.outside && material.absorption != glm::vec3(0.0f)) {
-                        seg.color *= glm::exp(-material.absorption * intersection.t);
+                    glm::vec3 emission;
+                    if (seg.remainingBounces == 1) {
+                        // the path ends at this hit: only its emission is needed
+                        emission = pbrEmission(material, intersection, -seg.ray.direction, textures);
+                    } else {
+                        surface = pbrSurface(material, intersection, -seg.ray.direction, textures);
+                        emission = surface.emission;
                     }
-                    if (surface.emission != glm::vec3(0.0f)) {
-                        image[seg.pixelIndex] += seg.color * surface.emission;
+                    if (emission != glm::vec3(0.0f)) {
+                        image[seg.pixelIndex] += seg.color * emission;
                     }
                 }
 
@@ -460,6 +472,12 @@ __global__ void shadeMaterial(
                             if (scatterPbr(seg, hitPoint, intersection.surfaceNormal, intersection.outside,
                                     material, surface, rng)) {
                                 --seg.remainingBounces;
+                                // A direction past the surface refracted into
+                                // the object or out of it: the medium for the
+                                // absorption above travels with the path.
+                                if (glm::dot(seg.ray.direction, intersection.surfaceNormal) < 0.0f) {
+                                    seg.medium = intersection.outside ? intersection.materialId : -1;
+                                }
                             } else {
                                 seg.color = glm::vec3(0.f);
                                 seg.remainingBounces = 0;

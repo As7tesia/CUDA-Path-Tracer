@@ -12,6 +12,15 @@
 
 #include <glm/glm.hpp>
 
+// a[tri.x], a[tri.y] and a[tri.z] weighted by the barycentrics u and v of
+// vertices 1 and 2: the one expression both intersection paths interpolate
+// vertex attributes with, so they agree bit for bit.
+template <typename T>
+__device__ __forceinline__ T interpolate(const T* attribute, glm::ivec3 tri, float u, float v)
+{
+    return (1.0f - u - v) * attribute[tri.x] + u * attribute[tri.y] + v * attribute[tri.z];
+}
+
 // A texture slot's value at uv, or `fallback` when the slot is empty.
 __device__ __forceinline__ float4 sampleSlot(const cudaTextureObject_t* textures, int slot, glm::vec2 uv, float4 fallback)
 {
@@ -84,12 +93,42 @@ __device__ __forceinline__ glm::vec3 mappedNormal(const ShadeableIntersection& i
     return glm::dot(mapped, wo) > 0.0f ? mapped : isect.surfaceNormal;
 }
 
+// Whether the clearcoat applies at a hit. The coat lies on the air side of
+// the surface: inside a transmissive material (a back-face hit, the inside of
+// a solid) the coat and the glass share an index and nothing reflects, so
+// neither the coat lobe nor its darkening of the emission applies there. A
+// back face of an opaque material is a double-sided surface seen from behind,
+// which keeps its coat. The transmission factor decides, as a transmission
+// texture does not change which side is the inside.
+__host__ __device__ __forceinline__ bool hasClearcoat(const Material& m, bool outside)
+{
+    return m.clearcoat > 0.0f && (outside || m.transmission == 0.0f);
+}
+
 // Schlick's Fresnel approximation with f90 = 1.
 __host__ __device__ __forceinline__ glm::vec3 schlickFresnel(glm::vec3 f0, float cosTheta)
 {
     const float m = glm::clamp(1.0f - cosTheta, 0.0f, 1.0f);
     const float m2 = m * m;
     return f0 + (glm::vec3(1.0f) - f0) * (m2 * m2 * m);
+}
+
+// What a PBR material emits at a hit: the emissive factor times its texture,
+// darkened by the clearcoat above it (KHR_materials_clearcoat puts the coat
+// above the emission, so the light the coat reflects is light the surface
+// does not emit). On its own for a hit the path ends at, which needs nothing
+// else of the material; pbrSurface calls it for the rest.
+__device__ __forceinline__ glm::vec3 pbrEmission(const Material& m, const ShadeableIntersection& isect, glm::vec3 wo,
+    const cudaTextureObject_t* textures)
+{
+    const float4 emissive = sampleSlot(textures, m.emissiveTexture, isect.uv, make_float4(1.0f, 1.0f, 1.0f, 1.0f));
+    glm::vec3 emission = m.emission * glm::vec3(emissive.x, emissive.y, emissive.z);
+    if (hasClearcoat(m, isect.outside))
+    {
+        const float coatFresnel = schlickFresnel(glm::vec3(0.04f), glm::dot(isect.surfaceNormal, wo)).x;
+        emission *= 1.0f - m.clearcoat * coatFresnel;
+    }
+    return emission;
 }
 
 // The PBR inputs at a hit. wo points from the hit back along the incoming
@@ -111,22 +150,13 @@ __device__ __forceinline__ PbrSurface pbrSurface(const Material& m, const Shadea
     s.metallic = glm::clamp(m.metallic * mr.z, 0.0f, 1.0f);
     s.transmission = glm::clamp(m.transmission * sampleSlot(textures, m.transmissionTexture, uv, one).x, 0.0f, 1.0f);
 
-    const float4 emissive = sampleSlot(textures, m.emissiveTexture, uv, one);
-    s.emission = m.emission * glm::vec3(emissive.x, emissive.y, emissive.z);
+    s.emission = pbrEmission(m, isect, wo, textures);
 
     s.coatNormal = isect.surfaceNormal;
     s.normal = isect.surfaceNormal;
     if (m.normalTexture >= 0 && isect.tangent.w != 0.0f)
     {
         s.normal = mappedNormal(isect, tex2D<float4>(textures[m.normalTexture], uv.x, uv.y), m.normalScale, wo);
-    }
-
-    // KHR_materials_clearcoat puts the coat above the emission, so the light
-    // the coat reflects is light the surface does not emit.
-    if (m.clearcoat > 0.0f)
-    {
-        const float coatFresnel = schlickFresnel(glm::vec3(0.04f), glm::dot(s.coatNormal, wo)).x;
-        s.emission *= 1.0f - m.clearcoat * coatFresnel;
     }
     return s;
 }

@@ -189,7 +189,7 @@ __device__ float meshIntersectionTest(
             // a masked mesh reads the texture for few of its triangles.
             if (masked)
             {
-                const glm::vec2 hitUv = (1.0f - u - v) * buffers.uvs[tri.x] + u * buffers.uvs[tri.y] + v * buffers.uvs[tri.z];
+                const glm::vec2 hitUv = interpolate(buffers.uvs, tri, u, v);
                 if (alphaCutOut(material, hitUv, textures))
                 {
                     continue;
@@ -219,9 +219,7 @@ __device__ float meshIntersectionTest(
 
     // Shading normal: vertex normals weighted by the barycentrics, taken to
     // world space with the inverse transpose like the other tests.
-    const glm::vec3 n = (1.0f - hitU - hitV) * buffers.normals[tri.x]
-                      + hitU * buffers.normals[tri.y]
-                      + hitV * buffers.normals[tri.z];
+    const glm::vec3 n = interpolate(buffers.normals, tri, hitU, hitV);
     normal = glm::normalize(multiplyMV(geom.invTranspose, glm::vec4(n, 0.0f)));
     if (!outside)
     {
@@ -239,19 +237,14 @@ __device__ float meshIntersectionTest(
         }
     }
 
-    uv = (1.0f - hitU - hitV) * buffers.uvs[tri.x]
-       + hitU * buffers.uvs[tri.y]
-       + hitV * buffers.uvs[tri.z];
+    uv = interpolate(buffers.uvs, tri, hitU, hitV);
 
     // A tangent lies in the surface, so it goes to world space with the
     // transform itself. A mirroring transform flips the bitangent the cross
-    // product gives, so the sign flips with it. The sign is the same at all
-    // three vertices of a triangle.
-    const glm::vec3 tObject = (1.0f - hitU - hitV) * glm::vec3(buffers.tangents[tri.x])
-                            + hitU * glm::vec3(buffers.tangents[tri.y])
-                            + hitV * glm::vec3(buffers.tangents[tri.z]);
-    const float mirror = glm::determinant(glm::mat3(geom.transform)) < 0.0f ? -1.0f : 1.0f;
-    tangent = glm::vec4(multiplyMV(geom.transform, glm::vec4(tObject, 0.0f)), mirror * buffers.tangents[tri.x].w);
+    // product gives, so the sign flips with it (geom.tangentSign, computed
+    // at load). The sign is the same at all three vertices of a triangle.
+    const glm::vec3 tObject(interpolate(buffers.tangents, tri, hitU, hitV));
+    tangent = glm::vec4(multiplyMV(geom.transform, glm::vec4(tObject, 0.0f)), geom.tangentSign * buffers.tangents[tri.x].w);
 
     intersectionPoint = multiplyMV(geom.transform, glm::vec4(o + tMin * d, 1.0f));
     return glm::length(r.origin - intersectionPoint);

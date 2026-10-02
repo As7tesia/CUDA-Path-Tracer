@@ -78,6 +78,9 @@ struct Geom
     enum GeomType type;
     int materialid;
     int meshId;  // MESH only: which TriangleMesh; -1 for the primitives
+    // MESH only: -1 when transform mirrors (negative determinant), which
+    // flips the bitangent sign of the mesh's tangents; 1 otherwise
+    float tangentSign;
     glm::vec3 translation;
     glm::vec3 rotation;
     glm::vec3 scale;
@@ -172,6 +175,10 @@ struct PathSegment
     glm::vec3 color;
     int pixelIndex;
     int remainingBounces;
+    // The material the path is inside, -1 in air: set when it refracts into
+    // a PBR surface, cleared when it refracts out. Its KHR_materials_volume
+    // absorption applies to every segment in between.
+    int medium;
 };
 
 // Use with a corresponding PathSegment to do:

@@ -15,6 +15,16 @@
 #define SQRT_OF_ONE_THIRD 0.5773502691896257645091487805019574556476f
 #define EPSILON           0.00001f
 
+// The largest of a color's channels: for picking a lobe, or a test for black.
+// Callable from kernels; a plain C++ compile of this header sees no attributes.
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+inline float maxComponent(glm::vec3 v)
+{
+    return glm::max(v.x, glm::max(v.y, v.z));
+}
+
 class GuiDataContainer
 {
 public:

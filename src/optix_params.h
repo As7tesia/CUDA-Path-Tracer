@@ -11,11 +11,12 @@
 
 // What a hit program needs to know about the instance it hit, indexed by
 // optixGetInstanceId() (the Geom's index). A compact record rather than the
-// Geom itself, so a hit loads 8 bytes and not three mat4s.
+// Geom itself, so a hit loads 12 bytes and not three mat4s.
 struct InstanceRecord
 {
     int materialId;
-    int meshId;  // MESH instances: index into MeshBuffers::meshes; -1 otherwise
+    int meshId;         // MESH instances: index into MeshBuffers::meshes; -1 otherwise
+    float tangentSign;  // Geom::tangentSign
 };
 
 struct OptixIntersectParams
