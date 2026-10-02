@@ -19,6 +19,7 @@ struct Options
     bool materialSort = true;
     bool optix = true;
     bool optixValidation = false;
+    bool timing = false;         // --timing: headless prints load, init and per-bounce stage times
 };
 
 // Reads the arguments. An unknown option, a flag without its value or a value

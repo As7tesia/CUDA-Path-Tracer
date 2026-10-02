@@ -11,7 +11,7 @@ namespace
 const char* const USAGE =
     "Usage: %s SCENE [--headless] [--spp N] [--res WxH] [--depth N] [--out PATH.png]\n"
     "                     [--no-rr] [--no-sort] [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
-    "                     [--no-optix] [--optix-validate]\n"
+    "                     [--no-optix] [--optix-validate] [--timing]\n"
     "       %s --list\n"
     "  SCENE            a scene .json, a .gltf / .glb file that is the whole scene, or a scene name:\n"
     "                   scenes/<name>.json or an entry of scenes/catalog.json\n"
@@ -25,6 +25,7 @@ const char* const USAGE =
     "  --no-sort        disable sorting paths by material before shading\n"
     "  --no-optix       intersect with the naive per-object kernel instead of OptiX\n"
     "  --optix-validate OptiX validation mode: checks every launch, slow\n"
+    "  --timing         with --headless: print load, init and per-bounce stage times as CSV lines\n"
     "  --tonemap MODE   view transform for display and PNG (default agx-punchy; none = raw clamp)\n"
     "  --exposure X     linear multiplier before the view transform (default 1.0)\n";
 }  // namespace
@@ -96,6 +97,10 @@ Options parseArguments(int argc, char** argv)
         else if (a == "--optix-validate")
         {
             options.optixValidation = true;
+        }
+        else if (a == "--timing")
+        {
+            options.timing = true;
         }
         else if (a == "--tonemap")
         {

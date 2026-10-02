@@ -4,6 +4,7 @@
 #include "render/pathtrace.h"
 #include "scene/scene.h"
 #include "scene/sceneStructs.h"
+#include "timing.h"
 #include "utilities.h"
 #include "app/viewport_camera.h"
 
@@ -483,6 +484,7 @@ int main(int argc, char** argv)
     startTimeString = currentTimeString();
 
     options = parseArguments(argc, argv);
+    setTiming(options.timing);
     setRussianRoulette(options.russianRoulette);
     setMaterialSort(options.materialSort);
     setOptix(options.optix);
@@ -603,7 +605,17 @@ static void runHeadless()
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
     iteration = renderState->iterations;
-    saveImage();
+    {
+        TimingScope timing("save.download_tonemap_png");
+        saveImage();
+    }
+    if (options.timing)
+    {
+        timingAdd("render.spp", renderState->iterations);
+        timingAdd("render.total", ms);
+        timingReport();
+        pathtraceTimingReport();
+    }
     pathtraceFree();
     cudaDeviceReset();
 

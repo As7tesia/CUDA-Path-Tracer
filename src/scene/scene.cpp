@@ -1,6 +1,7 @@
 #include "scene/scene.h"
 
 #include "scene/gltf_loader.h"
+#include "timing.h"
 #include "utilities.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
@@ -204,6 +205,7 @@ void listScenes()
 
 Scene::Scene(string filename, const SceneOverrides& ov)
 {
+    TimingScope timing("load.scene");
     cout << "Reading scene from " << filename << " ..." << endl;
     cout << " " << endl;
     const string ext = lowercaseExtension(filename);

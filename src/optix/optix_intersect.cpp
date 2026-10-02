@@ -10,6 +10,7 @@
 
 #include "optix/optix_params.h"
 #include "scene/scene.h"
+#include "timing.h"
 #include "utilities.h"
 
 #include <optix.h>
@@ -391,30 +392,40 @@ bool buildSbt()
 bool init(const Scene* scene, const MeshBuffers& buffers, const Material* materials,
           const cudaTextureObject_t* textures, bool validation)
 {
-    // optixInit loads the driver's OptiX library and fills the function
-    // table; the version check against OPTIX_ABI_VERSION happens here.
-    OPTIX_TRY(optixInit());
-
-    OptixDeviceContextOptions options = {};
-    options.logCallbackFunction = logCallback;
-    options.logCallbackLevel = 3;  // fatal, error, warning
-    options.validationMode = validation ? OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL
-                                        : OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
-    // A null CUDA context means the current one, which pathtraceInit's
-    // allocations have already created, so OptiX shares it with the kernels.
-    OPTIX_TRY(optixDeviceContextCreate(nullptr, &options, &context));
-
-    OptixTraversableHandle cubeGas = 0;
-    OptixTraversableHandle sphereGas = 0;
-    std::vector<OptixTraversableHandle> meshGas;
-    if (!buildCubeGas(cubeGas) || !buildSphereGas(sphereGas) || !buildMeshGases(scene, buffers, meshGas)
-        || !buildIas(scene, cubeGas, sphereGas, meshGas))
     {
-        return false;
+        TimingScope timing("init.optix_context");
+        // optixInit loads the driver's OptiX library and fills the function
+        // table; the version check against OPTIX_ABI_VERSION happens here.
+        OPTIX_TRY(optixInit());
+
+        OptixDeviceContextOptions options = {};
+        options.logCallbackFunction = logCallback;
+        options.logCallbackLevel = 3;  // fatal, error, warning
+        options.validationMode = validation ? OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL
+                                            : OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
+        // A null CUDA context means the current one, which pathtraceInit's
+        // allocations have already created, so OptiX shares it with the kernels.
+        OPTIX_TRY(optixDeviceContextCreate(nullptr, &options, &context));
     }
-    if (!buildPipeline() || !buildSbt())
+
     {
-        return false;
+        TimingScope timing("init.optix_accel");
+        OptixTraversableHandle cubeGas = 0;
+        OptixTraversableHandle sphereGas = 0;
+        std::vector<OptixTraversableHandle> meshGas;
+        if (!buildCubeGas(cubeGas) || !buildSphereGas(sphereGas) || !buildMeshGases(scene, buffers, meshGas)
+            || !buildIas(scene, cubeGas, sphereGas, meshGas))
+        {
+            return false;
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());  // the builds run on the device; time them, not their launch
+    }
+    {
+        TimingScope timing("init.optix_pipeline");
+        if (!buildPipeline() || !buildSbt())
+        {
+            return false;
+        }
     }
 
     // Per-instance table for the hit programs: one record per Geom, in Geom order.

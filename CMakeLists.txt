@@ -94,6 +94,7 @@ set(headers
     src/scene/gltf_loader.h
     src/scene/scene.h
     src/scene/sceneStructs.h
+    src/timing.h
     src/utilities.h
 )
 
@@ -112,6 +113,7 @@ set(sources
     src/scene/gltf_loader.cpp
     src/scene/scene.cpp
     src/stb.cpp
+    src/timing.cpp
     src/utilities.cpp
 )
 

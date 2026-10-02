@@ -2,11 +2,13 @@
 
 #include <cstdio>
 #include <cmath>
+#include <vector>
 #include <thrust/random.h>
 
 #include "scene/sceneStructs.h"
 #include "scene/scene.h"
 #include "glm/glm.hpp"
+#include "timing.h"
 #include "utilities.h"
 #include "render/intersections.h"
 #include "render/mesh_hit.h"
@@ -19,8 +21,12 @@
 
 // After kernel launches: waits for the device and ends the program, naming
 // msg, if anything launched since the last check failed (the error a kernel
-// hits only shows once the device has run it). ERRORCHECK 0 skips both.
+// hits only shows once the device has run it). ERRORCHECK 0 skips both, and
+// the explicit wait after the intersection stage; a build can set it with
+// -DERRORCHECK=0 (profiling/ does, to measure the host syncs).
+#ifndef ERRORCHECK
 #define ERRORCHECK 1
+#endif
 
 #define checkCUDAError(msg) checkCUDAErrorFn(msg, __FILE__, __LINE__)
 void checkCUDAErrorFn(const char* msg, const char* file, int line)
@@ -115,12 +121,113 @@ void setToneMap(ToneMapMode mode, float exposure)
     toneMapExposure = exposure;
 }
 
+// --timing (timing.h): cudaEvents around every stage of every bounce. The
+// time between two consecutive events is what the GPU timeline shows between
+// them, so a stage's time is its kernels plus the launch gaps and any host
+// synchronization inside it (the error checks, compactPaths' readback of
+// the alive count). Sums over iterations; pathtraceTimingReport averages.
+namespace
+{
+enum Stage { STAGE_INTERSECT, STAGE_SORT, STAGE_SHADE, STAGE_COMPACT, NUM_STAGES };
+const char* const STAGE_NAMES[NUM_STAGES] = { "intersect", "sort", "shade", "compact" };
+
+struct StageTiming
+{
+    int maxDepth = 0;                 // bounces the events cover
+    int iterations = 0;               // iterations summed so far
+    double generateMs = 0.0;
+    std::vector<double> stageMs;      // [depth * NUM_STAGES + stage]
+    std::vector<double> alive;        // [depth]: paths entering bounce depth; [maxDepth]: left after the last
+    std::vector<cudaEvent_t> events;  // 0 before generate, 1 after, then 2 + depth * NUM_STAGES + stage
+
+    int eventIndex(int depth, int stage) const { return 2 + depth * NUM_STAGES + stage; }
+    bool ready(int traceDepth) const { return !events.empty() && traceDepth <= maxDepth; }
+} stageTiming;
+
+void stageTimingFree()
+{
+    for (cudaEvent_t e : stageTiming.events)
+    {
+        cudaEventDestroy(e);
+    }
+    stageTiming = StageTiming();
+}
+
+void stageTimingInit(int maxDepth)
+{
+    stageTimingFree();
+    stageTiming.maxDepth = maxDepth;
+    stageTiming.stageMs.assign((size_t)maxDepth * NUM_STAGES, 0.0);
+    stageTiming.alive.assign((size_t)maxDepth + 1, 0.0);
+    stageTiming.events.resize(2 + (size_t)maxDepth * NUM_STAGES);
+    for (cudaEvent_t& e : stageTiming.events)
+    {
+        CUDA_CHECK(cudaEventCreate(&e));
+    }
+}
+
+// Waits for the iteration's last event and adds every interval to the sums.
+void stageTimingAccumulate(int bounces)
+{
+    StageTiming& st = stageTiming;
+    CUDA_CHECK(cudaEventSynchronize(st.events[st.eventIndex(bounces - 1, STAGE_COMPACT)]));
+    float ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, st.events[0], st.events[1]));
+    st.generateMs += ms;
+    int previous = 1;
+    for (int depth = 0; depth < bounces; ++depth)
+    {
+        for (int stage = 0; stage < NUM_STAGES; ++stage)
+        {
+            const int current = st.eventIndex(depth, stage);
+            CUDA_CHECK(cudaEventElapsedTime(&ms, st.events[previous], st.events[current]));
+            st.stageMs[(size_t)depth * NUM_STAGES + stage] += ms;
+            previous = current;
+        }
+    }
+    ++st.iterations;
+}
+}  // namespace
+
+void pathtraceTimingReport()
+{
+    const StageTiming& st = stageTiming;
+    if (!timingEnabled() || st.iterations == 0)
+    {
+        return;
+    }
+    printf("TIMING,size.PathSegment_bytes,%zu\n", sizeof(PathSegment));
+    printf("TIMING,size.ShadeableIntersection_bytes,%zu\n", sizeof(ShadeableIntersection));
+    printf("TIMING,render.generate,%.4f\n", st.generateMs / st.iterations);
+    printf("BOUNCE,depth,alive_in,alive_out");
+    for (int stage = 0; stage < NUM_STAGES; ++stage)
+    {
+        printf(",%s", STAGE_NAMES[stage]);
+    }
+    printf("\n");
+    for (int depth = 0; depth < st.maxDepth; ++depth)
+    {
+        printf("BOUNCE,%d,%.1f,%.1f", depth + 1, st.alive[depth] / st.iterations, st.alive[depth + 1] / st.iterations);
+        for (int stage = 0; stage < NUM_STAGES; ++stage)
+        {
+            printf(",%.4f", st.stageMs[(size_t)depth * NUM_STAGES + stage] / st.iterations);
+        }
+        printf("\n");
+    }
+}
+
 void pathtraceInit(Scene* scene)
 {
+    TimingScope timing("init.total");
     hst_scene = scene;
 
     const Camera& cam = hst_scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
+
+    // Device memory before and after, for the scene's footprint
+    size_t freeBefore = 0;
+    size_t totalMemory = 0;
+    CUDA_CHECK(cudaMemGetInfo(&freeBefore, &totalMemory));
 
     CUDA_CHECK(cudaMalloc(&dev_image, pixelcount * sizeof(glm::vec3)));
     CUDA_CHECK(cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3)));
@@ -138,14 +245,20 @@ void pathtraceInit(Scene* scene)
     // Spare buffers and CUB storage for compaction and the material sort
     wavefrontInit(pixelcount);
 
-    dev_mesh.positions = uploadVector(scene->positions);
-    dev_mesh.normals = uploadVector(scene->normals);
-    dev_mesh.uvs = uploadVector(scene->uvs);
-    dev_mesh.tangents = uploadVector(scene->tangents);
-    dev_mesh.indices = uploadVector(scene->indices);
-    dev_mesh.meshes = uploadVector(scene->meshes);
+    {
+        TimingScope upload("init.mesh_upload");
+        dev_mesh.positions = uploadVector(scene->positions);
+        dev_mesh.normals = uploadVector(scene->normals);
+        dev_mesh.uvs = uploadVector(scene->uvs);
+        dev_mesh.tangents = uploadVector(scene->tangents);
+        dev_mesh.indices = uploadVector(scene->indices);
+        dev_mesh.meshes = uploadVector(scene->meshes);
+    }
 
-    dev_textures = texturesInit(*scene);
+    {
+        TimingScope upload("init.texture_upload");
+        dev_textures = texturesInit(*scene);
+    }
 
     // OptiX intersection stage: context, acceleration structures, pipeline
     // and shader binding table, built once for this scene. If the driver has
@@ -154,6 +267,14 @@ void pathtraceInit(Scene* scene)
     if (useOptix && !optixReady)
     {
         fprintf(stderr, "OptiX unavailable, using the naive intersection kernel\n");
+    }
+
+    if (timingEnabled())
+    {
+        stageTimingInit(hst_scene->state.traceDepth);
+        size_t freeAfter = 0;
+        CUDA_CHECK(cudaMemGetInfo(&freeAfter, &totalMemory));
+        timingAdd("init.gpu_footprint_mb", (double)(freeBefore - freeAfter) / (1024.0 * 1024.0));
     }
 
     checkCUDAError("pathtraceInit");
@@ -185,6 +306,7 @@ void pathtraceFree()
     // workspace's original buffers by now; the two sides still free each
     // allocation exactly once.
     wavefrontFree();
+    stageTimingFree();
 
     checkCUDAError("pathtraceFree");
 }
@@ -499,8 +621,18 @@ void pathtrace(uchar4* pbo, int iter)
         (cam.resolution.x + blockSize2d.x - 1) / blockSize2d.x,
         (cam.resolution.y + blockSize2d.y - 1) / blockSize2d.y);
 
+    // The timing events record on the default stream, like every launch here
+    const bool timing = timingEnabled() && stageTiming.ready(traceDepth);
+    if (timing)
+    {
+        CUDA_CHECK(cudaEventRecord(stageTiming.events[0]));
+    }
     generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(cam, iter, traceDepth, dev_paths);
     checkCUDAError("generate camera ray");
+    if (timing)
+    {
+        CUDA_CHECK(cudaEventRecord(stageTiming.events[1]));
+    }
 
     int depth = 0;
     int numPaths = pixelcount;
@@ -512,13 +644,22 @@ void pathtrace(uchar4* pbo, int iter)
     {
         // dev_intersections is not cleared between bounces: both intersection
         // paths write every entry, with t = -1 on a miss.
+        if (timing)
+        {
+            stageTiming.alive[depth] += numPaths;
+        }
 
         // tracing
         dim3 numBlocks = (numPaths + PATH_BLOCK_SIZE - 1) / PATH_BLOCK_SIZE;
         intersectScene(iter, numPaths, numMaterials);
         checkCUDAError("trace one bounce");
+#if ERRORCHECK
         cudaDeviceSynchronize();
-        depth++;
+#endif
+        if (timing)
+        {
+            CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.eventIndex(depth, STAGE_INTERSECT)]));
+        }
 
         // Material sort: group paths by the material they hit, so the threads
         // of a shadeMaterial warp read the same material and mostly pick the
@@ -528,11 +669,15 @@ void pathtrace(uchar4* pbo, int iter)
         {
             sortMaterials(numPaths, materialKeyBits, dev_materialIds, dev_intersections, dev_paths);
         }
+        if (timing)
+        {
+            CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.eventIndex(depth, STAGE_SORT)]));
+        }
 
         shadeMaterial<<<numBlocks, PATH_BLOCK_SIZE>>>(
             iter,
             numPaths,
-            depth,
+            depth + 1,
             useRussianRoulette,
             dev_intersections,
             dev_paths,
@@ -540,10 +685,19 @@ void pathtrace(uchar4* pbo, int iter)
             dev_textures,
             dev_image
         );
+        if (timing)
+        {
+            CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.eventIndex(depth, STAGE_SHADE)]));
+        }
         // Stream compaction: keep only the live paths; shadeMaterial has
         // already added the light the others found. Swaps dev_paths for the
         // compacted copy.
         numPaths = compactPaths(dev_paths, numPaths);
+        if (timing)
+        {
+            CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.eventIndex(depth, STAGE_COMPACT)]));
+        }
+        depth++;
 
         iterationComplete = numPaths == 0 || depth >= traceDepth;
 
@@ -551,6 +705,11 @@ void pathtrace(uchar4* pbo, int iter)
         {
             guiData->tracedDepth = depth;
         }
+    }
+    if (timing)
+    {
+        stageTiming.alive[depth] += numPaths;  // survivors of the last bounce run
+        stageTimingAccumulate(depth);
     }
 
     // No gather pass: shadeMaterial adds light to dev_image at the hit that

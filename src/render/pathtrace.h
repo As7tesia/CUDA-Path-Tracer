@@ -40,3 +40,8 @@ void setOptixValidation(bool enabled);
 // View transform used by the viewport kernel. saveImage applies the same
 // function on the host, see tonemap.h.
 void setToneMap(ToneMapMode mode, float exposure);
+
+// With --timing (timing.h): prints the record sizes and, per bounce, the
+// average over the iterations so far of the paths entering and leaving it and
+// the time of each stage, as "BOUNCE,..." CSV lines. Nothing without the flag.
+void pathtraceTimingReport();

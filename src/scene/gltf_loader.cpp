@@ -17,6 +17,7 @@
 
 #include "scene/gltf_loader.h"
 #include "scene/scene.h"
+#include "timing.h"
 #include "utilities.h"
 
 #include "mikktspace.h"
@@ -943,6 +944,7 @@ struct Loader
     // copy carries one tangent, and the corner is pointed at its copy.
     void generateTangents(int baseVertex, size_t vertexCount, int indexOffset, int triCount)
     {
+        TimingScope timing("load.mikktspace");
         std::vector<unsigned int> local((size_t)triCount * 3);
         for (int t = 0; t < triCount; ++t)
         {
@@ -1059,16 +1061,37 @@ struct Loader
 };
 }  // namespace
 
+// tinygltf's own image decoder (stb_image), with its time added to
+// load.image_decode: tinygltf decodes every image while it reads the file, so
+// this is the only way to tell the decoding apart from the JSON and buffer
+// parsing. See the timing split in loadGltf.
+static bool timedLoadImageData(tinygltf::Image* image, const int imageIndex, std::string* err, std::string* warn,
+    int reqWidth, int reqHeight, const unsigned char* bytes, int size, void* userData)
+{
+    TimingScope timing("load.image_decode");
+    return tinygltf::LoadImageData(image, imageIndex, err, warn, reqWidth, reqHeight, bytes, size, userData);
+}
+
 bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int materialOverride, Scene& scene,
     GltfInfo* info)
 {
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
+    loader.SetImageLoader(timedLoadImageData, nullptr);
     std::string err;
     std::string warn;
     const bool binary = lowercaseExtension(path) == ".glb";
-    const bool loaded = binary ? loader.LoadBinaryFromFile(&model, &err, &warn, path)
-                               : loader.LoadASCIIFromFile(&model, &err, &warn, path);
+    bool loaded;
+    {
+        // The file read is parse plus decode; load.gltf_parse is the read
+        // minus the decoding the callback above counted during it.
+        const double decodeBefore = timingGet("load.image_decode");
+        const auto start = std::chrono::steady_clock::now();
+        loaded = binary ? loader.LoadBinaryFromFile(&model, &err, &warn, path)
+                        : loader.LoadASCIIFromFile(&model, &err, &warn, path);
+        const double readMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        timingAdd("load.gltf_parse", readMs - (timingGet("load.image_decode") - decodeBefore));
+    }
     if (!warn.empty())
     {
         fprintf(stderr, "glTF %s: %s", path.c_str(), warn.c_str());
@@ -1086,32 +1109,38 @@ bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int mate
 
     // Start from the default scene's root nodes. A file with no scenes lists
     // nodes only, so every node nobody names as a child is a root.
-    const int sceneIndex = model.defaultScene >= 0 ? model.defaultScene : 0;
-    if (sceneIndex < (int)model.scenes.size())
+    // load.gltf_nodes is this walk: materials, vertex arrays, generated
+    // normals and tangents (load.mikktspace counts the tangents again on
+    // their own), instances.
     {
-        for (int root : model.scenes[sceneIndex].nodes)
+        TimingScope timing("load.gltf_nodes");
+        const int sceneIndex = model.defaultScene >= 0 ? model.defaultScene : 0;
+        if (sceneIndex < (int)model.scenes.size())
         {
-            l.visit(root, sceneTransform, 0);
-        }
-    }
-    else
-    {
-        std::vector<bool> isChild(model.nodes.size(), false);
-        for (const tinygltf::Node& node : model.nodes)
-        {
-            for (int child : node.children)
+            for (int root : model.scenes[sceneIndex].nodes)
             {
-                if (child >= 0 && child < (int)isChild.size())
-                {
-                    isChild[child] = true;
-                }
+                l.visit(root, sceneTransform, 0);
             }
         }
-        for (size_t i = 0; i < model.nodes.size(); ++i)
+        else
         {
-            if (!isChild[i])
+            std::vector<bool> isChild(model.nodes.size(), false);
+            for (const tinygltf::Node& node : model.nodes)
             {
-                l.visit((int)i, sceneTransform, 0);
+                for (int child : node.children)
+                {
+                    if (child >= 0 && child < (int)isChild.size())
+                    {
+                        isChild[child] = true;
+                    }
+                }
+            }
+            for (size_t i = 0; i < model.nodes.size(); ++i)
+            {
+                if (!isChild[i])
+                {
+                    l.visit((int)i, sceneTransform, 0);
+                }
             }
         }
     }
