@@ -53,9 +53,9 @@ const Material* dev_materials = nullptr;
 const cudaTextureObject_t* dev_textures = nullptr;
 
 // Whether a Geom's hits go through the any-hit alpha test.
-bool isMasked(const Scene* scene, const Geom& g)
+bool isAlphaTested(const Scene* scene, const Geom& g)
 {
-    return g.type == GeomType::MESH && scene->materials[g.materialId].alphaMode == ALPHA_MASK;
+    return g.type == GeomType::MESH && scene->materials[g.materialId].alphaMode != ALPHA_OPAQUE;
 }
 
 bool check(OptixResult result, const char* call)
@@ -191,25 +191,25 @@ bool buildSphereGas(OptixTraversableHandle& handle)
 // uploaded: the whole vertex array serves as the vertex buffer and the mesh's
 // slice of the index array as the index buffer. Both faces stay hittable
 // (no culling flag), which a refractive mesh needs for the exit hit. A mesh
-// keeps any-hit only if some instance of it has an ALPHA_MASK material;
+// keeps any-hit only if some instance of it has an ALPHA_MASK or ALPHA_BLEND material;
 // buildIas then turns it off again on the instances that do not.
 bool buildMeshGases(const Scene* scene, const MeshBuffers& buffers, std::vector<OptixTraversableHandle>& handles)
 {
     dev_meshGas.assign(scene->meshes.size(), 0);
     handles.assign(scene->meshes.size(), 0);
-    std::vector<bool> masked(scene->meshes.size(), false);
+    std::vector<bool> alphaTested(scene->meshes.size(), false);
     for (const Geom& g : scene->geoms)
     {
-        if (isMasked(scene, g))
+        if (isAlphaTested(scene, g))
         {
-            masked[g.meshId] = true;
+            alphaTested[g.meshId] = true;
         }
     }
     CUdeviceptr dev_vertices = reinterpret_cast<CUdeviceptr>(buffers.positions);
     for (size_t i = 0; i < scene->meshes.size(); ++i)
     {
         const unsigned int flags[1] = {
-            static_cast<unsigned int>(masked[i] ? OPTIX_GEOMETRY_FLAG_NONE : OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT) };
+            static_cast<unsigned int>(alphaTested[i] ? OPTIX_GEOMETRY_FLAG_NONE : OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT) };
         const TriangleMesh& mesh = scene->meshes[i];
         OptixBuildInput input = {};
         input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
@@ -233,9 +233,9 @@ bool buildMeshGases(const Scene* scene, const MeshBuffers& buffers, std::vector<
 // One instance per Geom: the unit cube, unit sphere or one of the mesh GASes
 // under the Geom's transform. instanceId is the Geom's index, which the
 // hit programs use to look up the InstanceRecord, and sbtOffset picks the hit
-// program (hit group record 0, 1 or 2). Only ALPHA_MASK instances run the
+// program (hit group record 0, 1 or 2). Only alpha-tested instances run the
 // any-hit program; the flag disables it on every other instance, which may
-// share a mesh GAS with a masked one.
+// share a mesh GAS with an alpha-tested one.
 bool buildIas(const Scene* scene, OptixTraversableHandle cubeGas, OptixTraversableHandle sphereGas,
               const std::vector<OptixTraversableHandle>& meshGas)
 {
@@ -254,7 +254,7 @@ bool buildIas(const Scene* scene, OptixTraversableHandle cubeGas, OptixTraversab
         }
         inst.instanceId = static_cast<unsigned int>(i);
         inst.visibilityMask = 255;
-        inst.flags = isMasked(scene, g) ? OPTIX_INSTANCE_FLAG_NONE : OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT;
+        inst.flags = isAlphaTested(scene, g) ? OPTIX_INSTANCE_FLAG_NONE : OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT;
         switch (g.type)
         {
         case GeomType::SPHERE:
@@ -491,7 +491,7 @@ void optixIntersectFree()
     sbt = {};
 }
 
-void optixIntersect(int numPaths, const PathSegment* paths,
+void optixIntersect(int iter, int numPaths, const PathSegment* paths,
                     ShadeableIntersection* intersections, int* materialIds,
                     int numMaterials, cudaStream_t stream)
 {
@@ -501,6 +501,7 @@ void optixIntersect(int numPaths, const PathSegment* paths,
     }
 
     OptixIntersectParams params = {};
+    params.iter = iter;
     params.paths = paths;
     params.intersections = intersections;
     params.materialIds = materialIds;

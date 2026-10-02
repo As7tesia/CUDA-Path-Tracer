@@ -29,6 +29,7 @@ void optixIntersectFree();
 
 // Traces paths[0, numPaths) and writes intersections and materialIds for each.
 // The buffers may change between calls (they ping-pong in the wavefront loop).
-void optixIntersect(int numPaths, const PathSegment* paths,
+// iter seeds the ALPHA_BLEND test.
+void optixIntersect(int iter, int numPaths, const PathSegment* paths,
                     ShadeableIntersection* intersections, int* materialIds,
                     int numMaterials, cudaStream_t stream = 0);

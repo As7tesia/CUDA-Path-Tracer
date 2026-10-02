@@ -8,6 +8,7 @@
 #include <cuda_runtime.h>
 
 #include "scene/sceneStructs.h"
+#include "utilities.h"
 
 #include <glm/glm.hpp>
 
@@ -62,15 +63,32 @@ __device__ __forceinline__ glm::vec4 meshTangent(const glm::vec4* tangents, glm:
     return glm::vec4(vectorToWorld(t), tangentSign * tangents[tri.x].w);
 }
 
-// Whether a hit at uv falls in a cut-out of an ALPHA_MASK material, where
-// the ray goes on as if nothing was there: the naive mesh test and the OptiX
-// any-hit program. glTF's alpha is the base color factor's alpha times the
-// base color texture's; the texture unit reads alpha linearly even from an
-// sRGB texture (checked: a texel of 128 reads 0.502 with sRGB on, while its
-// color reads 0.216).
-__device__ __forceinline__ bool alphaCutOut(const Material& m, glm::vec2 uv, const cudaTextureObject_t* textures)
+// The seed of one path segment's ALPHA_BLEND tests: a hash of its pixel, the
+// iteration and the depth, the triple the shade kernel seeds its engine with.
+__device__ __forceinline__ unsigned int alphaPathSeed(int iter, int pixelIndex, int depth)
 {
-    if (m.alphaMode != ALPHA_MASK)
+    return utilhash(utilhash(utilhash(pixelIndex) ^ iter) ^ depth);
+}
+
+// Whether a hit at uv falls in a cut-out, where the ray goes on as if
+// nothing was there: the naive mesh test and the OptiX any-hit program.
+// glTF's alpha is the base color factor's alpha times the base color
+// texture's; the texture unit reads alpha linearly even from an sRGB texture
+// (checked: a texel of 128 reads 0.502 with sRGB on, while its color reads
+// 0.216).
+//
+// ALPHA_MASK cuts out where alpha is below alphaCutoff. ALPHA_BLEND reads
+// alpha as the fraction of the surface that is there, so the ray goes
+// through with probability 1 - alpha, and the pixel converges to the
+// blended result. The number it is decided by is a hash of the path seed
+// (alphaPathSeed), the instance (Geom index) and the triangle's index in its
+// mesh: both intersection paths hash the same values for the same hit, and
+// OptiX, which may run any-hit more than once for a triangle, gets the same
+// answer every time.
+__device__ __forceinline__ bool alphaCutOut(const Material& m, glm::vec2 uv, const cudaTextureObject_t* textures,
+    unsigned int pathSeed, int instance, int triangle)
+{
+    if (m.alphaMode == ALPHA_OPAQUE)
     {
         return false;
     }
@@ -79,5 +97,11 @@ __device__ __forceinline__ bool alphaCutOut(const Material& m, glm::vec2 uv, con
     {
         alpha *= tex2D<float4>(textures[m.baseColorTexture], uv.x, uv.y).w;
     }
-    return alpha < m.alphaCutoff;
+    if (m.alphaMode == ALPHA_MASK)
+    {
+        return alpha < m.alphaCutoff;
+    }
+    // The top 24 bits as a float in [0, 1): below 1, so alpha 1 never passes.
+    const unsigned int h = utilhash(utilhash(pathSeed ^ instance) ^ triangle);
+    return (h >> 8) * (1.0f / 16777216.0f) >= alpha;
 }

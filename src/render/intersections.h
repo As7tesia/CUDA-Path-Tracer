@@ -63,8 +63,9 @@ __host__ __device__ float sphereIntersectionTest(
  * which for a closed mesh means the ray came from outside. `uv` is the vertex
  * uvs interpolated at the hit, `tangent` the vertex tangents in world space
  * (see ShadeableIntersection::tangent). Hits in the cut-outs of an
- * ALPHA_MASK material do not count, the same test OptiX's any-hit program
- * makes.
+ * ALPHA_MASK or ALPHA_BLEND material do not count, the same test OptiX's
+ * any-hit program makes. `alphaSeed` (alphaPathSeed) and `geomIndex` feed
+ * the ALPHA_BLEND test.
  *
  * Device only: the alpha test reads textures.
  *
@@ -72,10 +73,12 @@ __host__ __device__ float sphereIntersectionTest(
  */
 __device__ float meshIntersectionTest(
     const Geom& geom,
+    int geomIndex,
     const TriangleMesh& mesh,
     const MeshBuffers& buffers,
     const Material& material,
     const cudaTextureObject_t* textures,
+    unsigned int alphaSeed,
     Ray r,
     glm::vec3& intersectionPoint,
     glm::vec3& normal,

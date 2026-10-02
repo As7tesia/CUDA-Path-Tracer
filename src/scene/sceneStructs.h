@@ -84,11 +84,12 @@ struct Geom
     glm::mat4 invTranspose;
 };
 
-// glTF's alpha modes. BLEND is loaded as OPAQUE.
+// glTF's alpha modes. The alpha test is alphaCutOut in mesh_hit.h.
 enum AlphaMode
 {
     ALPHA_OPAQUE,
-    ALPHA_MASK  // a hit whose alpha is below alphaCutoff is no hit
+    ALPHA_MASK,  // a hit whose alpha is below alphaCutoff is no hit
+    ALPHA_BLEND  // alpha is coverage: a hit counts with probability alpha
 };
 
 // Every material is glTF's metallic-roughness model with the extensions

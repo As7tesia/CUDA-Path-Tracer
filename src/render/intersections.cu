@@ -151,10 +151,12 @@ __host__ __device__ static bool rayTriangle(
 
 __device__ float meshIntersectionTest(
     const Geom& geom,
+    int geomIndex,
     const TriangleMesh& mesh,
     const MeshBuffers& buffers,
     const Material& material,
     const cudaTextureObject_t* textures,
+    unsigned int alphaSeed,
     Ray r,
     glm::vec3& intersectionPoint,
     glm::vec3& normal,
@@ -168,7 +170,7 @@ __device__ float meshIntersectionTest(
     const glm::vec3 o = multiplyMV(geom.inverseTransform, glm::vec4(r.origin, 1.0f));
     const glm::vec3 d = glm::normalize(multiplyMV(geom.inverseTransform, glm::vec4(r.direction, 0.0f)));
 
-    const bool masked = material.alphaMode == ALPHA_MASK;
+    const bool alphaTested = material.alphaMode != ALPHA_OPAQUE;
     float tMin = FLT_MAX;
     int hit = -1;
     float hitU = 0.0f;
@@ -183,11 +185,13 @@ __device__ float meshIntersectionTest(
             && t < tMin)
         {
             // Only a hit that would become the closest is alpha tested, so
-            // a masked mesh reads the texture for few of its triangles.
-            if (masked)
+            // an alpha-tested mesh reads the texture for few of its
+            // triangles. A BLEND decision depends only on the hit, not on
+            // the order triangles are tested in, so OptiX keeps the same one.
+            if (alphaTested)
             {
                 const glm::vec2 hitUv = interpolate(buffers.uvs, tri, u, v);
-                if (alphaCutOut(material, hitUv, textures))
+                if (alphaCutOut(material, hitUv, textures, alphaSeed, geomIndex, i))
                 {
                     continue;
                 }

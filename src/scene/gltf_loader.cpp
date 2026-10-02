@@ -304,7 +304,6 @@ bool isReadExtension(const std::string& name)
 void reportUnsupportedMaterialFeatures(const tinygltf::Model& model, const std::string& path)
 {
     std::map<std::string, int> extensions;
-    int blend = 0;
     for (const tinygltf::Material& material : model.materials)
     {
         // Counted once per material, however many of its slots carry them.
@@ -344,15 +343,10 @@ void reportUnsupportedMaterialFeatures(const tinygltf::Model& model, const std::
         {
             ++extensions[name];
         }
-        blend += material.alphaMode == "BLEND";
     }
     for (const auto& e : extensions)
     {
         fprintf(stderr, "glTF %s: %s ignored (%d materials)\n", path.c_str(), e.first.c_str(), e.second);
-    }
-    if (blend > 0)
-    {
-        fprintf(stderr, "glTF %s: alphaMode BLEND rendered opaque (%d materials)\n", path.c_str(), blend);
     }
 }
 
@@ -546,6 +540,10 @@ struct Loader
                 m.alphaMode = ALPHA_MASK;
                 m.alphaCutoff = (float)source.alphaCutoff;
             }
+            else if (source.alphaMode == "BLEND")
+            {
+                m.alphaMode = ALPHA_BLEND;
+            }
 
             // ior 0 is glTF's code for a Fresnel term of 1; any other value
             // below 1 is invalid and read as 1.
@@ -642,8 +640,8 @@ struct Loader
     }
 
     // The scene's magenta texture (Scene::missingTexture), made the first time
-    // a base color slot needs it: one opaque texel, so a masked surface stays
-    // visible.
+    // a base color slot needs it: one opaque texel, so an alpha-tested surface
+    // stays visible.
     int missingTexture()
     {
         if (scene.missingTexture < 0)

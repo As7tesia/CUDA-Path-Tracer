@@ -21,6 +21,7 @@ struct InstanceRecord
 
 struct OptixIntersectParams
 {
+    int iter;                              // seeds the ALPHA_BLEND test (alphaPathSeed)
     const PathSegment* paths;              // paths[i].ray is the ray for launch index i
     ShadeableIntersection* intersections;  // closest-hit and miss write intersections[i]
     int* materialIds;                      // sort key per path: materialId on hit, numMaterials on miss
@@ -28,7 +29,8 @@ struct OptixIntersectParams
     const InstanceRecord* instances;       // indexed by instance id
     MeshBuffers buffers;                   // the same flat mesh arrays the naive kernel reads
     // The scene's materials and texture objects, for the any-hit alpha test
-    // of ALPHA_MASK materials. textures is null when the scene has none.
+    // of ALPHA_MASK and ALPHA_BLEND materials. textures is null when the
+    // scene has none.
     const Material* materials;
     const cudaTextureObject_t* textures;
     OptixTraversableHandle handle;         // the IAS over the unit cube, unit sphere and mesh GASes

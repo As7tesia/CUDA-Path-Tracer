@@ -9,6 +9,7 @@
 #include "glm/glm.hpp"
 #include "utilities.h"
 #include "render/intersections.h"
+#include "render/mesh_hit.h"
 #include "render/bsdf.h"
 #include "render/pbr_surface.h"
 #include "render/sampling.h"
@@ -229,8 +230,10 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 
 // The naive intersection stage: every path tests every Geom (every triangle
 // of a mesh), closest hit wins. Writes the hit, or t = -1 on a miss, and the
-// material sort key; the shade kernel makes the next ray.
+// material sort key; the shade kernel makes the next ray. iter seeds the
+// ALPHA_BLEND test.
 __global__ void computeIntersections(
+    int iter,
     int numPaths,
     PathSegment* pathSegments,
     int* materialIds,
@@ -247,6 +250,7 @@ __global__ void computeIntersections(
     if (pathIndex < numPaths)
     {
         PathSegment pathSegment = pathSegments[pathIndex];
+        const unsigned int alphaSeed = alphaPathSeed(iter, pathSegment.pixelIndex, pathSegment.remainingBounces);
 
         float t;
         glm::vec3 normal;
@@ -279,8 +283,8 @@ __global__ void computeIntersections(
             }
             else  // MESH: every triangle of the instanced mesh
             {
-                t = meshIntersectionTest(geom, buffers.meshes[geom.meshId], buffers, materials[geom.materialId],
-                    textures, pathSegment.ray, tmpPoint, tmpNormal, tmpUv, tmpTangent, tmpOutside);
+                t = meshIntersectionTest(geom, i, buffers.meshes[geom.meshId], buffers, materials[geom.materialId],
+                    textures, alphaSeed, pathSegment.ray, tmpPoint, tmpNormal, tmpUv, tmpTangent, tmpOutside);
             }
 
             // Compute the minimum t from the intersection tests to determine what
@@ -320,15 +324,16 @@ __global__ void computeIntersections(
 // The intersection stage behind one call: OptiX when it initialized, else
 // the naive kernel above. Both fill dev_intersections and dev_materialIds the
 // same way, so nothing downstream knows which one ran.
-static void intersectScene(int numPaths, int numMaterials)
+static void intersectScene(int iter, int numPaths, int numMaterials)
 {
     if (optixReady)
     {
-        optixIntersect(numPaths, dev_paths, dev_intersections, dev_materialIds, numMaterials);
+        optixIntersect(iter, numPaths, dev_paths, dev_intersections, dev_materialIds, numMaterials);
         return;
     }
     dim3 numBlocks = (numPaths + PATH_BLOCK_SIZE - 1) / PATH_BLOCK_SIZE;
     computeIntersections<<<numBlocks, PATH_BLOCK_SIZE>>>(
+        iter,
         numPaths,
         dev_paths,
         dev_materialIds,
@@ -510,7 +515,7 @@ void pathtrace(uchar4* pbo, int iter)
 
         // tracing
         dim3 numBlocks = (numPaths + PATH_BLOCK_SIZE - 1) / PATH_BLOCK_SIZE;
-        intersectScene(numPaths, numMaterials);
+        intersectScene(iter, numPaths, numMaterials);
         checkCUDAError("trace one bounce");
         cudaDeviceSynchronize();
         depth++;

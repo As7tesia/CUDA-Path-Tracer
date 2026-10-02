@@ -33,7 +33,7 @@ static __forceinline__ __device__ glm::vec3 toVec3(float3 v)
 // so optixGetRayTmax() in the hit programs is a world-space distance, which is
 // what shadeMaterial expects when it rebuilds the hit point as origin + t * dir.
 // No ray flags: the geometry and instance flags (optix_intersect.cpp) leave
-// any-hit on for ALPHA_MASK instances only.
+// any-hit on for alpha-tested (ALPHA_MASK and ALPHA_BLEND) instances only.
 extern "C" __global__ void __raygen__paths()
 {
     const unsigned int i = optixGetLaunchIndex().x;
@@ -220,18 +220,23 @@ extern "C" __global__ void __closesthit__mesh()
     writeHit(inst.materialId, normal, uv, tangent, outside);
 }
 
-// Any-hit for ALPHA_MASK instances only (the others have it disabled by
+// Any-hit for alpha-tested instances only (the others have it disabled by
 // their instance flags): a hit in a cut-out is ignored and traversal goes on,
 // the same test meshIntersectionTest makes. OptiX may call this more than
 // once for the same triangle; the test gives the same answer every time.
+// The primitive index is the triangle's index in its mesh, since each mesh
+// GAS is built from that mesh's slice of the index array.
 extern "C" __global__ void __anyhit__mesh()
 {
     const InstanceRecord inst = instance();
     const TriangleMesh mesh = params.buffers.meshes[inst.meshId];
-    const glm::ivec3 tri = params.buffers.indices[mesh.indexOffset + optixGetPrimitiveIndex()];
+    const unsigned int triangle = optixGetPrimitiveIndex();
+    const glm::ivec3 tri = params.buffers.indices[mesh.indexOffset + triangle];
     const float2 bary = optixGetTriangleBarycentrics();
     const glm::vec2 uv = interpolate(params.buffers.uvs, tri, bary.x, bary.y);
-    if (alphaCutOut(params.materials[inst.materialId], uv, params.textures))
+    const PathSegment& path = params.paths[optixGetLaunchIndex().x];
+    const unsigned int alphaSeed = alphaPathSeed(params.iter, path.pixelIndex, path.remainingBounces);
+    if (alphaCutOut(params.materials[inst.materialId], uv, params.textures, alphaSeed, optixGetInstanceId(), triangle))
     {
         optixIgnoreIntersection();
     }
