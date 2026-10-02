@@ -25,7 +25,7 @@ const char* const USAGE =
     "  --no-sort        disable sorting paths by material before shading\n"
     "  --no-optix       intersect with the naive per-object kernel instead of OptiX\n"
     "  --optix-validate OptiX validation mode: checks every launch, slow\n"
-    "  --tonemap MODE   view transform for display and PNG (default agx; none = raw clamp)\n"
+    "  --tonemap MODE   view transform for display and PNG (default agx-punchy; none = raw clamp)\n"
     "  --exposure X     linear multiplier before the view transform (default 1.0)\n";
 }  // namespace
 

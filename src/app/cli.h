@@ -13,7 +13,7 @@ struct Options
     SceneOverrides overrides;    // --res, --spp, --depth
     bool headless = false;
     std::string outPath;         // empty: img/auto_saved/<FILE>.<time>.<spp>samp.png
-    ToneMapMode toneMap = TONEMAP_AGX;
+    ToneMapMode toneMap = TONEMAP_AGX_PUNCHY;
     float exposure = 1.0f;
     bool russianRoulette = true;
     bool materialSort = true;

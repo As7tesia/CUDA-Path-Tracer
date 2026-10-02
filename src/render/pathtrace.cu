@@ -107,7 +107,7 @@ static bool optixReady = false;
 void setOptix(bool enabled) { useOptix = enabled; }
 void setOptixValidation(bool enabled) { optixValidation = enabled; }
 
-static ToneMapMode toneMapMode = TONEMAP_AGX;
+static ToneMapMode toneMapMode = TONEMAP_AGX_PUNCHY;
 static float toneMapExposure = 1.f;
 void setToneMap(ToneMapMode mode, float exposure)
 {
