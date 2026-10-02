@@ -79,10 +79,10 @@ The scene argument is a path, or a name: `cornell` is `scenes/cornell.json`, and
 | `--depth N` | Override `DEPTH` from the scene file, the most rays a path may trace |
 | `--out path.png` | Write exactly this file. Default is the usual `img/auto_saved/<FILE>.<time>.<spp>samp.png` |
 | `--no-rr` | Disable Russian roulette |
-| `--sort` | Sort paths by material before shading. Off by default since the [profile](#the-material-sort); `--no-sort` is the default, kept for scripts |
+| `--sort` | Sort paths by material before shading. Off by default since the [profile](PROFILING.md#the-material-sort); `--no-sort` is the default, kept for scripts |
 | `--no-optix` | Intersect with the naive per-object kernel instead of the OptiX stage |
 | `--optix-validate` | OptiX validation mode: checks every launch, slow |
-| `--timing` | With `--headless`: print load, init and per-bounce stage times as CSV lines (see [Performance](#performance)) |
+| `--timing` | With `--headless`: print load, init and per-bounce stage times as CSV lines (see [PROFILING.md](PROFILING.md)) |
 | `--tonemap none\|aces\|agx\|agx-punchy` | View transform for viewport and PNG. Default `agx-punchy`. `none` is the raw clamp the base code shipped with |
 | `--exposure X` | Linear multiplier before the view transform. Default 1.0 |
 
@@ -150,7 +150,7 @@ The Bistro comes from NVIDIA's Open Research Content Archive as FBX with DDS tex
 
 #### Naive loop vs OptiX by triangle count
 
-1024x1024, ms per sample, median of 3 interleaved runs, GPU otherwise idle, from the [profiling sweep](#performance). `--no-optix` runs the naive kernel; the naive runs use 1 to 4 samples each because of how long they take.
+1024x1024, ms per sample, median of 3 interleaved runs, GPU otherwise idle, from the [profiling sweep](PROFILING.md). `--no-optix` runs the naive kernel; the naive runs use 1 to 4 samples each because of how long they take.
 
 | scene | triangles | depth | naive | OptiX |
 |---|---|---|---|---|
@@ -248,249 +248,13 @@ The three Khronos material tests ship without lights, so their scene files add a
 - **ClearCoatTest**: the middle column combines the base layer's broad highlight (left) with the coating's sharp one (right). Four of its rows depend on clearcoat textures, which are not read, so their coat is uniform.
 - **DamagedHelmet**: normal map (tangents from MikkTSpace), metallic-roughness map and the emissive lamps.
 
-### Performance
+### Performance optimization
 
-A profile of the whole renderer, from the scene file to the saved image, taken on 2026-10-02 at commit c2e44f5 (after the glTF materials and the code cleanup). RTX 3090, driver 616.56, CUDA 13.3, Windows 11 (WDDM), Release build with device LTO. Every number is the median of 3 interleaved runs with the GPU otherwise idle (nvidia-smi under 10% before each run), at 1024x1024 unless stated.
-
-**How it was measured.** `--timing` wraps every stage of every bounce in cudaEvents and prints the averages over the samples as CSV, next to host timers around the loader, the uploads and the OptiX builds. A stage's time is what the GPU timeline shows between its two events: its kernels, the launch gaps, and any host synchronization inside it. The flag changes nothing when it is off and nothing in the image when it is on (`tests/cmp_renders.sh`, 52 of 52 identical). `profiling/run_sweep.py` runs the matrix below and `profiling/analyze.py` makes the tables and charts; the raw records are in `profiling/results/sweep.jsonl`. Nsight Systems 2026.4.1 gave the per-kernel times and the host-side API picture, `cuobjdump --dump-resource-usage` the registers, and Nsight Compute the occupancy.
-
-| scene | why it is in the set | triangles | materials and textures |
-|---|---|---|---|
-| cornell | the base scene, analytic shapes, JSON materials | 0 | 5, none |
-| cornell-box | the research scene: matte PBR, no textures, depth 66 from its file | 36 | 7, none |
-| cornell_helmet | every texture slot and a normal map | 15,452 | 6, 5 |
-| transmission_roughness | glass, depth 12 | 77,792 | 9 |
-| dragon_attenuation | an open scene with a glass mesh, depth 16 | 134,995 | 3 |
-| sponza | alpha mask | 262,267 | 25, 69 |
-| sponza_intel | millions of triangles, 4K textures, alpha blend | 5,744,384 | 405 instances, 80 images |
-| bistro-exterior | millions of triangles, open sky, every material alpha blend | 2,829,226 | 1,591 instances, 405 images |
-
-#### Where a sample goes
-
-![Stage breakdown](img/readme/perf_stage_breakdown_1024x1024.png)
-
-| scene | generate | intersect | sort | shade | compact | ms per sample |
-|---|---|---|---|---|---|---|
-| cornell | 0.20 | 0.91 | 6.16 | 0.71 | 0.67 | 8.63 |
-| cornell-box | 0.21 | 1.70 | 7.34 | 0.85 | 1.26 | 11.43 |
-| cornell_helmet | 0.20 | 0.89 | 5.86 | 0.82 | 0.65 | 8.42 |
-| transmission_roughness | 0.21 | 1.17 | 4.57 | 0.68 | 0.75 | 7.37 |
-| dragon_attenuation | 0.20 | 1.59 | 4.22 | 0.66 | 0.84 | 7.52 |
-| sponza | 0.21 | 1.70 | 6.46 | 1.20 | 0.63 | 10.20 |
-| sponza_intel | 0.20 | 3.69 | 6.45 | 1.66 | 0.65 | 12.68 |
-| bistro-exterior | 0.20 | 4.67 | 7.04 | 1.19 | 0.67 | 13.81 |
-
-- **The material sort is the largest stage in every scene**, 45% of a sample on Bistro and 71% on cornell. It is also the stage the scene has the least say in: 4.2 to 7.3 ms whether the scene is seven analytic objects or three million triangles.
-- **Intersection is the second**, and the only stage that follows the scene: 0.9 ms on cornell, 1.7 ms on Sponza, 3.7 ms on Intel Sponza, 4.7 ms on Bistro. RT cores keep a 5.7 million triangle scene at 4x the cost of seven spheres and cubes.
-- **Shading is 0.7 to 1.7 ms**, 6 to 13% of a sample, with the full glTF BSDF and every texture slot. The step 3 materials are not where the time went.
-- **Compaction is 0.6 to 1.3 ms** and generation 0.2 ms.
-
-The same breakdown at 400x400 (160 thousand paths) sums to 2.1 to 3.7 ms per sample, of which the sort is still 1.0 to 1.4 ms. Below about 20 thousand live paths every stage sits on a floor of 10 to 50 us per bounce, which is launch latency and the synchronizations rather than work; see [Host synchronization](#host-synchronization). That floor is why the cost per sample is not proportional to the pixel count: from 801x799 to 1024x1024 it scales with the pixels, while 400x400 costs 1.5 to 2x what that line predicts.
-
-![ms per sample against resolution](img/readme/perf_resolution_scaling.png)
-
-**Per bounce.** The stage mix changes with the depth. Intel Sponza at 1024x1024:
-
-![Per-bounce stages, Intel Sponza](img/readme/perf_bounces_sponza_intel_1024x1024.png)
-
-| bounce | paths in | intersect | sort | shade | compact |
-|---|---|---|---|---|---|
-| 1 | 1,048,576 | 0.61 | 1.39 | 0.58 | 0.20 |
-| 2 | 882,140 | 1.30 | 2.64 | 0.54 | 0.17 |
-| 3 | 721,600 | 1.25 | 2.15 | 0.45 | 0.08 |
-| 4 | 25,494 | 0.14 | 0.09 | 0.03 | 0.03 |
-| 5 to 8 | 5,042 and fewer | 0.08 to 0.11 | 0.04 to 0.07 | 0.01 to 0.02 | 0.04 |
-
-The first bounce's intersection is cheap because the camera rays are coherent; bounces 2 and 3 cost twice as much for fewer paths once the rays scatter. The sort costs twice as much at bounce 2 as at bounce 1 with fewer paths, for a reason given below. From bounce 4 on the work is small and the bounce costs its fixed overhead.
-
-**Paths alive.** Russian roulette starts at the third bounce with a survival probability equal to the throughput's luminance, so in a scene whose albedo products are small most paths end there:
-
-![Paths alive after each bounce](img/readme/perf_alive_paths_1024x1024.png)
-
-| scene | after bounce 1 | 2 | 3 | 4 | 8 |
-|---|---|---|---|---|---|
-| cornell (closed, bright walls) | 82% | 57% | 28% | 18% | 5.5% |
-| cornell-box (closed, depth 66) | 99.5% | 74% | 20% | 9.7% | 0.7% |
-| sponza (closed, textured) | 93% | 85% | 4.0% | 0.8% | 0.0% |
-| sponza_intel | 84% | 69% | 2.4% | 0.5% | 0.0% |
-| bistro-exterior (open) | 92% | 75% | 4.7% | 1.2% | 0.0% |
-| dragon_attenuation (open) | 90% | 41% | 9.2% | 4.0% | 0.4% |
-
-In the open scenes the losses at bounces 1 and 2 are misses (there is no environment light yet, a miss ends the path); in the textured scenes the drop at bounce 3 is roulette, since two bounces off dark stone leave a throughput near 0.1. Both make the loop's later bounces cheap and the first three the whole cost.
-
-#### The material sort
-
-`--no-sort` leaves the paths in their compacted order and shades them as they come.
-
-![Material sort on and off](img/readme/perf_sort_toggle_1024x1024.png)
-
-| scene | sort on | sort off | sort costs | shade with sort | shade without |
-|---|---|---|---|---|---|
-| cornell | 8.63 | 2.47 | 3.49x | 0.70 | 0.75 |
-| cornell-box | 11.43 | 3.91 | 2.92x | 0.87 | 0.97 |
-| cornell_helmet | 8.42 | 2.46 | 3.42x | 0.82 | 0.82 |
-| transmission_roughness | 7.37 | 2.69 | 2.74x | 0.68 | 0.71 |
-| dragon_attenuation | 7.52 | 3.23 | 2.33x | 0.66 | 0.71 |
-| sponza | 10.20 | 4.11 | 2.48x | 1.20 | 1.52 |
-| sponza_intel | 12.68 | 6.40 | 1.98x | 1.66 | 1.71 |
-| bistro-exterior | 13.81 | 6.77 | 2.04x | 1.19 | 1.30 |
-
-The sort was kept after the CUB rewrite on the expectation that it would pay off once shading got expensive. The profile says the opposite on every scene, and says why:
-
-- **The gather is the cost, not the sort.** Nsight Systems on cornell (50 samples): `gatherByIndex` 284 ms over 400 launches, 711 us each, against 34 ms for `shadeMaterial`, 31 ms for the OptiX launches and 26 ms for compaction. The radix kernels themselves are 14, 4 and 3 us per launch. The gather moves two 48-byte records per path (96 MB per bounce at a million paths) through a permutation, and at bounce 2 the permutation is random: bounce 1's gather reads paths that are still in pixel order and runs at 1.1 ms, bounce 2's reads the already permuted buffers and takes 2.0 to 3.0 ms for fewer paths.
-- **Shading gains at most 0.3 ms from it.** The last two columns: sorting by material makes `shadeMaterial` 0.05 ms faster on cornell and 0.32 ms faster on Sponza, the scene with the most materials, against a sort stage of 6 ms. The kernel is short enough, and the materials alike enough (one BSDF, lobes picked per thread), that a warp with mixed materials costs about what a sorted one does.
-- **The 400x400 numbers from September were the same story**: 1.49 ms per sample with the sort against 0.68 without, read then as "the sort loses 2.2x on Cornell, wait for PBR". With PBR it loses 2.0x on Intel Sponza.
-
-So the default is now off. `--sort` turns it on. A sort that would pay would have to stop moving the records: sort keys and indices only and let the shade kernel read through the index, or shrink the record by deferring the attribute interpolation to shading. Neither is worth doing while shading is 10% of the frame.
-
-#### Russian roulette
-
-`--no-rr` traces every path to the scene's depth.
-
-![Russian roulette on and off](img/readme/perf_rr_toggle_1024x1024.png)
-
-| scene | depth | RR on | RR off | RR saves |
-|---|---|---|---|---|
-| cornell | 8 | 8.63 | 11.04 | 1.28x |
-| cornell-box | 66 | 11.43 | 30.14 | 2.64x |
-| cornell_helmet | 8 | 8.42 | 11.63 | 1.38x |
-| transmission_roughness | 12 | 7.37 | 10.36 | 1.41x |
-| dragon_attenuation | 16 | 7.52 | 10.98 | 1.46x |
-| sponza | 8 | 10.20 | 23.10 | 2.26x |
-| sponza_intel | 8 | 12.68 | 23.64 | 1.86x |
-| bistro-exterior | 8 | 13.81 | 25.61 | 1.85x |
-
-The saving follows the alive-paths table: where roulette ends 95% of Sponza's paths at bounce 3, the loop without it carries them all to bounce 8 at full cost. Those are also the paths that carry the least light, which is what makes the estimator stay unbiased while the variance per sample grows a little.
-
-#### Host synchronization
-
-At the baseline the loop stopped for the host three times per bounce: `checkCUDAError` after the intersection launch (a `cudaDeviceSynchronize` when `ERRORCHECK` is 1), a second explicit `cudaDeviceSynchronize` right after it, and the readback of the alive count in `compactPaths`, which the host needs to size the next bounce's launches. Nsight Systems on cornell, 50 samples: 904 `cudaDeviceSynchronize` calls, 46 ms in total, 51 us each; and 800 `cudaMemcpyAsync` calls (the readback and the OptiX launch parameters) that block until the queued kernels finish, since the destination is pageable memory. Without the sort the GPU runs kernels for 60% of the render span; the other 40% is the host: each wait drains the queue, and the next kernel starts only after the host has noticed and launched it, 15 to 20 us later on WDDM.
-
-`-DERRORCHECK=0` removes the first two waits (the `nosync` build in `profiling/results/sweep.jsonl`). Sort off, ms per sample:
-
-| scene | 400x400, 3 waits | 1 wait | gain | 1024x1024, 3 waits | 1 wait | gain |
-|---|---|---|---|---|---|---|
-| cornell | 1.04 | 0.92 | 1.13x | 2.47 | 2.32 | 1.06x |
-| cornell-box | 2.39 | 1.94 | 1.23x | 3.91 | 3.58 | 1.09x |
-| cornell_helmet | 1.03 | 0.91 | 1.13x | 2.46 | 2.41 | 1.02x |
-| transmission_roughness | 1.33 | 1.27 | 1.05x | 2.69 | 2.55 | 1.05x |
-| dragon_attenuation | 1.77 | 1.70 | 1.04x | 3.23 | 3.05 | 1.06x |
-| sponza | 1.43 | 1.33 | 1.08x | 4.11 | 3.91 | 1.05x |
-| sponza_intel | 2.12 | 1.80 | 1.18x | 6.40 | 6.12 | 1.05x |
-| bistro-exterior | 2.43 | 2.13 | 1.14x | 6.77 | 6.58 | 1.03x |
-
-The saving is a fixed 15 to 20 us per bounce, which is why the research cornell-box with its 66-bounce depth (most of them nearly empty) gains the most and the million-pixel renders the least. `ERRORCHECK` is now 0 in Release builds; a kernel error still ends the run in the same bounce, at compaction's stream wait, with that call's name instead of the stage's. The Debug build keeps the per-stage checks.
-
-The readback stays. It is the one wait the wavefront loop cannot avoid without restructuring (the K-bounce raygen loop idea, where the OptiX raygen program traces and shades the first bounces itself). Its ceiling is the per-bounce floor of about 0.1 ms, which is up to 30% of a 400x400 sample and 3% of a 1024x1024 one.
-
-#### Kernel resources
-
-`cuobjdump --dump-resource-usage` on the Release binary (sm_86, device LTO), and Nsight Compute on cornell_helmet and sponza at 1024x1024 for what the kernels reach at run time:
-
-| kernel | registers | shared | local | notes |
-|---|---|---|---|---|
-| generateRayFromCamera | 20 | 0 | 0 | |
-| computeIntersections (naive) | 80 | 0 | 0 | the per-object loop with the alpha test inlined |
-| shadeMaterial | 64 | 0 | 0 | 42 before the glTF materials; the limit for 8 blocks of 128 threads per SM |
-| gatherByIndex | 26 | 0 | 0 | |
-| CUB DeviceSelectSweepKernel | 40 | 12 KB | 0 | compaction |
-| CUB DeviceRadixSortOnesweepKernel | 80 | 33 KB | 0 | one pass over the material key's bits |
-| CUB DeviceRadixSortHistogramKernel | 38 | 4 KB | 0 | |
-| sendImageToPBO | 22 | 0 | 0 | viewport only |
-
-No kernel spills to local memory. The OptiX programs are compiled by the driver from OptiX-IR and do not appear in the binary; Nsight Compute reports their launch as one kernel, below.
-
-Nsight Compute over 45 consecutive launches from the third sample (cornell_helmet / sponza, sort on so the gather is in the set):
-
-| kernel | registers | occupancy limit | achieved | SM throughput | DRAM throughput | warps stalled on a load |
-|---|---|---|---|---|---|---|
-| OptiX launch (raygen, hit and miss programs) | 78 | | 42% / 29% | 19% / 8% | 43% / 27% | 50% / 54% |
-| shadeMaterial | 64 | 67% | 55% / 39% | 11% / 9% | 59% / 48% | 41% / 48% |
-| gatherByIndex | 26 | 100% | 87% / 58% | 1% / 1% | 66% / 37% | 66% / 67% |
-| DeviceSelectSweepKernel | 40 | 58% | 53% / 37% | 10% / 8% | 45% / 36% | 12% / 15% |
-| generateRayFromCamera | 20 | 67% | 45% | 4% | 27% | 7% |
-| DeviceRadixSortOnesweepKernel | 80 | 50% | 26% / 35% | 16% / 26% | 25% / 58% | 16% / 19% |
-
-Every kernel that matters is memory-bound with the SMs mostly idle: the shade kernel at 11% of SM throughput against 59% of DRAM, the OptiX launch at 19%, the gather at 1% with two thirds of its warps waiting on a load. The registers are not what limits them. shadeMaterial's 64 registers allow 67% occupancy and it reaches 55% on the helmet scene; what it waits for is the 48-byte records and the texture fetches. So the step 3 cost (42 to 64 registers in the shade kernel) is not in the shade kernel: at 400x400 cornell went from 0.68 to 1.04 ms per sample sort off between 2026-09-25 and this commit, and from 1.49 to 2.06 sort on, with the extra 0.21 ms of the second pair being the gather of the record that grew from 32 to 48 bytes. A probe build that caps shadeMaterial at 40 registers through `__launch_bounds__(128, 12)` (88 bytes of stack spills, theoretical occupancy 100%) makes the shade stage 1.5 to 1.7x slower on every scene, 0.70 to 1.17 ms on cornell and 1.67 to 2.34 ms on Intel Sponza: the registers buy more than the occupancy would.
-
-One cheap target shows in the table: generateRayFromCamera writes a million 48-byte records in 0.2 ms at 27% of DRAM peak, from 8x8 blocks storing the struct field by field. Now that the sort is gone it is 9% of a cornell sample.
-
-#### Per-hit work
-
-Two probe builds, each one change in a scratch copy of the source, for timing only (both change the image): one where `__closesthit__mesh` writes zero uv and tangent instead of interpolating them, and one where no instance is alpha tested, so the any-hit program never runs. 1024x1024, sort on like the baseline, ms per sample:
-
-| scene | intersect | without uv and tangent | without any-hit | sample | without uv and tangent | without any-hit |
-|---|---|---|---|---|---|---|
-| cornell_helmet | 0.89 | 0.92 | | 8.42 | 8.64 | |
-| transmission_roughness | 1.17 | 1.18 | | 7.37 | 7.82 | |
-| dragon_attenuation | 1.58 | 1.43 | | 7.52 | 7.38 | |
-| sponza | 1.70 | 1.62 | 1.52 | 10.20 | 9.58 | 10.04 |
-| sponza_intel | 3.69 | 3.36 | 2.91 | 12.68 | 11.87 | 10.79 |
-| bistro-exterior | 4.67 | 4.45 | 3.08 | 13.81 | 13.18 | 12.18 |
-
-- **Interpolating uv and tangent at the hit costs at most 0.3 ms**, 9% of Intel Sponza's intersection stage and nothing measurable on the helmet. That bounds the plan's first two candidate fixes (per-instance flags to skip the attributes, or deferring the interpolation to shading): a few percent, and the smaller record they would also bring no longer matters with the sort off.
-- **The texture fetches are about half of shading on the textured scenes.** The same probe's shade stage fell from 1.20 to 0.64 ms on Sponza, 1.67 to 0.62 on Intel Sponza and 1.19 to 0.64 on Bistro, because a uv of zero sends every fetch to one texel.
-- **The any-hit program costs 0.2 ms on Sponza, 0.8 on Intel Sponza and 1.6 on Bistro**, 10 to 34% of the intersection stage. Sponza has three masked materials; Bistro has every material marked `BLEND`, so any-hit runs on every hit of every instance, fetches the alpha and hashes a random number, for materials whose alpha is 1 nearly everywhere. The next cheap fix is at load: a `BLEND` material whose alpha factor is 1 and whose base color texture holds no texel below 1 is opaque and gets its any-hit disabled; it changes nothing in the image.
-- **The random engine was not probed.** thrust's default engine is a seed hash and a few multiplies per number, and the Nsight Compute table above has shadeMaterial at 11% SM throughput: whatever ALU work it does is hidden behind the memory.
-
-#### Load and init
-
-Host timers around the loader and `pathtraceInit`, same runs. The large scenes:
-
-![Load and init breakdown](img/readme/perf_load_breakdown.png)
-
-| scene | glTF parse | image decode | nodes and vertices | MikkTSpace | load total | texture upload | OptiX builds | init total | GPU memory |
-|---|---|---|---|---|---|---|---|---|---|
-| cornell | 0 | 0 | 0 | 0 | 0.002 s | 0 | 0.012 s | 0.20 s | 516 MB |
-| cornell_helmet | 0.006 | 0.13 | 0.01 | 0.01 | 0.16 s | 0.008 | 0.013 | 0.21 s | 582 MB |
-| sponza | 0.08 | 0.69 | 0.04 | 0 | 0.83 s | 0.04 | 0.04 | 0.28 s | 824 MB |
-| sponza_intel | 2.3 | 27.6 | 0.8 | 0 | 31.0 s | 0.61 | 0.19 | 1.06 s | 6,304 MB |
-| bistro-exterior | 1.2 | 15.2 | 0.6 | 2.8 | 19.8 s | 0.46 | 0.38 | 1.14 s | 4,476 MB |
-
-- **Image decoding is the load.** tinygltf decodes every PNG through stb_image, one after another, while it reads the file: 27.6 of Intel Sponza's 31 seconds, 15.2 of Bistro's 19.8. The 72 4K PNGs of Intel Sponza's main file are 0.38 s each. The glTF parse itself (JSON and the binary buffers) is 1 to 2 s on these files, and building the vertex arrays and instances under a second.
-- **MikkTSpace is 2.8 s on Bistro**, which ships normal maps without tangents; the other scenes either have tangents in the file or no normal map.
-- **Init is 0.2 s at the floor and 1.1 s for the big scenes.** The floor is the CUDA context (the first runtime call, 87 ms in the Nsight trace) and the OptiX context (84 ms), plus 12 ms each for the acceleration structures and the pipeline. The big scenes add the texture upload (0.5 s for 4 to 6 GB of `cudaMemcpy2DToArray`) and 0.2 to 0.4 s of `optixAccelBuild` for 400 to 1,600 meshes, one GAS each.
-- **GPU memory** is 516 MB for cornell at 1024x1024, of which the path and intersection buffers and their ping-pong spares are 230 MB (48 bytes per record, two records, two copies) and the rest the CUDA and OptiX contexts. Bistro and Intel Sponza hold 4 and 6 GB of textures on top.
-- **Saving** is 0.25 s at 1024x1024: the download, the view transform on the host and the PNG encode.
-
-Decoding only the images a material slot reads, across threads, is the fix the numbers point at; tinygltf can hand over the raw bytes and leave the decode to the loader.
-
-#### Display path
-
-The viewport under Nsight Systems, cornell at 1024x1024, 12 seconds: 988 frames, 10.9 ms each, against 8.63 ms per sample headless at the same settings (both with the sort on). Of the 2.3 ms a frame costs on top of its sample, 0.67 ms is `cudaGLMapBufferObject`, which maps the pixel buffer for CUDA every frame, and 56 us is `sendImageToPBO` (the view transform over a million pixels). The rest is the GL texture update and the swap.
-
-#### Before and after
-
-Two defaults changed from this profile, the sort and the error-check waits, both proven image-neutral with `tests/cmp_renders.sh` (52 of 52 renders byte-identical to the goldens from before this step). The same sweep against the new build, ms per sample:
-
-| scene | 400x400 before | after | | 801x799 before | after | | 1024x1024 before | after | |
-|---|---|---|---|---|---|---|---|---|---|
-| cornell | 2.06 | 1.00 | 2.06x | 5.53 | 1.76 | 3.14x | 8.63 | 2.32 | 3.72x |
-| cornell-box | 3.52 | 1.96 | 1.80x | 7.68 | 2.95 | 2.60x | 11.43 | 3.61 | 3.17x |
-| cornell_helmet | 2.10 | 0.92 | 2.28x | 5.41 | 1.77 | 3.06x | 8.42 | 2.39 | 3.52x |
-| transmission_roughness | 2.55 | 1.50 | 1.70x | 4.99 | 2.08 | 2.40x | 7.37 | 2.57 | 2.87x |
-| dragon_attenuation | 3.12 | 1.63 | 1.91x | 5.30 | 2.39 | 2.22x | 7.52 | 3.14 | 2.39x |
-| sponza | 2.46 | 1.31 | 1.88x | 6.67 | 2.74 | 2.43x | 10.20 | 3.98 | 2.56x |
-| sponza_intel | 3.09 | 1.79 | 1.73x | 8.36 | 4.13 | 2.02x | 12.68 | 6.13 | 2.07x |
-| bistro-exterior | 3.74 | 2.12 | 1.76x | 9.28 | 4.50 | 2.06x | 13.81 | 6.61 | 2.09x |
-
-| Before | After, same axis |
-|:---:|:---:|
-| ![Before](img/readme/perf_stage_breakdown_1024x1024.png) | ![After](img/readme/perf_stage_breakdown_after_1024x1024.png) |
-
-![Before and after](img/readme/perf_before_after_1024x1024.png)
-
-Where a sample goes now, at 1024x1024: cornell is 2.32 ms, of which intersection 0.79, shading 0.69, compaction 0.62 and generation 0.20; Bistro is 6.61 ms with intersection 4.52, shading 1.23, compaction 0.62, generation 0.20. The stages now follow the scene, and the next things the numbers point at are, in order of what they would save:
-
-1. Any-hit off for `BLEND` materials that are opaque in practice: up to 1.6 ms on Bistro, 0.8 on Intel Sponza.
-2. Compaction at 0.6 ms: a CUB select over 48-byte records, at 45% of DRAM peak. Selecting indices and gathering, or compacting in place, would halve its traffic.
-3. generateRayFromCamera at 0.2 ms: 8x8 blocks writing a struct field by field, at 27% of DRAM peak.
-4. The alive-count readback, the last wait per bounce: about 0.1 ms per bounce at small path counts, which is the K-bounce raygen loop's whole budget.
-5. Load: decoding only the images a material reads, in parallel, against 15 to 28 s of serial PNG decoding.
+The full profile of the renderer, taken 2026-10-02 over eight scenes with per-stage timing, Nsight Systems and Nsight Compute, is in [PROFILING.md](PROFILING.md): where a sample goes, the material sort and Russian roulette toggles, the host synchronizations, kernel resources, per-hit work, load and init, the display path, and the before and after of the two defaults it changed (the material sort is now off, and the per-stage error checks are off in Release). The entry below is the earlier optimization it builds on.
 
 #### Compaction and sort: thrust to CUB with device LTO
 
-Measured 2026-09-25, before the glTF materials, and kept here as the history of the stages above.
+Measured 2026-09-25, before the glTF materials; the profile in PROFILING.md starts from this build.
 
 **The first version used thrust.** Compaction was `thrust::stable_partition`, the sort was `thrust::sort_by_key` over the path and intersection arrays together, and a `finalGather` kernel added every path's color to the image after the bounce loop. It produced the right image and spent most of the frame outside the kernels; the "Issues along the way" entry below has the numbers.
 
