@@ -16,7 +16,10 @@ struct Options
     ToneMapMode toneMap = TONEMAP_AGX_PUNCHY;
     float exposure = 1.0f;
     bool russianRoulette = true;
-    bool materialSort = true;
+    // Off by default since the 2026-10-02 profile: the sort's gather costs
+    // 2 to 3.5x the frame on every scene and saves the shade kernel almost
+    // nothing (README, Performance). --sort turns it on.
+    bool materialSort = false;
     bool optix = true;
     bool optixValidation = false;
     bool timing = false;         // --timing: headless prints load, init and per-bounce stage times

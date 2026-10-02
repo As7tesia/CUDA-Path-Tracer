@@ -10,7 +10,7 @@ namespace
 {
 const char* const USAGE =
     "Usage: %s SCENE [--headless] [--spp N] [--res WxH] [--depth N] [--out PATH.png]\n"
-    "                     [--no-rr] [--no-sort] [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
+    "                     [--no-rr] [--sort] [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
     "                     [--no-optix] [--optix-validate] [--timing]\n"
     "       %s --list\n"
     "  SCENE            a scene .json, a .gltf / .glb file that is the whole scene, or a scene name:\n"
@@ -22,7 +22,8 @@ const char* const USAGE =
     "  --depth N        override the scene's DEPTH, the most rays a path may trace\n"
     "  --out PATH       write exactly this file (default: img/auto_saved/<FILE>.<time>.<spp>samp.png)\n"
     "  --no-rr          disable Russian roulette path termination\n"
-    "  --no-sort        disable sorting paths by material before shading\n"
+    "  --sort           sort paths by material before shading (off by default: it costs 2 to 3.5x, see the README)\n"
+    "  --no-sort        the default, kept for scripts\n"
     "  --no-optix       intersect with the naive per-object kernel instead of OptiX\n"
     "  --optix-validate OptiX validation mode: checks every launch, slow\n"
     "  --timing         with --headless: print load, init and per-bounce stage times as CSV lines\n"
@@ -85,6 +86,10 @@ Options parseArguments(int argc, char** argv)
         else if (a == "--no-rr")
         {
             options.russianRoulette = false;
+        }
+        else if (a == "--sort")
+        {
+            options.materialSort = true;
         }
         else if (a == "--no-sort")
         {

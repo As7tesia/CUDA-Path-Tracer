@@ -22,10 +22,17 @@
 // After kernel launches: waits for the device and ends the program, naming
 // msg, if anything launched since the last check failed (the error a kernel
 // hits only shows once the device has run it). ERRORCHECK 0 skips both, and
-// the explicit wait after the intersection stage; a build can set it with
-// -DERRORCHECK=0 (profiling/ does, to measure the host syncs).
+// the explicit wait after the intersection stage. Off in Release since the
+// 2026-10-02 profile: the two waits per bounce cost 5 to 10% of a sample at
+// 1024x1024 and up to 20% at 400x400 (README, Performance). A kernel error
+// still ends the run, at compactPaths' stream wait in the same bounce, with
+// that call's name instead of the stage's. -DERRORCHECK=1 turns it back on.
 #ifndef ERRORCHECK
+#ifdef NDEBUG
+#define ERRORCHECK 0
+#else
 #define ERRORCHECK 1
+#endif
 #endif
 
 #define checkCUDAError(msg) checkCUDAErrorFn(msg, __FILE__, __LINE__)
