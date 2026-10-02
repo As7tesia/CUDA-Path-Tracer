@@ -164,7 +164,16 @@ The naive kernel's time grows linearly with the triangle count, about 20 ms per 
 
 ### Materials: glTF metallic-roughness
 
-Every glTF material loads as one material model: the metallic-roughness BSDF from Appendix B of the glTF 2.0 spec, plus five `KHR_materials_*` extensions. Scene JSON materials (Diffuse, Specular, Refractive, Emitting) keep their own code path, and scenes that use only them render byte-identical to before (24 of 24 renders: six scenes, two sizes, both intersection paths).
+Every material, from a glTF file or a scene JSON, is one material model: the metallic-roughness BSDF from Appendix B of the glTF 2.0 spec, plus five `KHR_materials_*` extensions. The scene JSON format keeps its four material types, and the loader translates each into parameters of that model, starting from glTF's default material:
+
+| JSON `TYPE` | Parameters |
+|---|---|
+| `Diffuse` | base color `RGB`, metallic 0, `specularFactor` 0: pure Lambert |
+| `Emitting` | emission `RGB` x `EMITTANCE` over a black base with metallic 0 and `specularFactor` 0, which reflects nothing, so the path ends there |
+| `Specular` | base color `RGB`, metallic 1, roughness `ROUGHNESS` (optional, default 0: a perfect mirror) |
+| `Refractive` | base color `RGB`, transmission 1, ior `IOR`, roughness 0 |
+
+The JSON types used to have their own scatter function, and two of them render differently now: the mirror brightens toward white at grazing angles (Fresnel with the base color as f0, instead of a flat tint), and glass tints only the refracted light, not the reflection. Every mirror and glass in the scene files is white or 0.98 white, so on them the change is mostly the noise pattern.
 
 ```
 coated     = fresnel_coat(material, GGX(clearcoatRoughness^2))        KHR_materials_clearcoat
@@ -196,7 +205,7 @@ Transmission is a solid boundary: the ray refracts through the ior on the way in
 
 #### Emission
 
-Emission is `emissiveFactor` x emissive texture x `emissiveStrength`. The shade kernel adds throughput x emission to the pixel at every hit and the path goes on, so a glTF emitter also reflects. The clearcoat sits above the emission and darkens it by 1 - clearcoat x Fresnel(0.04, n·v), on the air side only like the coat lobe. Scene JSON lights still end the path.
+Emission is `emissiveFactor` x emissive texture x `emissiveStrength`. The shade kernel adds throughput x emission to the pixel at every hit and the path goes on, so an emitter also reflects. This is the only place light reaches the image: a path that ends (a miss, its last bounce, Russian roulette, a sample that carries no light) adds nothing. The clearcoat sits above the emission and darkens it by 1 - clearcoat x Fresnel(0.04, n·v), on the air side only like the coat lobe.
 
 #### Normal maps
 
@@ -246,7 +255,7 @@ TODO: Performance data of material sorting and stream compaction
 
 **The current version uses CUB with a workspace allocated once.** All scratch memory (spare path and intersection buffers, the sort's index arrays, CUB's temporary storage) is allocated in `wavefrontInit` at the largest path count the loop can see, so nothing is allocated during a sample.
 
-* Compaction is a CUB select of the live paths into the spare buffer, then a pointer swap. Terminated paths are dropped rather than moved to the back, which is why `shadeMaterial` now adds a path's color to the image at the moment it terminates and `finalGather` is gone.
+* Compaction is a CUB select of the live paths into the spare buffer, then a pointer swap. Terminated paths are dropped rather than moved to the back, which is why light goes into the image inside `shadeMaterial` (today at the hit that emits it, see [Emission](#emission)) and `finalGather` is gone.
 * The sort no longer moves the path structs through every radix pass. It sorts (material key, path index) pairs over only the bits the material count needs (one pass for Cornell instead of four), then gathers paths and intersections into the spare buffers once.
 
 Both operations are out of place and ping-pong: the caller's `dev_paths` and `dev_intersections` point at a different allocation after every call, and the old one becomes the spare.

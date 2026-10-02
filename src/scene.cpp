@@ -114,34 +114,55 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
 {
     std::ifstream f(jsonName);
     json data = json::parse(f);
+    // Each material TYPE becomes parameters of the one material model
+    // (Material), starting from glTF's default material:
+    //   Diffuse     base color RGB and no specular layer: pure Lambert
+    //   Emitting    emits RGB * EMITTANCE; a black base with no specular
+    //               layer reflects nothing, so the path ends there
+    //   Specular    metal with base color RGB and roughness ROUGHNESS
+    //               (optional, 0 = a perfect mirror)
+    //   Refractive  smooth glass of index IOR, the refraction tinted by RGB
     const auto& materialsData = data["Materials"];
     std::unordered_map<std::string, uint32_t> MatNameToID;
     for (const auto& item : materialsData.items())
     {
         const auto& name = item.key();
         const auto& p = item.value();
-        Material newMaterial{};
-        // TODO: handle materials loading differently
         const auto& col = p["RGB"];
-        newMaterial.color = glm::vec3(col[0], col[1], col[2]);
-        if (p["TYPE"] == "Diffuse")
+        const glm::vec3 rgb(col[0], col[1], col[2]);
+        const std::string type = p["TYPE"];
+        Material newMaterial{};
+        if (type == "Diffuse")
         {
-            newMaterial.type = DIFFUSE;
+            newMaterial.color = rgb;
+            newMaterial.metallic = 0.0f;
+            newMaterial.specularFactor = 0.0f;
         }
-        else if (p["TYPE"] == "Emitting")
+        else if (type == "Emitting")
         {
-            newMaterial.type = EMISSIVE;
-            newMaterial.emittance = p["EMITTANCE"];
+            newMaterial.color = glm::vec3(0.0f);
+            newMaterial.metallic = 0.0f;
+            newMaterial.specularFactor = 0.0f;
+            newMaterial.emission = rgb * p["EMITTANCE"].get<float>();
         }
-        else if (p["TYPE"] == "Specular")
+        else if (type == "Specular")
         {
-            newMaterial.type = SPECULAR;
-            newMaterial.specular.color = newMaterial.color;
+            newMaterial.color = rgb;
+            newMaterial.metallic = 1.0f;
+            newMaterial.roughness = p.value("ROUGHNESS", 0.0f);
         }
-        else if (p["TYPE"] == "Refractive")
+        else if (type == "Refractive")
         {
-            newMaterial.type = REFRACTIVE;
+            newMaterial.color = rgb;
+            newMaterial.metallic = 0.0f;
+            newMaterial.roughness = 0.0f;
+            newMaterial.transmission = 1.0f;
             newMaterial.ior = p["IOR"];
+        }
+        else
+        {
+            cout << "Unknown material TYPE " << type << " for " << name << endl;
+            exit(-1);
         }
         MatNameToID[name] = materials.size();
         materials.emplace_back(newMaterial);
@@ -238,7 +259,7 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
     }
     // Only a surface that emits lights a scene so far.
     if (std::none_of(materials.begin(), materials.end(), [](const Material& m) {
-            return m.emittance > 0.0f || maxComponent(m.emission) > 0.0f;
+            return maxComponent(m.emission) > 0.0f;
         }))
     {
         cout << "No emissive material in " << gltfName << ": the render will be black" << endl;

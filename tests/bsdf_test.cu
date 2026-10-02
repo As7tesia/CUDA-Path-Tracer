@@ -7,7 +7,6 @@
 // bsdf_test target (CMakeLists.txt, outside the default build); the README's
 // "Checking the BSDF" table comes from its output.
 #include "bsdf.cu"
-#include "interactions.cu"
 
 #include <cstdio>
 #include <cmath>
@@ -124,7 +123,6 @@ int main()
     auto add = [&](const char* name, float metallic, float rough, float trans, glm::vec3 base, float spec, float cc, float ccr) {
         Case c{};
         c.name = name;
-        c.m.type = PBR;
         c.m.ior = 1.5f;
         c.m.specularFactor = spec;
         c.m.specularColorFactor = glm::vec3(1.0f);

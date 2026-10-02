@@ -1,7 +1,8 @@
 #pragma once
 
-// The glTF material's BSDF (Appendix B of the glTF 2.0 spec plus the
-// extensions this project reads), sampled one lobe at a time:
+// The BSDF of every material: glTF's metallic-roughness model (Appendix B of
+// the glTF 2.0 spec plus the extensions this project reads), sampled one lobe
+// at a time:
 //
 //   coated   = fresnel_coat(base = material, layer = GGX(clearcoatRoughness^2))  KHR_materials_clearcoat
 //   material = mix(dielectric, metal, metallic)

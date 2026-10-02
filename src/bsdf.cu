@@ -1,6 +1,5 @@
 #include "bsdf.h"
 
-#include "interactions.h"
 #include "utilities.h"
 
 #include <thrust/random.h>
@@ -12,6 +11,18 @@ namespace
 // mirror reflection or a clean refraction.
 constexpr float MIN_ALPHA = 1e-4f;
 
+// Where a ray leaving a surface starts: hitPoint pushed off along normal
+// (unit length, pointing to the side the ray leaves on) by EPSILON scaled with
+// the hit point's magnitude. A fixed EPSILON is below one float ulp once
+// coordinates pass about 170, as in Bistro, and origin + t * dir carries a
+// few ulp of error anyway, so the next trace would find the same triangle
+// again at t near 0 (both intersection paths accept any t > 0).
+__host__ __device__ glm::vec3 offsetOrigin(glm::vec3 hitPoint, glm::vec3 normal)
+{
+    const float scale = fmaxf(1.0f, maxComponent(glm::abs(hitPoint)));
+    return hitPoint + normal * (EPSILON * scale);
+}
+
 // Unit vectors t, b so that (t, b, n) is an orthonormal frame, for unit n
 // (Duff et al. 2017, "Building an Orthonormal Basis, Revisited"). The BSDF
 // is isotropic, so any frame around n works.
@@ -22,6 +33,20 @@ __host__ __device__ void frameAround(glm::vec3 n, glm::vec3& t, glm::vec3& b)
     const float c = n.x * n.y * a;
     t = glm::vec3(1.0f + sign * n.x * n.x * a, sign * c, -sign * n.x);
     b = glm::vec3(c, sign + n.y * n.y * a, -n.y);
+}
+
+// A direction in the hemisphere around unit n with density cos(theta) / pi,
+// the Lambert lobe's: cos(theta) = sqrt(u1) and a uniform angle around n.
+__host__ __device__ glm::vec3 sampleCosineHemisphere(glm::vec3 n, thrust::default_random_engine& rng)
+{
+    thrust::uniform_real_distribution<float> u01(0, 1);
+    const float cosTheta = sqrtf(u01(rng));
+    const float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
+    const float phi = TWO_PI * u01(rng);
+    glm::vec3 t;
+    glm::vec3 b;
+    frameAround(n, t, b);
+    return cosTheta * n + (sinTheta * cosf(phi)) * t + (sinTheta * sinf(phi)) * b;
 }
 
 // Smith's Lambda for isotropic GGX, from the cosine between a direction and
@@ -210,7 +235,7 @@ __host__ __device__ bool scatterPbr(
             else
             {
                 // Lambert: f = color / pi, cosine-weighted pdf = cos / pi.
-                wi = calculateRandomDirectionInHemisphere(lobeNormal, rng);
+                wi = sampleCosineHemisphere(lobeNormal, rng);
                 const glm::vec3 h = glm::normalize(wo + wi);
                 const float layer = specular * maxComponent(schlickFresnel(f0, glm::dot(wo, h)));
                 weight = s.baseColor * (1.0f - layer) / (1.0f - pLayer);

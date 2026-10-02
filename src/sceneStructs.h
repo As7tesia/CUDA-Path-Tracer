@@ -89,18 +89,6 @@ struct Geom
     glm::mat4 invTranspose;
 };
 
-// DIFFUSE, SPECULAR, REFRACTIVE and EMISSIVE come from scene JSON files and
-// are shaded by scatterRay. PBR is every glTF material: the metallic-roughness
-// model with the extensions bsdf.h lists, shaded by scatterPbr.
-enum MaterialType
-{
-    DIFFUSE,
-    SPECULAR,
-    REFRACTIVE,
-    EMISSIVE,
-    PBR
-};
-
 // glTF's alpha modes. BLEND is loaded as OPAQUE.
 enum AlphaMode
 {
@@ -108,21 +96,16 @@ enum AlphaMode
     ALPHA_MASK  // a hit whose alpha is below alphaCutoff is no hit
 };
 
+// Every material is glTF's metallic-roughness model with the extensions
+// bsdf.h lists, shaded by scatterPbr. A glTF material fills it from the file
+// (gltf_loader.cpp); a scene JSON's material types are translated into it
+// (scene.cpp). The defaults are glTF's default material: white, fully
+// metallic, fully rough. Every texture slot indexes Scene::textures (-1 for
+// none), and the texture value multiplies the factor it belongs to.
 struct Material
 {
-    MaterialType type;
-    glm::vec3 color;  // PBR: the base color factor
-    struct
-    {
-        float exponent;
-        glm::vec3 color;
-    } specular;
-    float ior;        // REFRACTIVE; PBR: KHR_materials_ior, 0 meaning a Fresnel term of 1
-    float emittance;  // EMISSIVE: radiance is color * emittance
-
-    // PBR only, from the glTF material and its extensions. Every texture slot
-    // indexes Scene::textures (-1 for none), and the texture value multiplies
-    // the factor it belongs to.
+    glm::vec3 color = glm::vec3(1.0f);            // base color factor
+    float ior = 1.5f;                             // KHR_materials_ior; 0 means a Fresnel term of 1
     float alpha = 1.0f;                           // base color factor alpha
     AlphaMode alphaMode = ALPHA_OPAQUE;
     float alphaCutoff = 0.5f;

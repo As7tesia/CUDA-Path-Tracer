@@ -216,7 +216,7 @@ extern "C" __global__ void __closesthit__mesh()
     }
     // Same fallback as meshIntersectionTest: a smooth vertex normal near a
     // silhouette can point away from the ray even on a front-face hit, and
-    // scatterRay needs one that faces it, so use the geometric normal there.
+    // the shade kernel needs one that faces it, so use the geometric normal there.
     if (glm::dot(normal, toVec3(optixGetWorldRayDirection())) > 0.0f)
     {
         normal = glm::normalize(toVec3(optixTransformNormalFromObjectToWorldSpace(toFloat3(geometricNormal))));

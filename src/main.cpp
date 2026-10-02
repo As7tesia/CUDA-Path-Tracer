@@ -136,11 +136,13 @@ void initVAO(void)
         -1.0f,  1.0f,
     };
 
+    // The texture's first row is the image's top (v = 0 at the top of the
+    // window) and its first column the image's left.
     GLfloat texcoords[] = {
-        1.0f, 1.0f,
         0.0f, 1.0f,
-        0.0f, 0.0f,
-        1.0f, 0.0f
+        1.0f, 1.0f,
+        1.0f, 0.0f,
+        0.0f, 0.0f
     };
 
     GLushort indices[] = { 0, 1, 3, 3, 1, 2 };
@@ -562,7 +564,7 @@ void saveImage()
         {
             int index = x + (y * width);
             glm::vec3 pix = renderState->image[index] / samples;   // scene-linear average
-            img.setPixel(width - 1 - x, y, applyToneMap(pix, toneMapMode, exposure));
+            img.setPixel(x, y, applyToneMap(pix, toneMapMode, exposure));
         }
     }
 

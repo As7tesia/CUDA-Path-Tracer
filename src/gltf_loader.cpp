@@ -489,12 +489,13 @@ struct Loader
         fprintf(stderr, "glTF %s: mesh %d primitive %d skipped: %s\n", path.c_str(), meshIndex, primIndex, what);
     }
 
-    // Every glTF material becomes a PBR material (bsdf.h): the core
-    // metallic-roughness factors and texture slots (base color,
+    // Every glTF material becomes a Material (the model bsdf.h describes):
+    // the core metallic-roughness factors and texture slots (base color,
     // metallic-roughness, normal, emissive), the alpha mode, and the factors
     // of the extensions in kReadExtensions. Of the extensions' textures only
     // transmissionTexture is read. A primitive without a material gets glTF's
-    // default material: white, fully metallic, fully rough.
+    // default material, which is Material's default: white, fully metallic,
+    // fully rough.
     int materialFor(int gltfMaterial)
     {
         if (materialOverride >= 0)
@@ -507,9 +508,6 @@ struct Loader
             return found->second;
         }
         Material m{};
-        m.type = PBR;
-        m.color = glm::vec3(1.0f);
-        m.ior = 1.5f;
         if (gltfMaterial >= 0 && gltfMaterial < (int)model.materials.size())
         {
             const tinygltf::Material& source = model.materials[gltfMaterial];

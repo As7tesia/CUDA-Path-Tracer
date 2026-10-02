@@ -226,8 +226,8 @@ __device__ float meshIntersectionTest(
         normal = -normal;
     }
     // Near a silhouette a smooth vertex normal can lean past the surface and
-    // point away from the ray even on a front-face hit. scatterRay needs a
-    // normal facing the ray, so those hits fall back to the geometric normal.
+    // point away from the ray even on a front-face hit. The shade kernel needs
+    // a normal facing the ray, so those hits fall back to the geometric normal.
     if (glm::dot(normal, r.direction) > 0.0f)
     {
         normal = glm::normalize(multiplyMV(geom.invTranspose, glm::vec4(geometricNormal, 0.0f)));

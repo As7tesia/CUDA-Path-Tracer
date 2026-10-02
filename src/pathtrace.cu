@@ -11,7 +11,6 @@
 #include "glm/gtx/norm.hpp"
 #include "utilities.h"
 #include "intersections.h"
-#include "interactions.h"
 #include "bsdf.h"
 #include "material_textures.h"
 #include "wavefront_ops.h"
@@ -244,8 +243,10 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         thrust::uniform_real_distribution<float> u01(0, 1);
         float jx = u01(rng);   // in [0, 1)
         float jy = u01(rng);
+        // Pixel (0, 0) is the top left of the image, as the PNG and the
+        // viewport texture store it: x runs along right, y against up.
         segment.ray.direction = glm::normalize(cam.view
-            - cam.right * cam.pixelLength.x * (float(x + jx) - (float)cam.resolution.x * 0.5f)
+            + cam.right * cam.pixelLength.x * (float(x + jx) - (float)cam.resolution.x * 0.5f)
             - cam.up * cam.pixelLength.y * ((float)(y + jy) - (float)cam.resolution.y * 0.5f)
         );
 
@@ -392,117 +393,109 @@ __global__ void shadeMaterial(
     {
         // Work on a register copy of the segment: one coalesced load here and
         // one store at the end, instead of global traffic on every field access
-        // (scatterRay takes it by reference, so it would otherwise hit global
+        // (scatterPbr takes it by reference, so it would otherwise hit global
         // memory for every read and write inside).
         PathSegment seg = pathSegments[idx];
         if (seg.remainingBounces <= 0) return;
         ShadeableIntersection intersection = shadeableIntersections[idx];
-        
-        
-        if (intersection.t > 0.0f) // if the intersection exists...
+
+        // A path ends by setting remainingBounces to 0, and compaction drops
+        // it next. Its color is not read again: light reaches the image only
+        // through the emission added below.
+        if (intersection.t <= 0.0f)
         {
-            // Set up the RNG
+            // A miss. Nothing lights the scene from outside yet.
+            seg.remainingBounces = 0;
+        }
+        else
+        {
             thrust::default_random_engine rng = makeSeededRandomEngine(iter, seg.pixelIndex, seg.remainingBounces);
             const Material& material = materials[intersection.materialId];
             const glm::vec3 hitPoint = seg.ray.origin + intersection.t * seg.ray.direction;
+            const glm::vec3 wo = -seg.ray.direction;
 
-            // Inside a volume (the path refracted into a PBR material and has
-            // not refracted out), the segment that just ended was absorbed
-            // along its length t (Beer-Lambert), whatever it ended on.
-            if (seg.medium >= 0) {
+            // Inside a volume (the path refracted into a material and has not
+            // refracted out), the segment that just ended was absorbed along
+            // its length t (Beer-Lambert), whatever it ended on.
+            if (seg.medium >= 0)
+            {
                 const glm::vec3 absorption = materials[seg.medium].absorption;
-                if (absorption != glm::vec3(0.0f)) {
+                if (absorption != glm::vec3(0.0f))
+                {
                     seg.color *= glm::exp(-absorption * intersection.t);
                 }
             }
 
-            // A scene file's light only emits, so the path ends on it
-            if (material.type == EMISSIVE) {
-                seg.color *= (material.color * material.emittance);
-                seg.remainingBounces = 0;
+            // The texture lookups happen once per hit. On the last bounce the
+            // path ends here, so only the emission is needed.
+            const bool lastBounce = seg.remainingBounces == 1;
+            PbrSurface surface;
+            glm::vec3 emission;
+            if (lastBounce)
+            {
+                emission = pbrEmission(material, intersection, wo, textures);
             }
-            else {
-                // A glTF material: the texture lookups happen once per hit.
-                // An emissive surface adds its light now and the path goes
-                // on: glTF emitters also reflect, like any other surface.
-                PbrSurface surface;
-                if (material.type == PBR) {
-                    glm::vec3 emission;
-                    if (seg.remainingBounces == 1) {
-                        // the path ends at this hit: only its emission is needed
-                        emission = pbrEmission(material, intersection, -seg.ray.direction, textures);
-                    } else {
-                        surface = pbrSurface(material, intersection, -seg.ray.direction, textures);
-                        emission = surface.emission;
-                    }
-                    if (emission != glm::vec3(0.0f)) {
-                        image[seg.pixelIndex] += seg.color * emission;
-                    }
-                }
+            else
+            {
+                surface = pbrSurface(material, intersection, wo, textures);
+                emission = surface.emission;
+            }
+            // An emitting surface adds its light and the path goes on: an
+            // emitter also reflects, like any other surface. Each pixel has
+            // exactly one path per iteration, so no two threads add to the
+            // same pixel.
+            if (emission != glm::vec3(0.0f))
+            {
+                image[seg.pixelIndex] += seg.color * emission;
+            }
 
-                // ran out of bounces: the next ray would not be traced
-                if (seg.remainingBounces == 1) {
-                    seg.color = glm::vec3(0.f);
-                    seg.remainingBounces = 0;
-                } else {    // still have bounces keep it up
-                    // Russian Roulette
-                    if (russianRoulette && cur_depth >= 3)
+            if (lastBounce)
+            {
+                seg.remainingBounces = 0;  // the next ray would not be traced
+            }
+            else
+            {
+                // Russian roulette from the third bounce: the path survives
+                // with a probability that follows the luminance of its
+                // throughput (at most 0.95), and a survivor's throughput is
+                // divided by that probability, which keeps the estimate
+                // unbiased.
+                if (russianRoulette && cur_depth >= 3)
+                {
+                    const glm::vec3 c = seg.color;
+                    const float p = glm::min(0.95f, 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b);
+                    thrust::uniform_real_distribution<float> u01(0, 1);
+                    if (u01(rng) >= p)
                     {
-                        glm::vec3 c = seg.color;
-                        // pick probability based on luminance
-                        float p = glm::min(0.95f, 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b);
-                        thrust::uniform_real_distribution<float> u01(0,1);
-                        float rand = u01(rng);
+                        seg.remainingBounces = 0;
+                    }
+                    else
+                    {
+                        seg.color /= p;
+                    }
+                }
 
-                        if (rand >= p) {    // terminate
-                            seg.remainingBounces = 0;
-                            seg.color = glm::vec3(0.f);
-                        } else {   
-                            // lucky survive, boost weighting
-                            seg.color /= p;
-                            
+                if (seg.remainingBounces > 0)
+                {
+                    // A sample that carries no light ends the path.
+                    if (scatterPbr(seg, hitPoint, intersection.surfaceNormal, intersection.outside, material, surface,
+                            rng))
+                    {
+                        --seg.remainingBounces;
+                        // A direction past the surface refracted into the
+                        // object or out of it: the medium for the absorption
+                        // above travels with the path.
+                        if (glm::dot(seg.ray.direction, intersection.surfaceNormal) < 0.0f)
+                        {
+                            seg.medium = intersection.outside ? intersection.materialId : -1;
                         }
                     }
-                    
-                    
-                    // keep bouncing, guard is so that terminated rays from roulette above doesn't continue into scatterRay
-                    if (seg.remainingBounces > 0) {
-                        if (material.type == PBR) {
-                            // a sample that carries no light ends the path
-                            if (scatterPbr(seg, hitPoint, intersection.surfaceNormal, intersection.outside,
-                                    material, surface, rng)) {
-                                --seg.remainingBounces;
-                                // A direction past the surface refracted into
-                                // the object or out of it: the medium for the
-                                // absorption above travels with the path.
-                                if (glm::dot(seg.ray.direction, intersection.surfaceNormal) < 0.0f) {
-                                    seg.medium = intersection.outside ? intersection.materialId : -1;
-                                }
-                            } else {
-                                seg.color = glm::vec3(0.f);
-                                seg.remainingBounces = 0;
-                            }
-                        } else {
-                            scatterRay(seg, hitPoint, intersection.surfaceNormal, intersection.outside, material, rng);
-                            --seg.remainingBounces;
-                        }
+                    else
+                    {
+                        seg.remainingBounces = 0;
                     }
                 }
             }
-
-
-            // If there was no intersection, color the ray black. could add Alpha channel if want to composite later
-        }
-        else {
-            seg.color = glm::vec3(0.0f);
-            seg.remainingBounces = 0;
-        }
-
-        // A path that terminated in any branch above adds its color to the
-        // image now, because compaction drops it next. Each pixel has exactly
-        // one path per iteration, so no two threads add to the same pixel.
-        if (seg.remainingBounces <= 0) {
-            image[seg.pixelIndex] += seg.color;
         }
 
         pathSegments[idx] = seg;
@@ -634,8 +627,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         }
     }
 
-    // No gather pass: every path added its color to dev_image in shadeMaterial
-    // when it terminated.
+    // No gather pass: shadeMaterial adds light to dev_image at the hit that
+    // emits it.
 
     ///////////////////////////////////////////////////////////////////////////
 

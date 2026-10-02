@@ -75,7 +75,6 @@ set(headers
     src/bsdf.h
     src/gltf_loader.h
     src/image.h
-    src/interactions.h
     src/intersections.h
     src/material_textures.h
     src/glslUtility.hpp
@@ -99,7 +98,6 @@ set(sources
     src/pathtrace.cu
     src/bsdf.cu
     src/intersections.cu
-    src/interactions.cu
     src/optix_intersect.cpp
     src/scene.cpp
     src/textures.cpp
@@ -157,7 +155,7 @@ target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<AND:$<CONFIG:Release>,
 
 # Device link-time optimization. Separable compilation compiles each .cu on its
 # own, so device functions defined in another file (the intersection tests,
-# scatterRay) stay real calls inside the kernels unless the device link step
+# scatterPbr) stay real calls inside the kernels unless the device link step
 # can inline them. Release only; Debug and RelWithDebInfo use -G.
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-dlto>")
 target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "$<$<CONFIG:Release>:$<DEVICE_LINK:-dlto>>")
