@@ -79,10 +79,10 @@ The scene argument is a path, or a name: `cornell` is `scenes/cornell.json`, and
 | `--depth N` | Override `DEPTH` from the scene file, the most rays a path may trace |
 | `--out path.png` | Write exactly this file. Default is the usual `img/auto_saved/<FILE>.<time>.<spp>samp.png` |
 | `--no-rr` | Disable Russian roulette |
-| `--sort` | Sort paths by material before shading. Off by default since the [profile](PROFILING.md#the-material-sort); `--no-sort` is the default, kept for scripts |
+| `--sort` | Sort paths by material before shading. Off by default since the 2026-10-02 profile, where its gather cost 2 to 3.5x the frame on every scene; `--no-sort` is the default, kept for scripts |
 | `--no-optix` | Intersect with the naive per-object kernel instead of the OptiX stage |
 | `--optix-validate` | OptiX validation mode: checks every launch, slow |
-| `--timing` | With `--headless`: print load, init and per-bounce stage times as CSV lines (see [PROFILING.md](PROFILING.md)) |
+| `--timing` | With `--headless`: print load, init and per-bounce stage times as CSV lines |
 | `--tonemap none\|aces\|agx\|agx-punchy` | View transform for viewport and PNG. Default `agx-punchy`. `none` is the raw clamp the base code shipped with |
 | `--exposure X` | Linear multiplier before the view transform. Default 1.0 |
 
@@ -150,7 +150,7 @@ The Bistro comes from NVIDIA's Open Research Content Archive as FBX with DDS tex
 
 #### Naive loop vs OptiX by triangle count
 
-1024x1024, ms per sample, median of 3 interleaved runs, GPU otherwise idle, from the [profiling sweep](PROFILING.md). `--no-optix` runs the naive kernel; the naive runs use 1 to 4 samples each because of how long they take.
+1024x1024, ms per sample, median of 3 interleaved runs, GPU otherwise idle, from the 2026-10-02 profiling sweep. `--no-optix` runs the naive kernel; the naive runs use 1 to 4 samples each because of how long they take.
 
 | scene | triangles | depth | naive | OptiX |
 |---|---|---|---|---|
@@ -250,17 +250,17 @@ The three Khronos material tests ship without lights, so their scene files add a
 
 ### Performance optimization
 
-The full profile of the renderer, taken 2026-10-02 over eight scenes with per-stage timing, Nsight Systems and Nsight Compute, is in [PROFILING.md](PROFILING.md): where a sample goes, the material sort and Russian roulette toggles, the host synchronizations, kernel resources, per-hit work, load and init, the display path, and the before and after of the two defaults it changed (the material sort is now off, and the per-stage error checks are off in Release). The entry below is the earlier optimization it builds on.
+The renderer's profile is being redone on the `profile-nsight` branch around Nsight Systems and Nsight Compute. The first pass (2026-10-02) changed two defaults: the material sort is off (its gather cost 2 to 3.5x the frame on every scene and saved the shade kernel at most 0.3 ms), and the per-stage error-check waits are off in Release (5 to 10% at 1024x1024). The first entry below is the earlier optimization both build on; the second came out of the new profile.
 
 #### Compaction and sort: thrust to CUB with device LTO
 
-Measured 2026-09-25, before the glTF materials; the profile in PROFILING.md starts from this build.
+Measured 2026-09-25, before the glTF materials.
 
 **The first version used thrust.** Compaction was `thrust::stable_partition`, the sort was `thrust::sort_by_key` over the path and intersection arrays together, and a `finalGather` kernel added every path's color to the image after the bounce loop. It produced the right image and spent most of the frame outside the kernels; the "Issues along the way" entry below has the numbers.
 
 **The current version uses CUB with a workspace allocated once.** All scratch memory (spare path and intersection buffers, the sort's index arrays, CUB's temporary storage) is allocated in `wavefrontInit` at the largest path count the loop can see, so nothing is allocated during a sample.
 
-* Compaction is a CUB select of the live paths into the spare buffer, then a pointer swap. Terminated paths are dropped rather than moved to the back, which is why light goes into the image inside `shadeMaterial` (today at the hit that emits it, see [Emission](#emission)) and `finalGather` is gone.
+* Compaction is a CUB select of the live paths into the spare buffer, then a pointer swap. Terminated paths are dropped rather than moved to the back, which is why light goes into the image inside `shadeMaterial` (today at the hit that emits it, see [Emission](#emission)) and `finalGather` is gone. (Since replaced: compaction now happens inside `shadeMaterial`, see [Compaction moved into the shade kernel](#compaction-moved-into-the-shade-kernel).)
 * The sort no longer moves the path structs through every radix pass. It sorts (material key, path index) pairs over only the bits the material count needs (one pass for Cornell instead of four), then gathers paths and intersections into the spare buffers once.
 
 Both operations are out of place and ping-pong: the caller's `dev_paths` and `dev_intersections` point at a different allocation after every call, and the old one becomes the spare.
@@ -268,6 +268,8 @@ Both operations are out of place and ping-pong: the caller's `dev_paths` and `de
 | Before and after, one sample | Buffer ownership through one bounce |
 |:---:|:---:|
 | ![Iteration before and after](img/readme/pathtrace_iteration_before_after.png) | ![Ping pong buffers](img/readme/path_buffer_ping_pong_one_bounce.png) |
+
+The buffer diagram shows this version. Compaction now happens inside shading (next entry): `shadeMaterial` reads the current buffer and writes only the live paths into the spare, so the separate compact step and its CUB select are gone.
 
 **Results.** Cornell, headless, `--tonemap none`, median of 5 interleaved runs per cell, GPU otherwise idle. Every build produces a byte-identical PNG at the same settings (checked with `cmp`), so the rows differ in time only.
 
@@ -282,6 +284,42 @@ Each cell is ms per sample.
 ![ms per sample by build](img/readme/perf_ms_per_spp_1024x1024.png)
 
 At 1024x1024 the frame went from 22.90 to 2.07 ms per sample, 11x. Device LTO is 1.6x of that on its own. The rest is the CUB rewrite: no allocation per call, no copy back, dead paths dropped instead of partitioned to the back.
+
+#### Compaction moved into the shade kernel
+
+Measured 2026-10-03 on the `profile-nsight` branch, material sort off.
+
+**What the profile showed.** In an Nsight Systems capture of Cornell at 1024x1024, the CUB compaction (`DeviceCompactInitKernel` and `DeviceSelectSweepKernel`, once per bounce) took 0.49 ms of a 2.59 ms sample, 19%; on Intel Sponza it was 6%. The select reads every path that `shadeMaterial` has just written and writes the live ones a second time into the spare buffer, and its blocks spend much of that time at a barrier while one warp works out the tile's offset from the tiles before it (44% of the sweep's stall samples sit on that one shared-memory read). The two launches also add two launch gaps per bounce.
+
+**How it works now.** `shadeMaterial` writes the paths that go on straight into the spare buffer, so nothing reads the paths a second time:
+
+1. After shading, each thread knows whether its path is still alive. The warp votes on it with `__ballot_sync`, which gives every lane a 32-bit mask of the surviving lanes.
+2. Lane 0 reserves room for the warp's survivors with one `atomicAdd` on a device counter and passes the base index to the other lanes with `__shfl_sync`.
+3. Each survivor writes its struct to the base plus the number of survivors in the lanes below it (`__popc` of the mask with the higher lanes cleared). A warp's survivors land next to each other, so the stores stay coalesced.
+4. A path that ended is not written anywhere. Its light is already in the image.
+
+Every lane has to reach the vote, so the kernel's early returns became an `alive` flag. The counters are a ring of three on the device: each bounce appends into its own counter and one thread zeroes the counter the next bounce will use, so no counter is reset while anything still reads it. The host still copies the count back after each bounce to size the next launches, and the path buffers still ping-pong.
+
+**The image is unchanged.** The order of the survivors in the buffer now depends on the order in which the warps' atomics land, which varies from run to run. Nothing reads that order: every pixel has exactly one path per sample, and the shading random numbers and the alpha test are seeded with the pixel index, the sample and the bounce, never with a path's position in the array. All 52 renders of the cmp set (13 scenes, both intersection paths, 400x400 and 401x399) are byte-identical to the build before the change.
+
+**Results.** Headless, 1024x1024, 100 spp, median of 5 alternated runs per side, GPU otherwise idle.
+
+| scene | CUB compaction | compaction in shade | saving |
+|---|---|---|---|
+| Cornell | 2.34 | 1.66 | 0.68 (29%) |
+| Intel Sponza | 6.10 | 5.63 | 0.47 (7.7%) |
+
+Each cell is ms per sample.
+
+![ms per sample, CUB compaction against compaction in shade](img/readme/perf_compaction_in_shade.png)
+
+The profile predicted 0.51 ms on Cornell and 0.41 on Intel Sponza. A second Nsight Systems capture of Cornell splits the saving per sample:
+
+- **Compaction kernels**: gone, 0.49 ms.
+- **`shadeMaterial`**: 0.67 to 0.54 ms. It now writes only the survivors, and at bounces 1 to 3 on Cornell 18, 30 and 50% of the paths it used to write had already ended. By bytes alone that is about 0.05 ms; I have not looked into where the rest comes from.
+- **Idle time**: 0.10 ms less, from the two launch gaps per bounce that went with the compaction kernels and slightly shorter waits before each OptiX launch.
+
+**Keeping the alive count on the GPU (tested, left out).** After this change the trace still showed a 51 to 61 µs wait before every OptiX launch: the host copies the survivor count back and waits for it before it can size the next bounce. I tested keeping the count on the device instead, with every bounce launched at the pixel count and each kernel leaving the lanes past the live count idle. The waits in the trace dropped to 7 µs, but the A/B gained only about 0.07 ms per sample on Cornell and 0.1 to 0.2 ms on Intel Sponza. My guess is that much of the wait in the trace was the profiler's own overhead on the copy and sync, since the build with the readback ran at 1.87 ms per sample under Nsight Systems and 1.66 without it. For that gain the host would queue whole samples ahead of the GPU, a kernel error would only show at the end of a render, and the material sort would need its own path, so I left it out.
 
 ### Issues along the way
 
