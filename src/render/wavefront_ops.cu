@@ -3,22 +3,11 @@
 #include "utilities.h"
 
 #include <cub/device/device_radix_sort.cuh>
-#include <cub/device/device_select.cuh>
 
-#include <algorithm>
 #include <utility>
 
 namespace
 {
-// Predicate for stream compaction: keep paths that still have bounces left.
-struct IsAlive
-{
-    __host__ __device__ bool operator()(const PathSegment& p) const
-    {
-        return p.remainingBounces > 0;
-    }
-};
-
 // Workspace, allocated by wavefrontInit. The spare buffers trade places with
 // the caller's buffers on every swap (ping pong)
 int capacity = 0;
@@ -27,9 +16,15 @@ ShadeableIntersection* dev_spareIntersections = nullptr;
 int* dev_indices = nullptr;        // 0, 1, 2, ... as the sort's values
 int* dev_sortedIndices = nullptr;  // source index of each sorted position
 int* dev_sortedKeys = nullptr;     // required by CUB, unused afterwards
-int* dev_numAlive = nullptr;       // compaction's output count
 void* dev_cubTemp = nullptr;
 size_t cubTempBytes = 0;
+
+// Three survivor counters. The current bounce appends into
+// dev_survivorCounts[survivorSlot] and zeroes the next slot; the slot moves on
+// by one per bounce and carries over from one iteration to the next, so no
+// reset is needed between iterations.
+int* dev_survivorCounts = nullptr;
+int survivorSlot = 0;
 
 // Also catches a missing wavefrontInit: CUB treats a null temp pointer as a
 // size query and would return success without doing any work.
@@ -73,18 +68,14 @@ void wavefrontInit(int maxPaths)
     CUDA_CHECK(cudaMalloc(&dev_indices, maxPaths * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&dev_sortedIndices, maxPaths * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&dev_sortedKeys, maxPaths * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&dev_numAlive, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&dev_survivorCounts, 3 * sizeof(int)));
+    CUDA_CHECK(cudaMemset(dev_survivorCounts, 0, 3 * sizeof(int)));
+    survivorSlot = 0;
 
     // With a null temp pointer CUB only reports how much temporary storage it
-    // needs. Ask both algorithms at the largest input and keep the larger
-    // size.
-    size_t selectBytes = 0;
-    CUDA_CHECK(cub::DeviceSelect::If(nullptr, selectBytes, dev_sparePaths, dev_sparePaths,
-        dev_numAlive, maxPaths, IsAlive()));
-    size_t sortBytes = 0;
-    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(nullptr, sortBytes, dev_sortedKeys, dev_sortedKeys,
+    // needs, here for the sort at the largest input.
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(nullptr, cubTempBytes, dev_sortedKeys, dev_sortedKeys,
         dev_indices, dev_sortedIndices, maxPaths));
-    cubTempBytes = std::max(selectBytes, sortBytes);
     CUDA_CHECK(cudaMalloc(&dev_cubTemp, cubTempBytes));
 }
 
@@ -95,7 +86,7 @@ void wavefrontFree()
     cudaFree(dev_indices);
     cudaFree(dev_sortedIndices);
     cudaFree(dev_sortedKeys);
-    cudaFree(dev_numAlive);
+    cudaFree(dev_survivorCounts);
     cudaFree(dev_cubTemp);
 
     dev_sparePaths = nullptr;
@@ -103,29 +94,29 @@ void wavefrontFree()
     dev_indices = nullptr;
     dev_sortedIndices = nullptr;
     dev_sortedKeys = nullptr;
-    dev_numAlive = nullptr;
+    dev_survivorCounts = nullptr;
+    survivorSlot = 0;
     dev_cubTemp = nullptr;
     cubTempBytes = 0;
     capacity = 0;
 }
 
-int compactPaths(PathSegment*& paths, int numPaths, cudaStream_t stream)
+SurvivorBuffer wavefrontSurvivors()
 {
-    checkCapacity(numPaths);
+    return { dev_sparePaths, dev_survivorCounts + survivorSlot, dev_survivorCounts + (survivorSlot + 1) % 3 };
+}
 
-    size_t bytes = cubTempBytes;
-    // Copies every live path from paths to the front of dev_sparePaths and
-    // writes their count to dev_numAlive.
-    CUDA_CHECK(cub::DeviceSelect::If(dev_cubTemp, bytes, paths, dev_sparePaths,
-        dev_numAlive, numPaths, IsAlive(), stream));
-
+int wavefrontSwapPaths(PathSegment*& paths, cudaStream_t stream)
+{
     // The host loop needs the count to size the next launches, so this is the
-    // one synchronization per bounce that cannot be avoided.
+    // one synchronization per bounce.
     int numAlive = 0;
-    CUDA_CHECK(cudaMemcpyAsync(&numAlive, dev_numAlive, sizeof(int), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(&numAlive, dev_survivorCounts + survivorSlot, sizeof(int),
+        cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     std::swap(paths, dev_sparePaths);
+    survivorSlot = (survivorSlot + 1) % 3;
     return numAlive;
 }
 

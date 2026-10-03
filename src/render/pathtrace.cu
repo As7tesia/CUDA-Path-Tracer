@@ -25,8 +25,9 @@
 // the explicit wait after the intersection stage. Off in Release since the
 // 2026-10-02 profile: the two waits per bounce cost 5 to 10% of a sample at
 // 1024x1024 and up to 20% at 400x400 (README, Performance). A kernel error
-// still ends the run, at compactPaths' stream wait in the same bounce, with
-// that call's name instead of the stage's. -DERRORCHECK=1 turns it back on.
+// still ends the run, at wavefrontSwapPaths' stream wait in the same bounce,
+// with that call's name instead of the stage's. -DERRORCHECK=1 turns it back
+// on.
 #ifndef ERRORCHECK
 #ifdef NDEBUG
 #define ERRORCHECK 0
@@ -76,8 +77,9 @@ static glm::vec3* dev_image = NULL;
 static Geom* dev_geoms = NULL;
 static Material* dev_materials = NULL;
 static int* dev_materialIds = NULL;
-// two ping-pong pairs: compactPaths and sortMaterials swap
-// them with the spare buffers in wavefront_ops.cu, so they change every bounce.
+// two ping-pong pairs: wavefrontSwapPaths (after shading) and sortMaterials
+// swap them with the spare buffers in wavefront_ops.cu, so they change every
+// bounce.
 static PathSegment* dev_paths = NULL;
 static ShadeableIntersection* dev_intersections = NULL;
 // The scene's flat mesh arrays (see Scene), read by the naive kernel and by
@@ -131,8 +133,10 @@ void setToneMap(ToneMapMode mode, float exposure)
 // --timing (timing.h): cudaEvents around every stage of every bounce. The
 // time between two consecutive events is what the GPU timeline shows between
 // them, so a stage's time is its kernels plus the launch gaps and any host
-// synchronization inside it (the error checks, compactPaths' readback of
-// the alive count). Sums over iterations; pathtraceTimingReport averages.
+// synchronization inside it (the error checks, wavefrontSwapPaths' readback
+// of the alive count, which is all the compact stage holds since compaction
+// moved into shadeMaterial). Sums over iterations; pathtraceTimingReport
+// averages.
 namespace
 {
 enum Stage { STAGE_INTERSECT, STAGE_SORT, STAGE_SHADE, STAGE_COMPACT, NUM_STAGES };
@@ -476,31 +480,47 @@ static void intersectScene(int iter, int numPaths, int numMaterials)
     );
 }
 
+// The survivor append below takes whole warps.
+static_assert(PATH_BLOCK_SIZE % 32 == 0, "shadeMaterial's blocks must be whole warps");
+
+// Shades paths[0, numPaths) and appends the paths that go on to
+// survivors.paths, compacted: the compaction is fused into shading, so no
+// separate pass reads the paths again to drop the ones that ended.
 __global__ void shadeMaterial(
     int iter,
     int numPaths,
     int depth,
     bool russianRoulette,
     ShadeableIntersection* shadeableIntersections,
-    PathSegment* pathSegments,
+    const PathSegment* pathSegments,
+    SurvivorBuffer survivors,
     Material* materials,
     const cudaTextureObject_t* textures,
     glm::vec3* image)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Every lane of the warp has to reach the ballot at the end, so a lane
+    // with nothing to shade (past numPaths, or a path already ended) skips the
+    // shading instead of returning.
+    //
+    // Work on a register copy of the segment: one coalesced load here and one
+    // store at the end, instead of global traffic on every field access
+    // (scatterPbr takes it by reference, so it would otherwise hit global
+    // memory for every read and write inside).
+    PathSegment seg;
+    bool alive = false;
     if (idx < numPaths)
     {
-        // Work on a register copy of the segment: one coalesced load here and
-        // one store at the end, instead of global traffic on every field access
-        // (scatterPbr takes it by reference, so it would otherwise hit global
-        // memory for every read and write inside).
-        PathSegment seg = pathSegments[idx];
-        if (seg.remainingBounces <= 0) return;
+        seg = pathSegments[idx];
+        alive = seg.remainingBounces > 0;
+    }
+    if (alive)
+    {
         ShadeableIntersection intersection = shadeableIntersections[idx];
 
-        // A path ends by setting remainingBounces to 0, and compaction drops
-        // it next. Its color is not read again: light reaches the image only
-        // through the emission added below.
+        // A path ends by setting remainingBounces to 0 and is then left out
+        // of the survivors. Its color is not read again: light reaches the
+        // image only through the emission added below.
         if (intersection.t <= 0.0f)
         {
             // A miss. Nothing lights the scene from outside yet.
@@ -597,7 +617,32 @@ __global__ void shadeMaterial(
             }
         }
 
-        pathSegments[idx] = seg;
+        alive = seg.remainingBounces > 0;
+    }
+
+    // The warp's survivors take consecutive slots of survivors.paths: lane 0
+    // reserves them with one atomicAdd for the whole warp, and each survivor
+    // writes to the reserved base plus the number of survivors in the lanes
+    // below it. A path that ended is not written anywhere.
+    const unsigned int warpSurvivors = __ballot_sync(0xffffffffu, alive);
+    const unsigned int lane = threadIdx.x % 32;
+    int base = 0;
+    if (lane == 0 && warpSurvivors != 0)
+    {
+        base = atomicAdd(survivors.count, __popc(warpSurvivors));
+    }
+    base = __shfl_sync(0xffffffffu, base, 0);
+    if (alive)
+    {
+        const unsigned int lanesBelow = (1u << lane) - 1u;
+        survivors.paths[base + __popc(warpSurvivors & lanesBelow)] = seg;
+    }
+
+    // The next bounce appends into nextCount. It last held the survivors of
+    // the bounce two back, and nothing reads it anymore.
+    if (idx == 0)
+    {
+        *survivors.nextCount = 0;
     }
 }
 
@@ -644,8 +689,8 @@ void pathtrace(uchar4* pbo, int iter)
     int depth = 0;
     int numPaths = pixelcount;
 
-    // One bounce per pass: intersect, sort by material, shade (which makes the
-    // next rays), and compact away the paths that ended.
+    // One bounce per pass: intersect, sort by material, and shade, which makes
+    // the next rays and compacts away the paths that ended.
     bool iterationComplete = false;
     while (!iterationComplete)
     {
@@ -681,6 +726,8 @@ void pathtrace(uchar4* pbo, int iter)
             CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.eventIndex(depth, STAGE_SORT)]));
         }
 
+        // Shading writes the paths that go on, compacted, into the survivor
+        // buffer; the light of the others is already in the image.
         shadeMaterial<<<numBlocks, PATH_BLOCK_SIZE>>>(
             iter,
             numPaths,
@@ -688,6 +735,7 @@ void pathtrace(uchar4* pbo, int iter)
             useRussianRoulette,
             dev_intersections,
             dev_paths,
+            wavefrontSurvivors(),
             dev_materials,
             dev_textures,
             dev_image
@@ -696,10 +744,8 @@ void pathtrace(uchar4* pbo, int iter)
         {
             CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.eventIndex(depth, STAGE_SHADE)]));
         }
-        // Stream compaction: keep only the live paths; shadeMaterial has
-        // already added the light the others found. Swaps dev_paths for the
-        // compacted copy.
-        numPaths = compactPaths(dev_paths, numPaths);
+        // Swaps dev_paths for the survivors and reads their count back.
+        numPaths = wavefrontSwapPaths(dev_paths);
         if (timing)
         {
             CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.eventIndex(depth, STAGE_COMPACT)]));
