@@ -1,10 +1,12 @@
-// Host-side check of scatterPbr: the mean sample weight is the lobe's
-// directional albedo, integral of f * cos over directions. Compares it to a
-// brute-force integral of the analytic BSDF (uniform sphere sampling) for
-// metal, plastic, glass and clearcoat at a few view angles and roughnesses,
-// and fuzzes random inputs for NaN / Inf / negative weights. Every check
-// prints a line, and the exit code is nonzero when one fails. Built by the
-// bsdf_test target (CMakeLists.txt, outside the default build); the README's
+// Host-side check of scatterPbr and evalPbr: the mean sample weight is the
+// lobe's directional albedo, integral of f * cos over directions. Compares it
+// to a brute-force integral of the analytic BSDF (uniform sphere sampling)
+// for metal, plastic, glass and clearcoat at a few view angles and
+// roughnesses. Then evalPbr: its f * cos against the same analytic BSDF, and
+// its pdf against what scatterPbr actually samples. Last, fuzzes random
+// inputs for NaN / Inf / negative weights and pdfs. Every check prints a
+// line, and the exit code is nonzero when one fails. Built by the bsdf_test
+// target (CMakeLists.txt, outside the default build); the README's
 // "Checking the BSDF" table comes from its output.
 #include "render/bsdf.cu"
 
@@ -195,6 +197,112 @@ int main()
         }
     }
 
+    // evalPbr. Its f * cos against the analytic BSDF above at random
+    // directions (front side only, as fcos is written). Its pdf against
+    // scatterPbr's samples, from both sides of glass: the pdf integrates to
+    // the share of samples scatterPbr keeps, and f * cos / pdf over those
+    // samples averages to the albedo they estimate with their own weights.
+    {
+        const int M = 1 << 16;
+        const int N2 = 1 << 20;
+        printf("\n%-15s %5s %6s %7s  %9s  %-15s %5s  %-26s %5s\n", "case", "rough", "theta", "side", "max error",
+            "pdf int / kept", "z", "mean f cos / pdf", "z");
+        for (const Case& c : cases)
+        {
+            for (bool outside : { true, false })
+            {
+                if (!outside && c.s.transmission == 0.0f)
+                {
+                    continue;
+                }
+                for (float theta : { 0.1f, 0.8f, 1.3f })
+                {
+                    const glm::vec3 n(0, 0, 1);
+                    const glm::vec3 wo(sinf(theta), 0, cosf(theta));
+                    thrust::default_random_engine rng(4321);
+                    thrust::uniform_real_distribution<float> u01(0, 1);
+                    auto uniformSphere = [&]() {
+                        const float z = 1 - 2 * u01(rng);
+                        const float r = sqrtf(fmaxf(0, 1 - z * z));
+                        const float phi = TWO_PI * u01(rng);
+                        return glm::vec3(r * cosf(phi), r * sinf(phi), z);
+                    };
+
+                    // Largest difference to fcos relative to its value (plus a
+                    // floor for the near-zero ones), over random directions.
+                    double maxError = 0.0;
+                    if (outside)
+                    {
+                        for (int i = 0; i < M; ++i)
+                        {
+                            const glm::vec3 wi = uniformSphere();
+                            const glm::vec3 e = evalPbr(wo, wi, n, true, c.m, c.s).fCos;
+                            const glm::vec3 r = fcos(c, wo, wi);
+                            maxError = fmax(maxError, maxComponent(glm::abs(e - r)) / (maxComponent(r) + 1e-3));
+                        }
+                    }
+
+                    Estimate pdfIntegral;
+                    for (int i = 0; i < N2; ++i)
+                    {
+                        pdfIntegral.add(glm::dvec3(evalPbr(wo, uniformSphere(), n, outside, c.m, c.s).pdf * 4.0 * PI));
+                    }
+                    Estimate weights;
+                    Estimate ratios;
+                    int kept = 0;
+                    int pdfMismatches = 0;
+                    for (int i = 0; i < N2; ++i)
+                    {
+                        PathSegment p{};
+                        p.ray.direction = -wo;
+                        p.color = glm::vec3(1.0f);
+                        if (scatterPbr(p, glm::vec3(0.0f), n, outside, c.m, c.s, rng))
+                        {
+                            ++kept;
+                            weights.add(glm::dvec3(p.color));
+                            const BsdfEval e = evalPbr(wo, p.ray.direction, n, outside, c.m, c.s);
+                            if (e.pdf > 0.0f)
+                            {
+                                ratios.add(glm::dvec3(e.fCos / e.pdf));
+                            }
+                            pdfMismatches += p.pdf != e.pdf;
+                        }
+                    }
+
+                    const double keptShare = kept / (double)N2;
+                    const double keptSe = sqrt(keptShare * (1.0 - keptShare) / N2);
+                    const double pdfMean = pdfIntegral.mean(N2).x;
+                    const double pdfSe = pdfIntegral.standardError(N2).x;
+                    const double zPdf = fabs(pdfMean - keptShare) / sqrt(pdfSe * pdfSe + keptSe * keptSe);
+                    const glm::dvec3 ratioMean = ratios.mean(N2);
+                    const glm::dvec3 weightMean = weights.mean(N2);
+                    const glm::dvec3 ratioSe = ratios.standardError(N2);
+                    const glm::dvec3 weightSe = weights.standardError(N2);
+                    // Pure Lambert has no variance: every weight is the base
+                    // color, and every f * cos / pdf is too up to float
+                    // rounding, so a zero error allows for that rounding.
+                    double zRatio = 0.0;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const double se = sqrt(ratioSe[k] * ratioSe[k] + weightSe[k] * weightSe[k]);
+                        const double diff = fabs(ratioMean[k] - weightMean[k]);
+                        zRatio = fmax(zRatio, se > 0.0 ? diff / se : (diff > 1e-5 * weightMean[k] ? INFINITY : 0.0));
+                    }
+                    const bool ok = check(maxError <= 2e-3 && zPdf <= MAX_SIGMA && zRatio <= MAX_SIGMA
+                        && pdfMismatches == 0);
+                    printf("%-15s %5.2f %6.2f %7s  %9.2e  %.4f %.4f  %5.2f  %.4f %.4f %.4f  %5.2f%s\n", c.name,
+                        c.s.roughness, theta, outside ? "front" : "inside", maxError, pdfMean, keptShare, zPdf,
+                        ratioMean.x, ratioMean.y, ratioMean.z, zRatio, ok ? "" : "  FAIL");
+                    if (pdfMismatches > 0)
+                    {
+                        printf("  %d samples whose path.pdf differs from evalPbr's pdf\n", pdfMismatches);
+                    }
+                }
+            }
+        }
+        printf("\n");
+    }
+
     // Smooth limits: exact albedos.
     {
         Case c = cases[0];
@@ -204,12 +312,18 @@ int main()
         const glm::vec3 wo = glm::normalize(glm::vec3(0.5f, 0.2f, 0.8f));
         p.ray.direction = -wo;
         p.color = glm::vec3(1);
+        p.pdf = -1;
         const bool scattered = scatterPbr(p, glm::vec3(0), glm::vec3(0, 0, 1), true, c.m, c.s, rng);
         const glm::vec3 F = schlickFresnel(c.s.baseColor, wo.z);
         const glm::vec3 mirror(-wo.x, -wo.y, wo.z);
-        const bool ok = check(scattered && glm::length(p.color - F) < 1e-6f && glm::length(p.ray.direction - mirror) < 1e-6f);
-        printf("smooth metal: weight %.4f %.4f %.4f expected %.4f %.4f %.4f, dir %.4f %.4f %.4f%s\n", p.color.x, p.color.y,
-            p.color.z, F.x, F.y, F.z, p.ray.direction.x, p.ray.direction.y, p.ray.direction.z, ok ? "" : "  FAIL");
+        // A smooth lobe's direction is one a light sample cannot take: pdf 0,
+        // and evalPbr gives nothing at that very direction.
+        const BsdfEval e = evalPbr(wo, mirror, glm::vec3(0, 0, 1), true, c.m, c.s);
+        const bool ok = check(scattered && glm::length(p.color - F) < 1e-6f && glm::length(p.ray.direction - mirror) < 1e-6f
+            && p.pdf == 0.0f && e.pdf == 0.0f && e.fCos == glm::vec3(0.0f));
+        printf("smooth metal: weight %.4f %.4f %.4f expected %.4f %.4f %.4f, dir %.4f %.4f %.4f, pdf %g, eval %g%s\n",
+            p.color.x, p.color.y, p.color.z, F.x, F.y, F.z, p.ray.direction.x, p.ray.direction.y, p.ray.direction.z, p.pdf,
+            e.pdf, ok ? "" : "  FAIL");
     }
     {
         // smooth glass from inside at a TIR angle and at a transmitting angle
@@ -278,14 +392,30 @@ int main()
             p.ray.direction = -wo;
             p.color = glm::vec3(1);
             const bool outside = u01(rng) < 0.5f;
+
+            // evalPbr at a random direction: finite and not negative.
+            {
+                const float z = 1 - 2 * u01(rng);
+                const float r = sqrtf(fmaxf(0, 1 - z * z));
+                const float phi = TWO_PI * u01(rng);
+                const BsdfEval e = evalPbr(wo, glm::vec3(r * cosf(phi), r * sinf(phi), z), n, outside, c.m, c.s);
+                if (!(std::isfinite(e.fCos.x) && std::isfinite(e.fCos.y) && std::isfinite(e.fCos.z) && std::isfinite(e.pdf))
+                    || e.fCos.x < 0 || e.fCos.y < 0 || e.fCos.z < 0 || e.pdf < 0)
+                {
+                    if (bad < 5) printf("bad eval %d: f cos %g %g %g pdf %g\n", i, e.fCos.x, e.fCos.y, e.fCos.z, e.pdf);
+                    ++bad;
+                }
+            }
+
             if (scatterPbr(p, glm::vec3(0), n, outside, c.m, c.s, rng))
             {
                 const glm::vec3 w = p.color;
                 const glm::vec3 d = p.ray.direction;
                 if (!(std::isfinite(w.x) && std::isfinite(w.y) && std::isfinite(w.z)) || w.x < 0 || w.y < 0 || w.z < 0
-                    || !(std::isfinite(d.x) && std::isfinite(d.y) && std::isfinite(d.z)) || fabsf(glm::length(d) - 1) > 1e-3f)
+                    || !(std::isfinite(d.x) && std::isfinite(d.y) && std::isfinite(d.z)) || fabsf(glm::length(d) - 1) > 1e-3f
+                    || !std::isfinite(p.pdf) || p.pdf < 0)
                 {
-                    if (bad < 5) printf("bad sample %d: w %g %g %g d %g %g %g\n", i, w.x, w.y, w.z, d.x, d.y, d.z);
+                    if (bad < 5) printf("bad sample %d: w %g %g %g d %g %g %g pdf %g\n", i, w.x, w.y, w.z, d.x, d.y, d.z, p.pdf);
                     ++bad;
                 }
                 maxWeight = std::max(maxWeight, (double)maxComponent(w));

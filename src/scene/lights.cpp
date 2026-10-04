@@ -8,9 +8,13 @@
 //   point light         4 pi * luminance(intensity)
 //   distant light       pi * r^2 * luminance(irradiance), r the scene's bounding sphere
 //
-// A triangle's power uses its material's emission factor and ignores the
-// emissive texture, so a point is picked uniformly over the triangle's area.
-// The area then cancels out of the density per unit area,
+// A triangle's emission is its material's emission factor times the average
+// color of the material's emissive texture over the whole image, as PBRT-v4
+// weighs an image area light. A material that glows in a few spots of a
+// mostly black texture, like DamagedHelmet's, then gets few of the picks.
+// Within a triangle the point is picked uniformly by area, whatever the
+// texture holds there. The emission is the same for every triangle of a
+// material, so the area cancels out of the density per unit area,
 //
 //   P_pick / area = 2 pi * luminance(emission) / total power,
 //
@@ -41,6 +45,28 @@ const int CUBE_TRIANGLES[12][3] = {
     {0, 2, 3}, {0, 3, 1},   // -z
     {4, 7, 6}, {4, 5, 7},   // +z
 };
+
+// A texture's average color over its whole image, linear, as the texture
+// unit reads it: an sRGB texture is decoded first.
+glm::vec3 averageColor(const Texture& texture, const TextureImage& image)
+{
+    float decode[256];
+    for (int i = 0; i < 256; ++i)
+    {
+        const float v = i / 255.0f;
+        decode[i] = !texture.srgb ? v : v <= 0.04045f ? v / 12.92f : powf((v + 0.055f) / 1.055f, 2.4f);
+    }
+    double sum[3] = { 0.0, 0.0, 0.0 };
+    const size_t texels = (size_t)image.width * image.height;
+    for (size_t i = 0; i < texels; ++i)
+    {
+        for (int c = 0; c < 3; ++c)
+        {
+            sum[c] += decode[image.rgba[4 * i + c]];
+        }
+    }
+    return texels > 0 ? glm::vec3(sum[0], sum[1], sum[2]) / (float)texels : glm::vec3(1.0f);
+}
 }  // namespace
 
 void Scene::buildLights()
@@ -75,6 +101,28 @@ void Scene::buildLights()
         g.materialId = found->second;
     }
 
+    // Each material's emission for weighing its triangles: the factor times
+    // its emissive texture's average color, each texture averaged once.
+    std::vector<glm::vec3> emission(materials.size(), glm::vec3(0.0f));
+    std::unordered_map<int, glm::vec3> textureAverages;
+    for (size_t m = 0; m < materials.size(); ++m)
+    {
+        const Material& material = materials[m];
+        emission[m] = material.emission;
+        if (maxComponent(material.emission) <= 0.0f || material.emissiveTexture < 0)
+        {
+            continue;
+        }
+        auto found = textureAverages.find(material.emissiveTexture);
+        if (found == textureAverages.end())
+        {
+            const Texture& texture = textures[material.emissiveTexture];
+            found = textureAverages.emplace(material.emissiveTexture,
+                averageColor(texture, textureImages[texture.image])).first;
+        }
+        emission[m] *= found->second;
+    }
+
     // Every triangle of an emissive cube or mesh, in world space.
     lightTriangles.clear();
     std::vector<double> power;
@@ -102,12 +150,13 @@ void Scene::buildLights()
         if (area > 0.0)  // a degenerate triangle has nothing to pick
         {
             lightTriangles.push_back(t);
-            power.push_back(2.0 * PI * area * luminance(materials[g.materialId].emission));
+            power.push_back(2.0 * PI * area * luminance(emission[g.materialId]));
         }
     };
     for (const Geom& g : geoms)
     {
-        if (g.type == GeomType::SPHERE || maxComponent(materials[g.materialId].emission) <= 0.0f)
+        // A black emissive texture leaves nothing to pick either.
+        if (g.type == GeomType::SPHERE || luminance(emission[g.materialId]) <= 0.0f)
         {
             continue;
         }
@@ -179,7 +228,7 @@ void Scene::buildLights()
 
     for (const LightTriangle& t : lightTriangles)
     {
-        emitterAreaPdf[t.materialId] = (float)(2.0 * PI * luminance(materials[t.materialId].emission) / total);
+        emitterAreaPdf[t.materialId] = (float)(2.0 * PI * luminance(emission[t.materialId]) / total);
     }
     for (size_t i = 0; i < punctualLights.size(); ++i)
     {

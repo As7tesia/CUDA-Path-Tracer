@@ -208,7 +208,7 @@ Transmission is a solid boundary: the ray refracts through the ior on the way in
 
 #### Emission
 
-Emission is `emissiveFactor` x emissive texture x `emissiveStrength`. The shade kernel adds throughput x emission to the pixel at every hit and the path goes on, so an emitter also reflects. This is the only place light reaches the image: a path that ends (a miss, its last bounce, Russian roulette, a sample that carries no light) adds nothing. The clearcoat sits above the emission and darkens it by 1 - clearcoat x Fresnel(0.04, n·v), on the air side only like the coat lobe.
+Emission is `emissiveFactor` x emissive texture x `emissiveStrength`. The shade kernel adds throughput x emission to the pixel at every hit and the path goes on, so an emitter also reflects. With next event estimation on, that emission is weighed against the light samples (see NEE and MIS below). The clearcoat sits above the emission and darkens it by 1 - clearcoat x Fresnel(0.04, n·v), on the air side only like the coat lobe.
 
 #### Normal maps
 
@@ -248,6 +248,91 @@ The three Khronos material tests ship without lights, so their scene files add a
 - **ClearCoatTest**: the middle column combines the base layer's broad highlight (left) with the coating's sharp one (right). Four of its rows depend on clearcoat textures, which are not read, so their coat is uniform.
 - **DamagedHelmet**: normal map (tangents from MikkTSpace), metallic-roughness map and the emissive lamps.
 
+### NEE and MIS
+
+Without next event estimation, light reaches the image only when a path happens to hit an emitter or leaves the scene into the environment, so a small light is found by few paths and a point light by none. With it, every hit except a path's last also picks a point on a light and sends a shadow ray toward it. The two strategies then estimate the same direct light: the light sample, and a BSDF-sampled ray that hits the emitter. Multiple importance sampling (MIS) splits each direction's light between them with the power heuristic (Veach 1997), w = p² / (p² + p_other²), from the two strategies' densities for that direction. The two weights add up to 1, so every direction's light counts once.
+
+Per hit, the shade kernel:
+
+1. Adds the hit's emission x throughput x the BSDF side's weight. A camera ray, a ray from a smooth lobe and an emitter NEE does not sample keep weight 1, since no light sample could have taken that direction.
+2. On every hit but the path's last, picks a light and a point on it, evaluates the BSDF toward it (`evalPbr`) and queues a shadow ray carrying throughput x f·cos x Le / p_light x w.
+3. Runs Russian roulette, after the light sample as in PBRT, so a path that ends here still gets its direct light.
+4. Samples the next direction (`scatterPbr`), which now also stores the BSDF's pdf for it in `PathSegment::pdf`, for step 1 at the next hit.
+
+`--no-nee` and a checkbox in the viewport panel turn NEE off and leave BSDF sampling alone. NEE needs OptiX, since the OptiX launch traces the shadow rays, so `--no-optix` renders without it.
+
+#### Lights and their pdf
+
+At load, `src/scene/lights.cpp` builds one list of everything NEE can pick, each light with a probability proportional to its power:
+
+| light | from | power |
+|---|---|---|
+| emissive triangle | glTF meshes, and scene JSON cubes as their 12 triangles | 2π x area x luminance(emission) |
+| point light | `KHR_lights_punctual` | 4π x luminance(intensity) |
+| distant light | `KHR_lights_punctual` directional lights, the research scenes' PBRT distant lights | π r² x luminance(irradiance), r the scene's bounding sphere |
+
+Emitters glow from both sides, hence 2π, and a triangle's emission is its material's emission factor times its emissive texture's average color (see the last subsection). Emissive spheres stay out of the list, so a BSDF-sampled ray that hits one keeps all of its emission, and so does the environment for now: a path that misses adds it in full. glTF gives a point light's intensity in candela and a directional light's in lux, and the loader divides both by 683 lm/W to get back the radiant units Blender's exporter converts from (Bistro's files come from it). A floor under a 400 W point light (21,740.6 cd as the exporter writes it) and under a sun of strength 1 (683 lux) matches Cycles within 0.4%.
+
+The shade kernel picks a light with a binary search over the running sum of the powers and a point on a triangle uniformly by area. The density of landing on a point of a triangle is then its pick probability over its area, 2π x luminance(emission) / total power: the area cancels, so it is one number per material. Over directions it becomes
+
+```
+p_light(ω) = (2π x luminance(emission) / total power) x d² / |cos θ_light|
+```
+
+with d the distance to the point and θ_light the angle at the light. A BSDF-sampled ray that hits an emitter computes the same value from its material id, its length t and the cosine at the hit. That cosine has to be the flat triangle's, as in the light sample, not the interpolated normal's, so the OptiX hit programs write it into `ShadeableIntersection::cosGeometric`. Point and distant lights are deltas, which no ray can hit, and their samples count with weight 1.
+
+#### The BSDF side
+
+`evalPbr` (`src/render/bsdf.cu`) returns f·cos and the pdf at a direction it did not pick, summed over the lobes with the probabilities `scatterPbr` picks them with. Those probabilities depend on the outgoing direction alone, so the mixture's pdf is exact. Smooth lobes (roughness below 0.01) add nothing to either, since they reflect or refract into one direction, which a light sample never lands on. Rough refraction needed a term that sampling never computes, because there D and the Jacobian cancel: the generalized half vector and its Jacobian from Walter et al. 2007. The BSDF test checks `evalPbr` three ways: f·cos against the analytic BSDF at random directions, the pdf integrated over the sphere against the share of samples `scatterPbr` keeps, and f·cos / pdf over `scatterPbr`'s own samples against their mean weight.
+
+#### Shadow rays
+
+`shadeMaterial` is a plain CUDA kernel and cannot call `optixTrace`, which only runs inside an OptiX launch. It queues each light sample as a shadow ray instead (origin, direction, a tMax just short of the light, the finished contribution, the pixel), with the same warp ballot and one atomicAdd per warp as the surviving paths. I chose to trace them in the next bounce's intersection launch rather than a launch of their own: launch indices below the path count trace path rays, the ones past it trace shadow rays. A shadow ray stops at the first hit it finds and runs no closest-hit program. The alpha any-hit still runs, with a seed of its own, so cut-outs let light through. A shadow ray that reaches tMax has nothing in its way, and its miss program adds the contribution to the pixel. The launch is as wide as the number of paths that queued rays, a bound the host already has, and raygen reads the real count from device memory, so a bounce still reads back only the survivor count. After the last bounce, one launch traces the queue that is left.
+
+#### Comparisons
+
+Veach MIS, 1024x1024, 64 spp, AgX, OptiX.
+
+| BSDF sampling only | NEE + MIS |
+|:---:|:---:|
+| ![Veach MIS, BSDF sampling only](img/readme/nee_veach_bsdf_only.png) | ![Veach MIS, NEE and MIS](img/readme/nee_veach_nee_mis.png) |
+
+- **Veach MIS**: four lights of very different sizes over plates of increasing roughness, the case MIS was made for. The RMSE of the displayed image against a 4096 spp render drops from 62.8 to 9.1 (of 255), 48x less variance, at 2.34 against 1.46 ms/spp.
+
+#### Checking it
+
+Both strategies estimate the same light, so with enough samples NEE + MIS and BSDF sampling alone have to converge to the same image. `--out name.hdr` saves the scene-linear average without the view transform, which these numbers come from. PNGs are not a fair test here: BSDF sampling's fireflies clip at 255, which made NEE look 2% brighter on Veach MIS.
+
+| scene, 320x320, 4096 spp | mean, NEE + MIS / BSDF only |
+|---|---|
+| cornell | 1.0003 |
+| cornell_glass | 1.0006 |
+| transmission_roughness | 1.0004 |
+| clearcoat | 0.9999 |
+| dragon_attenuation | 1.0003 |
+| sponza | 0.9994 |
+| cornell_helmet | 1.0004 |
+| veach-mis (640x360, 16384 spp) | 0.9997 |
+
+Per 16x16 block the median difference is at most 0.11%, on Sponza.
+
+#### Emissive textures in the light power
+
+A triangle's power used to be 2π x area x the luminance of its material's emission factor alone. DamagedHelmet's emission factor is 1 over the whole helmet, while its emissive texture is black except for the lamp details (its texels average a luminance of 0.002). In `cornell_helmet` the helmet therefore counted as brighter than the ceiling light (981 against 569) and drew 63% of the light picks. Nearly every one of those samples landed on a black texel and returned nothing, and the ceiling light, which lights the room, got the remaining 37%. ClearCoatTest's labels, white text on a black emissive texture, had the same problem.
+
+Each material's emission is now weighed as its emission factor times the average color of its emissive texture over the whole image, the way PBRT-v4 weighs an image area light, and the helmet's share drops to 0.3%. A point is still picked uniformly by area within its triangle, whatever the texture holds there, so the density stays one number per material. `cornell_helmet` is the only scene here where this shows: in Bistro and ClearCoatTest the textured emitters never took a large share of the picks.
+
+`cornell_helmet`, 1024x1024, 64 spp, AgX. Bottom row: the floor in front of the helmet at 2x.
+
+| Before: emission factor only | After: factor x texture average |
+|:---:|:---:|
+| ![Light power from the emission factor only](img/readme/nee_emissive_texture_before.png) | ![Light power with the emissive texture's average](img/readme/nee_emissive_texture_after.png) |
+| ![Floor crop, before](img/readme/nee_emissive_texture_before_crop.png) | ![Floor crop, after](img/readme/nee_emissive_texture_after_crop.png) |
+
+- **Noise**: the RMSE of the displayed image against a 4096 spp render drops from 12.9 to 9.2 (of 255), 49% less variance, about what twice the samples would give. Most of the noise left in the room is indirect light, which the light picks do not touch.
+- **Mean**: unchanged, and at 4096 spp the render still matches BSDF sampling alone within 0.04%.
+- **Frame time**: 3.0 against 2.9 ms/spp.
+
 ### Performance optimization
 
 The renderer was profiled in two passes on 2026-10-02: the first with per-stage timing, the second with Nsight Systems and Nsight Compute. The first pass changed two defaults: the material sort is off (its gather cost 2 to 3.5x the frame on every scene and saved the shade kernel at most 0.3 ms), and the per-stage error-check waits are off in Release (5 to 10% at 1024x1024). The first entry below is the earlier optimization both build on; the second came out of the Nsight pass.
@@ -261,7 +346,7 @@ Measured 2026-09-25, before the glTF materials.
 **The current version uses CUB with a workspace allocated once.** All scratch memory (spare path and intersection buffers, the sort's index arrays, CUB's temporary storage) is allocated in `wavefrontInit` at the largest path count the loop can see, so nothing is allocated during a sample.
 
 * Compaction is a CUB select of the live paths into the spare buffer, then a pointer swap. Terminated paths are dropped rather than moved to the back, which is why light goes into the image inside `shadeMaterial` (today at the hit that emits it, see [Emission](#emission)) and `finalGather` is gone. (Since replaced: compaction now happens inside `shadeMaterial`, see [Compaction moved into the shade kernel](#compaction-moved-into-the-shade-kernel).)
-* The sort no longer moves the path structs through every radix pass. It sorts (material key, path index) pairs over only the bits the material count needs (one pass for Cornell instead of four), then gathers paths and intersections into the spare buffers once.
+* The sort no longer moves the path strubcts through every radix pass. It sorts (material key, path index) pairs over only the bits the material count needs (one pass for Cornell instead of four), then gathers paths and intersections into the spare buffers once.
 
 Both operations are out of place and ping-pong: the caller's `dev_paths` and `dev_intersections` point at a different allocation after every call, and the old one becomes the spare.
 
