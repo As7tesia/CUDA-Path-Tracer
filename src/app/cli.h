@@ -10,7 +10,7 @@ struct Options
 {
     std::string sceneFile;       // a path, or a name for findSceneFile (scene.h)
     bool list = false;           // --list: print the scene names and exit
-    SceneOverrides overrides;    // --res, --spp, --depth
+    SceneOverrides overrides;    // --res, --spp, --depth, --env
     bool headless = false;
     std::string outPath;         // empty: img/auto_saved/<FILE>.<time>.<spp>samp.png
     ToneMapMode toneMap = TONEMAP_AGX_PUNCHY;

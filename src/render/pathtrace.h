@@ -19,6 +19,9 @@ void setGuiData(GuiDataContainer* data);
 void pathtraceInit(Scene *scene);
 void pathtraceFree();
 void pathtraceReset();
+// Replaces the environment pathtraceInit uploaded with env, for the window's
+// environment picker. The caller restarts the image.
+void pathtraceSetEnvironment(const Environment& env);
 // Copies the accumulation buffer into scene->state.image. Only saveImage needs
 // the host copy, so it is done on demand rather than every iteration.
 void pathtraceDownloadImage();

@@ -250,7 +250,7 @@ The three Khronos material tests ship without lights, so their scene files add a
 
 ### Performance optimization
 
-The renderer's profile is being redone on the `profile-nsight` branch around Nsight Systems and Nsight Compute. The first pass (2026-10-02) changed two defaults: the material sort is off (its gather cost 2 to 3.5x the frame on every scene and saved the shade kernel at most 0.3 ms), and the per-stage error-check waits are off in Release (5 to 10% at 1024x1024). The first entry below is the earlier optimization both build on; the second came out of the new profile.
+The renderer was profiled in two passes on 2026-10-02: the first with per-stage timing, the second with Nsight Systems and Nsight Compute. The first pass changed two defaults: the material sort is off (its gather cost 2 to 3.5x the frame on every scene and saved the shade kernel at most 0.3 ms), and the per-stage error-check waits are off in Release (5 to 10% at 1024x1024). The first entry below is the earlier optimization both build on; the second came out of the Nsight pass.
 
 #### Compaction and sort: thrust to CUB with device LTO
 
@@ -287,7 +287,7 @@ At 1024x1024 the frame went from 22.90 to 2.07 ms per sample, 11x. Device LTO is
 
 #### Compaction moved into the shade kernel
 
-Measured 2026-10-03 on the `profile-nsight` branch, material sort off.
+Measured 2026-10-03, material sort off.
 
 **What the profile showed.** In an Nsight Systems capture of Cornell at 1024x1024, the CUB compaction (`DeviceCompactInitKernel` and `DeviceSelectSweepKernel`, once per bounce) took 0.49 ms of a 2.59 ms sample, 19%; on Intel Sponza it was 6%. The select reads every path that `shadeMaterial` has just written and writes the live ones a second time into the spare buffer, and its blocks spend much of that time at a barrier while one warp works out the tile's offset from the tiles before it (44% of the sweep's stall samples sit on that one shared-memory read). The two launches also add two launch gaps per bounce.
 

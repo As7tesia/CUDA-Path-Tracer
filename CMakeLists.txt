@@ -83,6 +83,7 @@ set(headers
     src/optix/optix_intersect.h
     src/optix/optix_params.h
     src/render/bsdf.h
+    src/render/environment.h
     src/render/intersections.h
     src/render/mesh_hit.h
     src/render/pathtrace.h
@@ -91,6 +92,7 @@ set(headers
     src/render/textures.h
     src/render/tonemap.h
     src/render/wavefront_ops.h
+    src/scene/environment.h
     src/scene/gltf_loader.h
     src/scene/scene.h
     src/scene/sceneStructs.h
@@ -110,6 +112,7 @@ set(sources
     src/render/pathtrace.cu
     src/render/textures.cpp
     src/render/wavefront_ops.cu
+    src/scene/environment.cpp
     src/scene/gltf_loader.cpp
     src/scene/scene.cpp
     src/stb.cpp

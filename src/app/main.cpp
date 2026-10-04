@@ -72,6 +72,17 @@ static char scenePath[1024] = "";
 static std::string requestedScene;
 static std::string loadError;       // why the last load failed, until the next one
 
+// The panel's environment section, run the same way: the maps in
+// ENVIRONMENT_DIR are listed once at startup, and a load happens after the
+// frame that asked for it. A map loaded here replaces the scene file's own
+// environment and stays through later scene switches, as --env does.
+static std::vector<std::string> environmentList;
+static int selectedEnvironment = -1;
+static char environmentPath[1024] = "";
+static bool environmentRequested = false;
+static std::string requestedEnvironment;  // a map file; empty: the scene file's own
+static std::string environmentError;     // why the last load failed, until the next one
+
 static int width;
 static int height;
 
@@ -90,6 +101,7 @@ static void flyFromKeys(float seconds);
 static void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods);
 static void framebufferSizeCallback(GLFWwindow* window, int fbWidth, int fbHeight);
 static void switchScene(const std::string& argument);
+static void switchEnvironment(const std::string& file);
 static void mousePositionCallback(GLFWwindow* window, double xpos, double ypos);
 static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
 static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset);
@@ -287,6 +299,22 @@ static bool init()
     return true;
 }
 
+// The environment section's name for what renders: the map the panel or
+// --env loaded, else the scene file's own.
+static std::string environmentLabel()
+{
+    if (!options.overrides.environmentFile.empty())
+    {
+        return std::filesystem::path(options.overrides.environmentFile).filename().string();
+    }
+    const EnvironmentSource& own = scene->environmentSource;
+    if (!own.file.empty())
+    {
+        return std::filesystem::path(own.file).filename().string() + " (the scene's)";
+    }
+    return maxComponent(own.radiance) > 0.0f ? "one color (the scene's)" : "none";
+}
+
 // The "Path Tracer Analytics" panel over the viewport.
 static void renderImGui()
 {
@@ -338,6 +366,54 @@ static void renderImGui()
     {
         ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
         ImGui::TextColored(ImVec4(0.8f, 0.1f, 0.1f, 1.0f), "%s", loadError.c_str());
+        ImGui::PopTextWrapPos();
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Environment: %s", environmentLabel().c_str());
+    ImGui::SetNextItemWidth(240);
+    const std::string environmentPreview = selectedEnvironment >= 0
+        ? std::filesystem::path(environmentList[selectedEnvironment]).filename().string()
+        : environmentList.empty() ? "no maps in " + ENVIRONMENT_DIR : "pick a map";
+    if (ImGui::BeginCombo("##environment", environmentPreview.c_str()))
+    {
+        for (int i = 0; i < (int)environmentList.size(); ++i)
+        {
+            const std::string name = std::filesystem::path(environmentList[i]).filename().string();
+            if (ImGui::Selectable(name.c_str(), i == selectedEnvironment))
+            {
+                selectedEnvironment = i;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load##environment") && selectedEnvironment >= 0)
+    {
+        environmentRequested = true;
+        requestedEnvironment = environmentList[selectedEnvironment];
+    }
+    ImGui::SetNextItemWidth(240);
+    if (ImGui::InputTextWithHint("##environmentPath", "or a .hdr / .exr path, Enter loads", environmentPath,
+            sizeof environmentPath, ImGuiInputTextFlags_EnterReturnsTrue) && environmentPath[0] != '\0')
+    {
+        environmentRequested = true;
+        requestedEnvironment = environmentPath;
+    }
+    if (!options.overrides.environmentFile.empty() && ImGui::Button("Back to the scene's own"))
+    {
+        environmentRequested = true;
+        requestedEnvironment.clear();
+    }
+    if (environmentRequested)
+    {
+        ImGui::Text("Loading %s ...", requestedEnvironment.empty() ? "the scene's environment"
+                                                                   : requestedEnvironment.c_str());
+    }
+    else if (!environmentError.empty())
+    {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+        ImGui::TextColored(ImVec4(0.8f, 0.1f, 0.1f, 1.0f), "%s", environmentError.c_str());
         ImGui::PopTextWrapPos();
     }
     ImGui::End();
@@ -392,6 +468,11 @@ static void mainLoop()
             switchScene(requestedScene);
             requestedScene.clear();
         }
+        if (environmentRequested)
+        {
+            switchEnvironment(requestedEnvironment);
+            environmentRequested = false;
+        }
     }
 
     pathtraceFree();
@@ -433,7 +514,8 @@ static void useScene(Scene* s, const std::string& file)
 }
 
 // Replaces the window's scene with the one argument names (a path or a
-// name, as on the command line; the same --res / --spp / --depth apply).
+// name, as on the command line; the same --res / --spp / --depth apply, and
+// the environment map from --env or the panel).
 // The new scene is read first, so a bad one leaves the old scene in place
 // with the error in the panel. Then the device buffers, the pixel buffer,
 // the display texture and the window are remade at the new resolution.
@@ -475,6 +557,44 @@ static void switchScene(const std::string& argument)
     glfwSetWindowSize(window, width, height);
 }
 
+// The combo follows the map that renders, when it is in the list
+static void selectEnvironmentInList()
+{
+    selectedEnvironment = -1;
+    for (int i = 0; i < (int)environmentList.size(); ++i)
+    {
+        if (environmentList[i] == options.overrides.environmentFile)
+        {
+            selectedEnvironment = i;
+        }
+    }
+}
+
+// Replaces the environment with the map file names (strength 1, no
+// rotation, like --env), or with the scene file's own when file is empty.
+// Only the environment texture is remade, not the scene. A map that does not
+// load leaves the current one, with the error in the panel.
+static void switchEnvironment(const std::string& file)
+{
+    try
+    {
+        scene->environment = loadEnvironment(file.empty()
+                ? scene->environmentSource
+                : EnvironmentSource{ file, glm::vec3(1.0f), 0.0f });
+    }
+    catch (const std::exception& e)
+    {
+        environmentError = e.what();
+        fprintf(stderr, "error: %s\n", environmentError.c_str());
+        return;
+    }
+    environmentError.clear();
+    options.overrides.environmentFile = file;  // later scene switches keep it
+    selectEnvironmentInList();
+    pathtraceSetEnvironment(scene->environment);
+    camchanged = true;  // the image starts over
+}
+
 //-------------------------------
 //-------------MAIN--------------
 //-------------------------------
@@ -506,6 +626,7 @@ int main(int argc, char** argv)
         if (!options.headless)
         {
             sceneList = sceneNames();
+            environmentList = environmentMapFiles();
         }
     }
     catch (const std::exception& e)
@@ -528,6 +649,7 @@ int main(int argc, char** argv)
             selectedScene = i;
         }
     }
+    selectEnvironmentInList();
 
     // Initialize CUDA and GL components
     if (!init())

@@ -13,6 +13,7 @@
 #include "render/intersections.h"
 #include "render/mesh_hit.h"
 #include "render/bsdf.h"
+#include "render/environment.h"
 #include "render/pbr_surface.h"
 #include "render/sampling.h"
 #include "render/wavefront_ops.h"
@@ -88,6 +89,8 @@ static MeshBuffers dev_mesh = {};
 // Texture objects indexed like Scene::textures (textures.cpp), null when the
 // scene has none.
 static cudaTextureObject_t* dev_textures = NULL;
+// The scene's environment (textures.cpp), radiance zero when it has none.
+static EnvironmentMap dev_environment = {};
 
 // Device copy of a host vector, or null when it is empty.
 template <typename T>
@@ -269,6 +272,7 @@ void pathtraceInit(Scene* scene)
     {
         TimingScope upload("init.texture_upload");
         dev_textures = texturesInit(*scene);
+        dev_environment = environmentInit(scene->environment);
     }
 
     // OptiX intersection stage: context, acceleration structures, pipeline
@@ -313,6 +317,8 @@ void pathtraceFree()
     dev_mesh = {};
     texturesFree();
     dev_textures = NULL;
+    environmentFree();
+    dev_environment = {};
     // Frees the spares. dev_paths / dev_intersections above may hold the
     // workspace's original buffers by now; the two sides still free each
     // allocation exactly once.
@@ -320,6 +326,14 @@ void pathtraceFree()
     stageTimingFree();
 
     checkCUDAError("pathtraceFree");
+}
+
+void pathtraceSetEnvironment(const Environment& env)
+{
+    // The last iteration's kernels may still read the old texture.
+    CUDA_CHECK(cudaDeviceSynchronize());
+    environmentFree();
+    dev_environment = environmentInit(env);
 }
 
 void pathtraceReset()
@@ -496,6 +510,7 @@ __global__ void shadeMaterial(
     SurvivorBuffer survivors,
     Material* materials,
     const cudaTextureObject_t* textures,
+    EnvironmentMap environment,
     glm::vec3* image)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -520,10 +535,16 @@ __global__ void shadeMaterial(
 
         // A path ends by setting remainingBounces to 0 and is then left out
         // of the survivors. Its color is not read again: light reaches the
-        // image only through the emission added below.
+        // image only through the environment and the emission added below.
         if (intersection.t <= 0.0f)
         {
-            // A miss. Nothing lights the scene from outside yet.
+            // A miss: the path leaves the scene and adds the environment's
+            // light from its direction. A camera ray that misses sees the
+            // environment as the background.
+            if (environment.radiance != glm::vec3(0.0f))
+            {
+                image[seg.pixelIndex] += seg.color * environmentRadiance(environment, seg.ray.direction);
+            }
             seg.remainingBounces = 0;
         }
         else
@@ -738,6 +759,7 @@ void pathtrace(uchar4* pbo, int iter)
             wavefrontSurvivors(),
             dev_materials,
             dev_textures,
+            dev_environment,
             dev_image
         );
         if (timing)
@@ -766,7 +788,7 @@ void pathtrace(uchar4* pbo, int iter)
     }
 
     // No gather pass: shadeMaterial adds light to dev_image at the hit that
-    // emits it.
+    // emits it, or at the miss that reaches the environment.
 
     // Send results to OpenGL buffer for rendering (pbo is null in headless mode)
     if (pbo != nullptr)

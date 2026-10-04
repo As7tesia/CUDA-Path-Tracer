@@ -29,6 +29,7 @@
 #include <cfloat>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <map>
 #include <set>
 #include <string>
@@ -369,15 +370,60 @@ GltfRenderHints renderHints(const tinygltf::Model& model)
     return hints;
 }
 
+// Whether an entry of extras.pbrt.light_sources is a PBRT infinite light.
+bool isInfiniteLight(const tinygltf::Value& light)
+{
+    const tinygltf::Value& kind = member(light, "pbrt");
+    return kind.IsString() && kind.Get<std::string>() == "infinite";
+}
+
+// The file's first PBRT infinite light, see GltfEnvironment. Its "source"
+// path is relative to the PBRT scene's folder, which the research scenes
+// keep as source/ next to gltf/.
+std::optional<GltfEnvironment> pbrtEnvironment(const tinygltf::Model& model, const std::string& path)
+{
+    const tinygltf::Value& sources = member(member(model.extras, "pbrt"), "light_sources");
+    for (size_t i = 0; i < sources.ArrayLen(); ++i)
+    {
+        const tinygltf::Value& light = sources.Get(i);
+        if (!isInfiniteLight(light))
+        {
+            continue;
+        }
+        GltfEnvironment env;
+        env.radiance = glm::vec3(1.0f);
+        const tinygltf::Value& source = member(light, "source");
+        if (source.IsString())
+        {
+            const std::filesystem::path pbrtFile =
+                std::filesystem::path(path).parent_path().parent_path() / "source" / source.Get<std::string>();
+            env.pbrtFile = pbrtFile.generic_string();
+            env.latlongFile = std::filesystem::path(pbrtFile).replace_extension(".latlong.exr").generic_string();
+        }
+        else
+        {
+            const tinygltf::Value& rgb = member(light, "radiance_rgb");
+            if (rgb.ArrayLen() == 3)
+            {
+                env.radiance = glm::vec3(rgb.Get(0).GetNumberAsDouble(), rgb.Get(1).GetNumberAsDouble(),
+                    rgb.Get(2).GetNumberAsDouble());
+            }
+        }
+        return env;
+    }
+    return std::nullopt;
+}
+
 // Names the lights in the file that do not reach the render, so a dark image
-// explains itself. Only emissive surfaces light a scene so far: punctual
-// lights (KHR_lights_punctual, which tinygltf parses into model.lights) and
-// PBRT's distant lights have no surface a path could hit and wait for direct
-// light sampling, PBRT's infinite lights wait for the environment map. The
-// research scenes list the PBRT ones under extras.pbrt.light_sources and
-// mark those glTF cannot express as "metadata_only"; the list's area lights
-// are in the file as emissive meshes.
-void reportUnusedLights(const tinygltf::Model& model, const std::string& path)
+// explains itself. Emissive surfaces light a scene, and PBRT's infinite
+// lights become the environment when the file is the whole scene
+// (environmentRead). Punctual lights (KHR_lights_punctual, which tinygltf
+// parses into model.lights) and PBRT's distant lights have no surface a path
+// could hit and wait for direct light sampling. The research scenes list the
+// PBRT ones under extras.pbrt.light_sources and mark those glTF cannot
+// express as "metadata_only"; the list's area lights are in the file as
+// emissive meshes.
+void reportUnusedLights(const tinygltf::Model& model, const std::string& path, bool environmentRead)
 {
     if (!model.lights.empty())
     {
@@ -386,13 +432,24 @@ void reportUnusedLights(const tinygltf::Model& model, const std::string& path)
     const tinygltf::Value& sources = member(member(model.extras, "pbrt"), "light_sources");
     for (size_t i = 0; i < sources.ArrayLen(); ++i)
     {
-        const tinygltf::Value& kind = member(sources.Get(i), "pbrt");
-        const tinygltf::Value& form = member(sources.Get(i), "gltf");
-        if (form.IsString() && form.Get<std::string>() == "metadata_only")
+        const tinygltf::Value& light = sources.Get(i);
+        const tinygltf::Value& kind = member(light, "pbrt");
+        const tinygltf::Value& form = member(light, "gltf");
+        if (!form.IsString() || form.Get<std::string>() != "metadata_only")
         {
-            fprintf(stderr, "glTF %s: PBRT %s light ignored (not supported yet)\n", path.c_str(),
-                kind.IsString() ? kind.Get<std::string>().c_str() : "unnamed");
+            continue;
         }
+        if (isInfiniteLight(light))
+        {
+            if (!environmentRead)
+            {
+                fprintf(stderr, "glTF %s: PBRT infinite light ignored (only read when the file is the whole scene)\n",
+                    path.c_str());
+            }
+            continue;
+        }
+        fprintf(stderr, "glTF %s: PBRT %s light ignored (not supported yet)\n", path.c_str(),
+            kind.IsString() ? kind.Get<std::string>().c_str() : "unnamed");
     }
 }
 
@@ -1151,7 +1208,7 @@ bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int mate
     printf("glTF %s: %zu triangles in %zu primitives, %zu instances, bounds (%.3f, %.3f, %.3f) to (%.3f, %.3f, %.3f)\n",
         path.c_str(), scene.indices.size() - firstTriangle, scene.meshes.size() - firstMesh,
         scene.geoms.size() - firstGeom, lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
-    reportUnusedLights(model, path);
+    reportUnusedLights(model, path, info != nullptr);
     if (materialOverride < 0)
     {
         reportUnsupportedMaterialFeatures(model, path);
@@ -1163,6 +1220,7 @@ bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int mate
         info->boundsMax = hi;
         info->camera = l.camera;
         info->render = renderHints(model);
+        info->environment = pbrtEnvironment(model, path);
     }
     return true;
 }

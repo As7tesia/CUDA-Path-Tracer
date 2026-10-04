@@ -1,17 +1,21 @@
 #pragma once
 
+#include "scene/environment.h"
 #include "scene/sceneStructs.h"
 #include <string>
 #include <vector>
 
 // Command-line overrides for values normally read from the scene file.
-// 0 means "use the scene file's value".
+// 0 (or an empty string) means "use the scene file's value".
 struct SceneOverrides
 {
     int width = 0;
     int height = 0;
     int iterations = 0;
     int traceDepth = 0;
+    // A lat-long .hdr or .exr that replaces the scene's environment, at
+    // strength 1 and no rotation
+    std::string environmentFile;
 };
 
 // What a scene file says about the render itself. A scene JSON states all of
@@ -95,5 +99,11 @@ public:
     // cannot be decoded: one magenta texel, made by the glTF loader on first
     // use (-1 until then) and shared by every glTF file of the scene.
     int missingTexture = -1;
+    // The scene file's own light from outside the scene: a scene JSON's
+    // Environment block, or a glTF research scene's PBRT infinite light.
+    EnvironmentSource environmentSource;
+    // The environment that renders, read: --env when given, else the scene
+    // file's own. The window can replace it.
+    Environment environment;
     RenderState state;
 };

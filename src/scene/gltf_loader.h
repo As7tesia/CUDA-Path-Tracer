@@ -30,6 +30,18 @@ struct GltfRenderHints
     int maxDepth = 0;
 };
 
+// A research scene's PBRT infinite light, from the root extras under
+// pbrt.light_sources: an image map, or one radiance in every direction.
+// PBRT's maps are equal-area octahedral squares and the renderer reads
+// lat-long maps only, so tools/convert_envmaps.py converts each map once,
+// with the light's rotation baked in, to <map>.latlong.exr next to it.
+struct GltfEnvironment
+{
+    std::string latlongFile;  // the converted map; empty for a constant light
+    std::string pbrtFile;     // the PBRT map it is made from
+    glm::vec3 radiance;       // radiance_rgb of a constant light, 1 for a map
+};
+
 // What a file holds besides the geometry and materials that went into the scene.
 struct GltfInfo
 {
@@ -40,6 +52,8 @@ struct GltfInfo
     // the default scene's roots), if the file has one.
     std::optional<GltfCamera> camera;
     GltfRenderHints render;
+    // The first PBRT infinite light, if the file lists one.
+    std::optional<GltfEnvironment> environment;
 };
 
 // Appends a glTF file's meshes to the scene. Every (node, primitive) pair in
@@ -54,6 +68,8 @@ struct GltfInfo
 //
 // Only triangle-list primitives with float positions are loaded. Prints a
 // summary line, or the error and returns false when the file cannot be
-// loaded. info, when given, receives the rest of what the file holds.
+// loaded. info, when given, receives the rest of what the file holds; a file
+// loaded without it (a mesh inside a scene JSON) has its infinite light
+// reported as ignored.
 bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int materialOverride, Scene& scene,
     GltfInfo* info = nullptr);

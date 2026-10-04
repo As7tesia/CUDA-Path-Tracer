@@ -2,7 +2,10 @@
 
 #include <cuda_runtime.h>
 
+#include <glm/glm.hpp>
+
 class Scene;
+struct Environment;
 
 // The scene's textures on the GPU. Each Scene::textureImages entry becomes a
 // CUDA array of uchar4, and each Scene::textures entry a texture object over
@@ -18,3 +21,23 @@ cudaTextureObject_t* texturesInit(const Scene& scene);
 
 // Destroys the texture objects and frees the arrays and the device array.
 void texturesFree();
+
+// The scene's Environment as the shade kernel reads it, passed by value.
+// environmentRadiance (render/environment.h) does the lookup.
+struct EnvironmentMap
+{
+    // A float4 CUDA array of the lat-long image, filtered bilinearly,
+    // wrapping around the horizon and clamped at the poles; 0 when the
+    // environment is one color
+    cudaTextureObject_t texture;
+    glm::vec3 radiance;  // multiplies the image, or the color itself; zero: no environment
+    float cosRotation;   // Environment::rotation
+    float sinRotation;
+};
+
+// Uploads the environment's image, if it has one. Called once from
+// pathtraceInit.
+EnvironmentMap environmentInit(const Environment& env);
+
+// Destroys the environment's texture object and frees its array.
+void environmentFree();

@@ -226,6 +226,10 @@ Scene::Scene(string filename, const SceneOverrides& ov)
         {
             sceneError("not a scene file (.json, .gltf or .glb)");
         }
+        // --env replaces the scene file's environment, at strength 1 and no rotation
+        environment = loadEnvironment(ov.environmentFile.empty()
+                ? environmentSource
+                : EnvironmentSource{ ov.environmentFile, glm::vec3(1.0f), 0.0f });
     }
     catch (const std::exception& e)
     {
@@ -340,6 +344,28 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
 
     // FILE paths in the scene are relative to the scene file's folder.
     const std::string sceneDir = jsonName.substr(0, jsonName.find_last_of("/\\") + 1);
+
+    // Environment (optional), the light from outside the scene: FILE is a
+    // lat-long .hdr or .exr, RGB instead of FILE one color in every
+    // direction. STRENGTH multiplies either (default 1). ROTATION turns the
+    // map about +Y, in degrees (default 0), the same number a Blender
+    // Mapping node's Z rotation takes.
+    if (data.contains("Environment"))
+    {
+        const json& e = data.at("Environment");
+        const float strength = e.value("STRENGTH", 1.0f);
+        if (e.contains("FILE"))
+        {
+            environmentSource.file = sceneDir + e.at("FILE").get<std::string>();
+            environmentSource.radiance = glm::vec3(strength);
+        }
+        else
+        {
+            environmentSource.radiance = vec3At(e, "RGB") * strength;
+        }
+        environmentSource.rotation = glm::radians(e.value("ROTATION", 0.0f));
+    }
+
     for (const auto& p : data.at("Objects"))
     {
         const std::string type = p.at("TYPE");
@@ -410,12 +436,39 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
     {
         sceneError("nothing to render");
     }
-    // Only a surface that emits lights a scene so far.
-    if (std::none_of(materials.begin(), materials.end(), [](const Material& m) {
-            return maxComponent(m.emission) > 0.0f;
-        }))
+
+    // A research scene's PBRT infinite light, through its converted lat-long
+    // map. A missing map leaves the scene without an environment.
+    if (info.environment)
     {
-        cerr << "No emissive material in " << gltfName << ": the render will be black" << endl;
+        const GltfEnvironment& e = *info.environment;
+        if (e.latlongFile.empty())
+        {
+            environmentSource.radiance = e.radiance;
+        }
+        else if (std::filesystem::is_regular_file(e.latlongFile))
+        {
+            environmentSource.file = e.latlongFile;
+            environmentSource.radiance = e.radiance;
+        }
+        else if (std::filesystem::is_regular_file(e.pbrtFile))
+        {
+            cerr << "No " << e.latlongFile << ": run python tools/convert_envmaps.py to make it from "
+                 << e.pbrtFile << "; no environment until then" << endl;
+        }
+        else
+        {
+            cerr << "The PBRT environment map " << e.pbrtFile << " is not in the download; no environment" << endl;
+        }
+    }
+
+    // Emissive surfaces and the environment are the only lights so far.
+    if (maxComponent(environmentSource.radiance) <= 0.0f && ov.environmentFile.empty()
+        && std::none_of(materials.begin(), materials.end(), [](const Material& m) {
+               return maxComponent(m.emission) > 0.0f;
+           }))
+    {
+        cerr << "No emissive material or environment in " << gltfName << ": the render will be black" << endl;
     }
 
     // The file's hints where it has them, the defaults elsewhere.

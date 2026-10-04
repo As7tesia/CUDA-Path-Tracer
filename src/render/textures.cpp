@@ -5,6 +5,7 @@
 #include "scene/scene.h"
 #include "utilities.h"
 
+#include <cmath>
 #include <vector>
 
 namespace
@@ -12,6 +13,8 @@ namespace
 std::vector<cudaArray_t> arrays;                     // one per Scene::textureImages entry
 std::vector<cudaTextureObject_t> objects;            // one per Scene::textures entry
 cudaTextureObject_t* dev_textureObjects = nullptr;   // objects, on the device
+cudaArray_t environmentArray = nullptr;
+cudaTextureObject_t environmentObject = 0;
 }  // namespace
 
 cudaTextureObject_t* texturesInit(const Scene& scene)
@@ -71,4 +74,47 @@ void texturesFree()
     objects.clear();
     arrays.clear();
     dev_textureObjects = nullptr;
+}
+
+EnvironmentMap environmentInit(const Environment& env)
+{
+    EnvironmentMap map = {};
+    map.radiance = env.radiance;
+    map.cosRotation = std::cos(env.rotation);
+    map.sinRotation = std::sin(env.rotation);
+    if (env.rgba.empty())
+    {
+        return map;
+    }
+
+    const cudaChannelFormatDesc format = cudaCreateChannelDesc<float4>();
+    CUDA_CHECK(cudaMallocArray(&environmentArray, &format, env.width, env.height));
+    const size_t rowBytes = (size_t)env.width * sizeof(float4);
+    CUDA_CHECK(cudaMemcpy2DToArray(environmentArray, 0, 0, env.rgba.data(), rowBytes, rowBytes, env.height,
+        cudaMemcpyHostToDevice));
+
+    cudaResourceDesc resource = {};
+    resource.resType = cudaResourceTypeArray;
+    resource.res.array.array = environmentArray;
+
+    cudaTextureDesc desc = {};
+    desc.addressMode[0] = cudaAddressModeWrap;   // u runs around the horizon
+    desc.addressMode[1] = cudaAddressModeClamp;  // v stops at the poles
+    desc.filterMode = cudaFilterModeLinear;
+    desc.readMode = cudaReadModeElementType;     // floats as stored
+    desc.normalizedCoords = 1;
+    CUDA_CHECK(cudaCreateTextureObject(&environmentObject, &resource, &desc, nullptr));
+    map.texture = environmentObject;
+    return map;
+}
+
+void environmentFree()
+{
+    if (environmentObject != 0)
+    {
+        cudaDestroyTextureObject(environmentObject);
+    }
+    cudaFreeArray(environmentArray);  // no-op if null
+    environmentObject = 0;
+    environmentArray = nullptr;
 }
