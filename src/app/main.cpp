@@ -588,15 +588,17 @@ static void selectEnvironmentInList()
 
 // Replaces the environment with the map file names (strength 1, no
 // rotation, like --env), or with the scene file's own when file is empty.
-// Only the environment texture is remade, not the scene. A map that does not
-// load leaves the current one, with the error in the panel.
+// The environment texture and the light list are remade, not the scene. A
+// map that does not load leaves the current one, with the error in the
+// panel.
 static void switchEnvironment(const std::string& file)
 {
     try
     {
         scene->environment = loadEnvironment(file.empty()
                 ? scene->environmentSource
-                : EnvironmentSource{ file, glm::vec3(1.0f), 0.0f });
+                : EnvironmentSource{ file, glm::vec3(1.0f), 0.0f },
+            options.overrides.environmentCompensation);
     }
     catch (const std::exception& e)
     {
@@ -690,9 +692,12 @@ static void saveImage()
     pathtraceDownloadImage();
     // output image file
     Image img(width, height);
-    // An --out path ending in .hdr keeps the scene-linear average itself, no
-    // view transform and no clipping, for comparing renders by their numbers.
-    const bool hdr = lowercaseExtension(options.outPath) == ".hdr";
+    // An --out path ending in .hdr or .exr keeps the scene-linear average
+    // itself, no view transform and no clipping, for comparing renders by
+    // their numbers. .exr is exact float; .hdr truncates to 8-bit mantissas.
+    const std::string ext = lowercaseExtension(options.outPath);
+    const bool hdr = ext == ".hdr";
+    const bool exr = ext == ".exr";
 
     for (int x = 0; x < width; x++)
     {
@@ -700,16 +705,16 @@ static void saveImage()
         {
             int index = x + (y * width);
             glm::vec3 pix = renderState->image[index] / samples;   // scene-linear average
-            img.setPixel(x, y, hdr ? pix : applyToneMap(pix, options.toneMap, options.exposure));
+            img.setPixel(x, y, hdr || exr ? pix : applyToneMap(pix, options.toneMap, options.exposure));
         }
     }
 
     std::string filename;
     if (!options.outPath.empty())
     {
-        // savePNG and saveHDR append the extension themselves
+        // savePNG, saveHDR and saveEXR append the extension themselves
         filename = options.outPath;
-        if (filename.size() > 4 && (filename.substr(filename.size() - 4) == ".png" || hdr))
+        if (filename.size() > 4 && (filename.substr(filename.size() - 4) == ".png" || hdr || exr))
         {
             filename = filename.substr(0, filename.size() - 4);
         }
@@ -731,6 +736,10 @@ static void saveImage()
     if (hdr)
     {
         img.saveHDR(filename);
+    }
+    else if (exr)
+    {
+        img.saveEXR(filename);
     }
     else
     {

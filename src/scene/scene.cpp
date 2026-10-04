@@ -226,11 +226,13 @@ Scene::Scene(string filename, const SceneOverrides& ov)
         {
             sceneError("not a scene file (.json, .gltf or .glb)");
         }
-        buildLights();
         // --env replaces the scene file's environment, at strength 1 and no rotation
         environment = loadEnvironment(ov.environmentFile.empty()
                 ? environmentSource
-                : EnvironmentSource{ ov.environmentFile, glm::vec3(1.0f), 0.0f });
+                : EnvironmentSource{ ov.environmentFile, glm::vec3(1.0f), 0.0f },
+            ov.environmentCompensation);
+        environmentLight = ov.environmentLight;
+        buildLights();
     }
     catch (const std::exception& e)
     {

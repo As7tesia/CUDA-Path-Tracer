@@ -15,6 +15,7 @@ std::vector<cudaTextureObject_t> objects;            // one per Scene::textures 
 cudaTextureObject_t* dev_textureObjects = nullptr;   // objects, on the device
 cudaArray_t environmentArray = nullptr;
 cudaTextureObject_t environmentObject = 0;
+const float* environmentTables[3] = {};  // EnvironmentMap::pdfUv, conditionalCdf, marginalCdf
 }  // namespace
 
 cudaTextureObject_t* texturesInit(const Scene& scene)
@@ -105,6 +106,26 @@ EnvironmentMap environmentInit(const Environment& env)
     desc.normalizedCoords = 1;
     CUDA_CHECK(cudaCreateTextureObject(&environmentObject, &resource, &desc, nullptr));
     map.texture = environmentObject;
+
+    // The sampling table. A map that is black all over has none; the light
+    // list leaves it out, so nothing samples it.
+    if (!env.pdfUv.empty())
+    {
+        const auto upload = [](const std::vector<float>& v) {
+            float* d = nullptr;
+            CUDA_CHECK(cudaMalloc(&d, v.size() * sizeof(float)));
+            CUDA_CHECK(cudaMemcpy(d, v.data(), v.size() * sizeof(float), cudaMemcpyHostToDevice));
+            return d;
+        };
+        map.pdfUv = upload(env.pdfUv);
+        map.conditionalCdf = upload(env.conditionalCdf);
+        map.marginalCdf = upload(env.marginalCdf);
+        map.width = env.width;
+        map.height = env.height;
+        environmentTables[0] = map.pdfUv;
+        environmentTables[1] = map.conditionalCdf;
+        environmentTables[2] = map.marginalCdf;
+    }
     return map;
 }
 
@@ -117,4 +138,9 @@ void environmentFree()
     cudaFreeArray(environmentArray);  // no-op if null
     environmentObject = 0;
     environmentArray = nullptr;
+    for (const float*& table : environmentTables)
+    {
+        cudaFree((void*)table);  // no-op if null
+        table = nullptr;
+    }
 }

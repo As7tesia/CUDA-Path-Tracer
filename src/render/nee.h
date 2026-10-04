@@ -8,6 +8,7 @@
 
 #include <cuda_runtime.h>
 
+#include "render/environment.h"
 #include "render/pbr_surface.h"
 #include "scene/sceneStructs.h"
 #include "utilities.h"
@@ -19,10 +20,13 @@ struct LightList
 {
     const LightTriangle* triangles;
     const PunctualLight* punctual;
-    const float* cdf;             // running pick probabilities over the triangles, then the punctual lights
+    const float* cdf;             // running pick probabilities over the triangles, the punctual lights, then the environment
     const float* emitterAreaPdf;  // per material, see Scene::emitterAreaPdf
     int numTriangles;
-    int numLights;                // triangles plus punctual lights; 0 when there is nothing to sample
+    int numLights;                // triangles plus punctual lights plus the environment; 0 when there is nothing to sample
+    // The environment's pick probability, the last entry of cdf; 0 when the
+    // scene has no environment to sample (Scene::environmentPickPdf)
+    float environmentPickPdf;
 };
 
 // The power heuristic with exponent 2 (Veach 1997): the weight of a sample
@@ -34,28 +38,6 @@ __device__ __forceinline__ float powerHeuristic(float pThis, float pOther)
 {
     const float r = pOther / pThis;
     return 1.0f / (1.0f + r * r);
-}
-
-// The light that u in [0, 1) falls on: the first whose running probability
-// is above u, so light i comes up with probability cdf[i] - cdf[i - 1]. A
-// binary search, log2(numLights) steps.
-__device__ __forceinline__ int pickLight(const LightList& lights, float u)
-{
-    int lo = 0;
-    int hi = lights.numLights - 1;
-    while (lo < hi)
-    {
-        const int mid = (lo + hi) / 2;
-        if (lights.cdf[mid] > u)
-        {
-            hi = mid;
-        }
-        else
-        {
-            lo = mid + 1;
-        }
-    }
-    return lo;
 }
 
 // The radiance a light triangle's material emits at uv toward a point that
@@ -97,24 +79,28 @@ struct LightSample
     // What arrives at the point divided by the density of sampling it: the
     // emitted radiance over the solid-angle pdf for a triangle, a point
     // light's intensity over d^2 and its pick probability, a distant light's
-    // irradiance over its pick probability.
+    // irradiance over its pick probability, the environment's radiance over
+    // its solid-angle pdf.
     glm::vec3 weightedLight;
     float pdf;           // solid-angle pdf of wi, for the MIS weight; 0 for a point or distant light
 };
 
 // Picks a light with u0 and, for a triangle, a point on it uniformly by area
-// with u1 and u2. Returns false when the sample brings no light: the point
-// emits nothing there (a dark texel, a cut-out), or the triangle is seen
-// edge-on.
+// with u1 and u2, or for the environment a direction from its table.
+// Returns false when the sample brings no light: the point emits nothing
+// there (a dark texel, a cut-out), or the triangle is seen edge-on.
 //
 // A triangle's solid-angle pdf is its area pdf, emitterAreaPdf, times
 // d^2 / |cos| of the angle at the light; emitters glow from both sides, so
-// the cosine counts either way. A point or distant light is a delta: the BSDF
-// can never sample its direction, so it has no pdf to weigh against.
-__device__ __forceinline__ bool sampleLight(const LightList& lights, const Material* materials,
-    const cudaTextureObject_t* textures, glm::vec3 hitPoint, float u0, float u1, float u2, LightSample& sample)
+// the cosine counts either way. The environment's is its pick probability
+// times environmentPdf. A point or distant light is a delta: the BSDF can
+// never sample its direction, so it has no pdf to weigh against.
+__device__ __forceinline__ bool sampleLight(const LightList& lights, const EnvironmentMap& env,
+    const Material* materials, const cudaTextureObject_t* textures, glm::vec3 hitPoint, float u0, float u1, float u2,
+    LightSample& sample)
 {
-    const int index = pickLight(lights, u0);
+    // The light u0 falls on: light i with probability cdf[i] - cdf[i - 1]
+    const int index = searchCdf(lights.cdf, lights.numLights, u0);
     // A shadow ray stops short of the light by a margin the size of the
     // float error at the larger of the two points, or a sliver of the
     // distance, so it does not find the light's own surface.
@@ -152,6 +138,21 @@ __device__ __forceinline__ bool sampleLight(const LightList& lights, const Mater
         sample.tMax = tMax;
         sample.pdf = lights.emitterAreaPdf[t.materialId] * d2 / fabsf(cosLight);
         sample.weightedLight = emission / sample.pdf;
+        return true;
+    }
+
+    // The environment: a direction from its table, infinitely far like a
+    // distant light, so the shadow ray runs to the path rays' own tmax.
+    if (lights.environmentPickPdf > 0.0f && index == lights.numLights - 1)
+    {
+        float pdf;
+        if (!environmentSample(env, u1, u2, sample.wi, pdf))
+        {
+            return false;
+        }
+        sample.tMax = 1e16f;
+        sample.pdf = lights.environmentPickPdf * pdf;
+        sample.weightedLight = environmentRadiance(env, sample.wi) / sample.pdf;
         return true;
     }
 

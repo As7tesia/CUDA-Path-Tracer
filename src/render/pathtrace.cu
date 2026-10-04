@@ -93,8 +93,10 @@ static cudaTextureObject_t* dev_textures = NULL;
 // The scene's environment (textures.cpp), radiance zero when it has none.
 static EnvironmentMap dev_environment = {};
 // Next event estimation's light list (nee.h, from Scene's), numLights 0 when
-// the scene has nothing it can sample.
+// the scene has nothing it can sample. uploadLights fills it from hst_scene.
 static LightList dev_lights = {};
+static void uploadLights();
+static void freeLights();
 
 // Device copy of a host vector, or null when it is empty.
 template <typename T>
@@ -270,12 +272,7 @@ void pathtraceInit(Scene* scene)
     dev_geoms = uploadVector(scene->geoms);
     dev_materials = uploadVector(scene->materials);
 
-    dev_lights.triangles = uploadVector(scene->lightTriangles);
-    dev_lights.punctual = uploadVector(scene->punctualLights);
-    dev_lights.cdf = uploadVector(scene->lightCdf);
-    dev_lights.emitterAreaPdf = uploadVector(scene->emitterAreaPdf);
-    dev_lights.numTriangles = (int)scene->lightTriangles.size();
-    dev_lights.numLights = (int)scene->lightCdf.size();
+    uploadLights();
 
     CUDA_CHECK(cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection)));
     CUDA_CHECK(cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection)));
@@ -331,11 +328,7 @@ void pathtraceFree()
     cudaFree(dev_paths);
     cudaFree(dev_geoms);
     cudaFree(dev_materials);
-    cudaFree((void*)dev_lights.triangles);
-    cudaFree((void*)dev_lights.punctual);
-    cudaFree((void*)dev_lights.cdf);
-    cudaFree((void*)dev_lights.emitterAreaPdf);
-    dev_lights = {};
+    freeLights();
     cudaFree(dev_intersections);
     cudaFree(dev_materialIds);
     if (optixReady)
@@ -369,6 +362,11 @@ void pathtraceSetEnvironment(const Environment& env)
     CUDA_CHECK(cudaDeviceSynchronize());
     environmentFree();
     dev_environment = environmentInit(env);
+    // The environment's power is part of the light list, so every light's
+    // share of the picks changes with it.
+    freeLights();
+    hst_scene->buildLights();
+    uploadLights();
 }
 
 void pathtraceReset()
@@ -376,6 +374,27 @@ void pathtraceReset()
     const Camera& cam = hst_scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
     CUDA_CHECK(cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3)));
+}
+
+// The light list from hst_scene, for pathtraceInit and an environment swap.
+static void uploadLights()
+{
+    dev_lights.triangles = uploadVector(hst_scene->lightTriangles);
+    dev_lights.punctual = uploadVector(hst_scene->punctualLights);
+    dev_lights.cdf = uploadVector(hst_scene->lightCdf);
+    dev_lights.emitterAreaPdf = uploadVector(hst_scene->emitterAreaPdf);
+    dev_lights.numTriangles = (int)hst_scene->lightTriangles.size();
+    dev_lights.numLights = (int)hst_scene->lightCdf.size();
+    dev_lights.environmentPickPdf = hst_scene->environmentPickPdf;
+}
+
+static void freeLights()
+{
+    cudaFree((void*)dev_lights.triangles);
+    cudaFree((void*)dev_lights.punctual);
+    cudaFree((void*)dev_lights.cdf);
+    cudaFree((void*)dev_lights.emitterAreaPdf);
+    dev_lights = {};
 }
 
 // One path per pixel, starting at the camera: a ray through a random point
@@ -597,10 +616,21 @@ __global__ void shadeMaterial(
         {
             // A miss: the path leaves the scene and adds the environment's
             // light from its direction. A camera ray that misses sees the
-            // environment as the background.
+            // environment as the background. With next event estimation
+            // the environment is one of the lights, and a ray from a rough
+            // lobe shares its light with the environment sample the
+            // previous hit took, weighed against the environment's density
+            // for the same direction; a camera ray or a smooth lobe's ray
+            // keeps all of it.
             if (environment.radiance != glm::vec3(0.0f))
             {
-                image[seg.pixelIndex] += seg.color * environmentRadiance(environment, seg.ray.direction);
+                float weight = 1.0f;
+                if (nee && seg.pdf > 0.0f && lights.environmentPickPdf > 0.0f)
+                {
+                    const float lightPdf = lights.environmentPickPdf * environmentPdf(environment, seg.ray.direction);
+                    weight = powerHeuristic(seg.pdf, lightPdf);
+                }
+                image[seg.pixelIndex] += seg.color * environmentRadiance(environment, seg.ray.direction) * weight;
             }
             seg.remainingBounces = 0;
         }
@@ -683,7 +713,7 @@ __global__ void shadeMaterial(
                     const float u1 = u01(rng);
                     const float u2 = u01(rng);
                     LightSample light;
-                    if (sampleLight(lights, materials, textures, hitPoint, u0, u1, u2, light))
+                    if (sampleLight(lights, environment, materials, textures, hitPoint, u0, u1, u2, light))
                     {
                         const BsdfEval f = evalPbr(wo, light.wi, intersection.surfaceNormal, intersection.outside,
                             material, surface);

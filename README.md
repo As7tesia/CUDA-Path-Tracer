@@ -77,7 +77,11 @@ The scene argument is a path, or a name: `cornell` is `scenes/cornell.json`, and
 | `--spp N` | Override `ITERATIONS` from the scene file |
 | `--res WxH` | Override `RES` from the scene file |
 | `--depth N` | Override `DEPTH` from the scene file, the most rays a path may trace |
-| `--out path.png` | Write exactly this file. Default is the usual `img/auto_saved/<FILE>.<time>.<spp>samp.png` |
+| `--out path.png` | Write exactly this file. Default is the usual `img/auto_saved/<FILE>.<time>.<spp>samp.png`. An `.exr` path keeps the scene-linear average as float32, without view transform or exposure, for comparing renders by their numbers; `.hdr` does the same with 8-bit mantissas |
+| `--env FILE` | Light the scene with this lat-long `.hdr` or `.exr` instead of its own environment |
+| `--no-nee` | No next event estimation: lights count only when a path hits them |
+| `--no-env-nee` | Leave the environment out of the light list, so paths find it by BSDF sampling only |
+| `--no-env-compensation` | Build the environment's sampling table from its radiance alone, without MIS compensation |
 | `--no-rr` | Disable Russian roulette |
 | `--sort` | Sort paths by material before shading. Off by default since the 2026-10-02 profile, where its gather cost 2 to 3.5x the frame on every scene; `--no-sort` is the default, kept for scripts |
 | `--no-optix` | Intersect with the naive per-object kernel instead of the OptiX stage |
@@ -271,7 +275,7 @@ At load, `src/scene/lights.cpp` builds one list of everything NEE can pick, each
 | point light | `KHR_lights_punctual` | 4π x luminance(intensity) |
 | distant light | `KHR_lights_punctual` directional lights, the research scenes' PBRT distant lights | π r² x luminance(irradiance), r the scene's bounding sphere |
 
-Emitters glow from both sides, hence 2π, and a triangle's emission is its material's emission factor times its emissive texture's average color (see the last subsection). Emissive spheres stay out of the list, so a BSDF-sampled ray that hits one keeps all of its emission, and so does the environment for now: a path that misses adds it in full. glTF gives a point light's intensity in candela and a directional light's in lux, and the loader divides both by 683 lm/W to get back the radiant units Blender's exporter converts from (Bistro's files come from it). A floor under a 400 W point light (21,740.6 cd as the exporter writes it) and under a sun of strength 1 (683 lux) matches Cycles within 0.4%.
+Emitters glow from both sides, hence 2π, and a triangle's emission is its material's emission factor times its emissive texture's average color (see the last subsection). Emissive spheres stay out of the list, so a BSDF-sampled ray that hits one keeps all of its emission. The environment is in the list, see [the next section](#environment-map-sampling). glTF gives a point light's intensity in candela and a directional light's in lux, and the loader divides both by 683 lm/W to get back the radiant units Blender's exporter converts from (Bistro's files come from it). A floor under a 400 W point light (21,740.6 cd as the exporter writes it) and under a sun of strength 1 (683 lux) matches Cycles within 0.4%.
 
 The shade kernel picks a light with a binary search over the running sum of the powers and a point on a triangle uniformly by area. The density of landing on a point of a triangle is then its pick probability over its area, 2π x luminance(emission) / total power: the area cancels, so it is one number per material. Over directions it becomes
 
@@ -332,6 +336,73 @@ Each material's emission is now weighed as its emission factor times the average
 - **Noise**: the RMSE of the displayed image against a 4096 spp render drops from 12.9 to 9.2 (of 255), 49% less variance, about what twice the samples would give. Most of the noise left in the room is indirect light, which the light picks do not touch.
 - **Mean**: unchanged, and at 4096 spp the render still matches BSDF sampling alone within 0.04%.
 - **Frame time**: 3.0 against 2.9 ms/spp.
+
+### Environment map sampling
+
+With the environment found by BSDF sampling alone, a diffuse surface under a sunset HDRI sends its rays all over the sky and hits the sun by luck: a few pixels per frame get the sun's full radiance and the rest get none, which is the grain in the left column below. The environment is now one of the lights next event estimation picks, with a sampling table built from the map, and a path that leaves the scene weighs the environment's light against that strategy with the same power heuristic as a hit on an emitter.
+
+#### The table
+
+At load, `src/scene/environment.cpp` gives every texel of the lat-long map a weight, its luminance times sin θ, since a row near a pole covers less of the sphere than its share of the image. The weights become a 2D distribution drawn in two 1D steps: a marginal CDF over the rows picks a row, and that row's conditional CDF picks a column. Both searches are the binary search the light pick uses, so a draw from a 4096x2048 map costs 11 plus 12 steps. The sample is placed inside the cell by where the two random numbers fell within their steps, not at the cell's center, and the cell's density over the unit square turns into a density over directions through the mapping's Jacobian:
+
+```
+p_env(ω) = pdf_uv / (2π² sin θ)
+```
+
+A miss computes the same value for the direction it left in, from the cell that direction falls into, so the two sides of the MIS weight see one function. The rotation a scene gives its map is applied to the sampled direction on the way out, with the transpose of the lookup's matrix; the density is the same in both frames. A one-color environment has no table and is sampled uniformly over the sphere, pdf 1 / 4π. The table takes two floats per texel on the device, 64 MB for a 4k map.
+
+The table steers the picks; the radiance a sample brings back is read from the texture at the sampled direction, and that read is filtered bilinearly, so inside a cell it slides from the texel's own value toward the neighbors' at the edges. A black texel next to a bright one returns light over half its cell. Each cell's entry is therefore the average of what the texture returns over the cell, which works out to the [1 6 1]/8 filter of the texels along each axis, wrapping in u and clamping in v as the texture does, so the picks follow the values the texture reads out rather than the one stored at each center. With MIS this changes the noise, not the mean: a direction the table never draws is still covered by the BSDF sample at weight 1, the same way compensation gets away with zeroing the sky.
+
+The environment's share of the light picks follows its power like every other light's: π r² times its luminance integrated over all directions, the flux through a disk as large as the scene, which is what the distant light already uses with its irradiance. The light list is rebuilt when the window swaps the map, since the shares of the other lights change with it.
+
+#### MIS compensation
+
+Where the sky is dim and even, BSDF sampling already finds it well, and the environment samples the table sends there are wasted. The table is built with the map's average radiance subtracted from every texel and the rest clamped at zero (Karlík et al. 2019, as PBRT-v4 does), so the picks go to the sun and the bright patches and the even part of the sky is left to the BSDF side, which gets weight 1 there since the environment's density is zero. A map that is one color all over compensates to nothing and keeps its plain weights. `--no-env-compensation` builds the plain table instead, and `--no-env-nee` leaves the environment out of the light list altogether.
+
+#### Comparisons
+
+`hdri_helmet` under `venice_sunset_4k.hdr`, 1024x576, 64 spp, AgX. Bottom row: the floor in front of the diffuse sphere at 2x.
+
+| Environment by BSDF sampling | Environment NEE + MIS | With MIS compensation |
+|:---:|:---:|:---:|
+| ![hdri_helmet, environment by BSDF sampling](img/readme/envmap_helmet_bsdf_only.png) | ![hdri_helmet, environment NEE](img/readme/envmap_helmet_nee.png) | ![hdri_helmet, environment NEE with compensation](img/readme/envmap_helmet_nee_compensated.png) |
+| ![Floor crop, BSDF sampling](img/readme/envmap_helmet_bsdf_only_crop.png) | ![Floor crop, environment NEE](img/readme/envmap_helmet_nee_crop.png) | ![Floor crop, with compensation](img/readme/envmap_helmet_nee_compensated_crop.png) |
+
+- **Noise**: the RMSE of the displayed image against a 4096 spp render goes from 4.34 to 2.85 to 2.69 (of 255): 0.43x the variance with the environment in the light list, 0.38x with compensation.
+- **Frame time**: 1.11, 1.55 and 1.37 ms/spp. The shadow rays toward the environment run to the end of the scene, and the two binary searches read a 64 MB table at random.
+- The specks left on the floor are the sun reflected by the chrome sphere, a caustic no light sample reaches.
+
+living-room, lit by its sky map alone, 1024x576, 256 spp, AgX. Bottom row: the ceiling and wall above the right windows at 2x.
+
+| Environment by BSDF sampling | Environment NEE + MIS | With MIS compensation |
+|:---:|:---:|:---:|
+| ![living-room, environment by BSDF sampling](img/readme/envmap_livingroom_bsdf_only.png) | ![living-room, environment NEE](img/readme/envmap_livingroom_nee.png) | ![living-room, environment NEE with compensation](img/readme/envmap_livingroom_nee_compensated.png) |
+| ![Ceiling crop, BSDF sampling](img/readme/envmap_livingroom_bsdf_only_crop.png) | ![Ceiling crop, environment NEE](img/readme/envmap_livingroom_nee_crop.png) | ![Ceiling crop, with compensation](img/readme/envmap_livingroom_nee_compensated_crop.png) |
+
+- **Noise**: RMSE against a 2048 spp render 24.5, 16.1 and 14.9: 0.43x and 0.37x the variance. The light samples clear the walls and the floor near the windows; what is left is indirect light and the window frames, which the samples hit from inside.
+- **Frame time**: 4.34, 7.42 and 6.85 ms/spp. Most environment shadow rays from inside a room end on a wall, and the table draws them anyway.
+
+#### Checking it
+
+The two strategies have to agree with BSDF sampling alone in the mean. A furnace, a white diffuse object under a constant environment of 1, is the sharpest check: every pixel's answer is exactly 1. `--out name.exr` keeps the scene-linear average as float32, which these numbers come from; see the last issue below for why `.hdr` is not good enough here.
+
+| scene, 320x320, 1024 spp | mean, environment NEE + MIS / BSDF only |
+|---|---|
+| furnace, sphere, one-color environment (uniform sphere sampling) | 1.00001 |
+| furnace, cube | 1.00000 |
+| furnace, floor seen from above | 1.00003 |
+| furnace, sphere, the constant map as a 64x32 image (the table) | 0.99999 |
+
+A 512x256 map with a sky of 0.1 and a 4x4 texel sun of 10⁴ at 45° over the floor: 3.9221 with compensation and 3.9221 without, against 3.913 ± 0.004 from BSDF sampling at 65536 spp (the sun is 0.05% of its hemisphere) and 3.924 by hand from the texels. Compensation cuts the per-pixel variance by 25% there; the sky is dim, so the plain table already sends nearly every pick to the sun.
+
+| scene, 320x180 | spp | mean, environment NEE + MIS / reference |
+|---|---|---|
+| hdri_helmet, against `--no-nee` | 4096 | 0.9999 |
+| living-room, against `--no-nee` | 2048 | 0.9998 |
+| classroom, against `--no-env-nee` (the sun is a distant light, which `--no-nee` cannot find) | 8192 | 0.9993 |
+| breakfast-room, against `--no-env-nee` | 8192 | 1.0012 |
+
+The 52 renders of `tests/cmp_renders.sh`, none of which has an environment, stay byte-identical.
 
 ### Performance optimization
 
@@ -506,3 +577,7 @@ The fix is just actually support alpha blending: a hit counts with probability a
 - **Every camera move freed and reallocated all device buffers.** A drag re-ran the full init per mouse event, about 2.8 ms at 800x800, more than a frame now costs. Buffers are allocated once; a camera change clears the image and resets the sample count.
 - **The accumulation buffer was copied to the host every iteration** so the S key could save at any time. The copy now happens inside save.
 - **A CUDA error waited on `getchar()` before exiting** on Windows, which hangs a headless run. Removed; the message goes to stderr either way.
+
+#### A 0.27% bias that was the image format
+
+The first furnace renders with environment NEE came out 0.27% dark in the mean against BSDF sampling, on the sphere, on a cube and on a flat floor alike, and the shadow rays, the MIS weights and the random number stream all checked out. The renders were compared as `.hdr`, Radiance RGBE: an 8-bit mantissa per channel, truncated, not rounded. The BSDF-only image is exactly 1.0 everywhere, which RGBE stores exactly. The NEE image is 1.0 plus a little noise, and every pixel slightly under 1.0 truncates down to 255/256 while every pixel slightly over stays at 1.0, so the whole image took 15 distinct values and its mean landed 0.27% low. Two noisy images truncate alike and their ratio hides this, which is why the NEE table above was fine in `.hdr`. `--out name.exr` now writes the float32 average as it is, through tinyexr, and the furnace means came back to 1.0000.

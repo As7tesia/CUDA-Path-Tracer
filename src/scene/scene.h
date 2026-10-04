@@ -16,6 +16,12 @@ struct SceneOverrides
     // A lat-long .hdr or .exr that replaces the scene's environment, at
     // strength 1 and no rotation
     std::string environmentFile;
+    // MIS compensation in the environment's sampling table (environment.h);
+    // --no-env-compensation turns it off
+    bool environmentCompensation = true;
+    // Whether the environment joins the light list; --no-env-nee leaves it
+    // to BSDF sampling, with next event estimation for the other lights
+    bool environmentLight = true;
 };
 
 // What a scene file says about the render itself. A scene JSON states all of
@@ -68,9 +74,11 @@ private:
     void loadFromJSON(const std::string& jsonName, const SceneOverrides& ov);
     void loadFromGltf(const std::string& gltfName, const SceneOverrides& ov);
     void initRenderState(const RenderSettings& settings, const CameraPose& pose);
-    // Fills the light list below once the scene is loaded (lights.cpp).
-    void buildLights();
 public:
+    // Fills the light list below once the scene and its environment are
+    // loaded (lights.cpp). Called again when the window swaps the
+    // environment, since its power changes every light's share.
+    void buildLights();
     // filename is a scene JSON, or a glTF file (.gltf / .glb) that is the
     // whole scene: geometry, materials, lights and camera. Throws a
     // std::runtime_error, starting with the file's name, when the file
@@ -117,8 +125,14 @@ public:
     std::vector<PunctualLight> punctualLights;
     std::vector<LightTriangle> lightTriangles;
     // Running sum of the pick probabilities over lightTriangles, then
-    // punctualLights; the last entry is 1.
+    // punctualLights, then the environment when it is one of the lights;
+    // the last entry is 1.
     std::vector<float> lightCdf;
+    // The environment's pick probability, the last entry's share of
+    // lightCdf; 0 when the scene has no environment to sample, or
+    // environmentLight is off.
+    float environmentPickPdf = 0.0f;
+    bool environmentLight = true;  // SceneOverrides::environmentLight
     // Per material: the density per unit area of next event estimation
     // landing on a point of one of its triangles, the pick probability over
     // the area, which comes to the same value for every triangle of the

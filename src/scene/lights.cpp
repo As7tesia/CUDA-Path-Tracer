@@ -7,6 +7,11 @@
 //   emissive triangle   2 pi * area * luminance(emission), emitting from both sides
 //   point light         4 pi * luminance(intensity)
 //   distant light       pi * r^2 * luminance(irradiance), r the scene's bounding sphere
+//   environment         pi * r^2 * integral of its luminance over all directions
+//
+// The last two are the flux through a disk as large as the scene, which for
+// the environment is pi r^2 per direction, integrated. A one-color
+// environment of luminance L comes to 4 pi^2 r^2 L.
 //
 // A triangle's emission is its material's emission factor times the average
 // color of the material's emissive texture over the whole image, as PBRT-v4
@@ -201,6 +206,14 @@ void Scene::buildLights()
         }
     }
 
+    // The environment, last, when there is one: the same disk, lit from
+    // every direction.
+    const bool hasEnvironment = environmentLight && environment.radianceIntegral > 0.0f;
+    if (hasEnvironment)
+    {
+        power.push_back(PI * radius * radius * environment.radianceIntegral);
+    }
+
     double total = 0.0;
     for (double p : power)
     {
@@ -208,6 +221,7 @@ void Scene::buildLights()
     }
     lightCdf.clear();
     emitterAreaPdf.assign(materials.size(), 0.0f);
+    environmentPickPdf = 0.0f;
     if (total <= 0.0)
     {
         lightTriangles.clear();
@@ -234,7 +248,16 @@ void Scene::buildLights()
     {
         punctualLights[i].pickPdf = (float)(power[lightTriangles.size() + i] / total);
     }
+    if (hasEnvironment)
+    {
+        environmentPickPdf = (float)(power.back() / total);
+    }
 
-    printf("Lights for next event estimation: %zu emissive triangles, %d point, %zu distant\n", lightTriangles.size(),
-        pointLights, punctualLights.size() - pointLights);
+    printf("Lights for next event estimation: %zu emissive triangles, %d point, %zu distant%s\n",
+        lightTriangles.size(), pointLights, punctualLights.size() - pointLights,
+        hasEnvironment ? ", the environment" : "");
+    if (hasEnvironment)
+    {
+        printf("  the environment gets %.1f%% of the light picks\n", 100.0 * environmentPickPdf);
+    }
 }

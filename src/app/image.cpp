@@ -1,6 +1,7 @@
 #include "app/image.h"
 
 #include <stb_image_write.h>
+#include <tinyexr.h>  // the implementation is compiled in scene/environment.cpp
 
 #include <cassert>
 #include <iostream>
@@ -47,6 +48,22 @@ void Image::savePNG(const std::string &baseFilename)
     }
 
     delete[] bytes;
+}
+
+void Image::saveEXR(const std::string &baseFilename)
+{
+    std::string filename = baseFilename + ".exr";
+    const char* err = nullptr;
+    // RGB float32 (the 0 is "not half"), ZIP compressed by tinyexr.
+    if (SaveEXR((const float*) pixels, xSize, ySize, 3, 0, filename.c_str(), &err) == TINYEXR_SUCCESS)
+    {
+        std::cout << "Saved " << filename << "." << std::endl;
+    }
+    else
+    {
+        std::cerr << "Could not write " << filename << ": " << (err != nullptr ? err : "unknown error") << std::endl;
+        FreeEXRErrorMessage(err);
+    }
 }
 
 void Image::saveHDR(const std::string &baseFilename)

@@ -33,6 +33,14 @@ struct EnvironmentMap
     glm::vec3 radiance;  // multiplies the image, or the color itself; zero: no environment
     float cosRotation;   // Environment::rotation
     float sinRotation;
+    // The sampling table, Environment's three arrays (scene/environment.h),
+    // for environmentSample and environmentPdf; null when the environment
+    // is one color
+    const float* pdfUv;           // width * height
+    const float* conditionalCdf;  // width * height
+    const float* marginalCdf;     // height
+    int width;
+    int height;
 };
 
 // Uploads the environment's image, if it has one. Called once from
