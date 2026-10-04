@@ -44,6 +44,24 @@ struct SurvivorBuffer
 };
 SurvivorBuffer wavefrontSurvivors();
 
+// Where shadeMaterial queues the shadow rays of next event estimation, one
+// per path at most, for the next OptiX launch to trace (see ShadowRay). Like
+// the survivors, the shade kernel appends into count, which starts at zero,
+// and zeroes nextCount for the following bounce. Two counters alternate: the
+// launch that reads one has finished before the shade kernel that zeroes it
+// runs, since all of them queue on one stream. The rays are overwritten by
+// every shade launch, after the launch before it has traced them.
+struct ShadowQueue
+{
+    ShadowRay* rays;
+    int* count;
+    int* nextCount;
+};
+ShadowQueue wavefrontShadowQueue();
+// After the shade launch: moves the counters on and returns the queue that
+// launch filled, for the launch that traces it (nextCount is null there).
+ShadowQueue wavefrontSwapShadowQueue();
+
 // After the shade launch: swaps the survivor buffer with paths, moves the
 // counters on to the next bounce and returns the number of survivors. Paths
 // that ended are not in the new buffer (shadeMaterial has already added their

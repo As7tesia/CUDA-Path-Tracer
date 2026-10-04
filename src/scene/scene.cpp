@@ -226,6 +226,7 @@ Scene::Scene(string filename, const SceneOverrides& ov)
         {
             sceneError("not a scene file (.json, .gltf or .glb)");
         }
+        buildLights();
         // --env replaces the scene file's environment, at strength 1 and no rotation
         environment = loadEnvironment(ov.environmentFile.empty()
                 ? environmentSource
@@ -462,13 +463,12 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
         }
     }
 
-    // Emissive surfaces and the environment are the only lights so far.
-    if (maxComponent(environmentSource.radiance) <= 0.0f && ov.environmentFile.empty()
+    if (maxComponent(environmentSource.radiance) <= 0.0f && ov.environmentFile.empty() && punctualLights.empty()
         && std::none_of(materials.begin(), materials.end(), [](const Material& m) {
                return maxComponent(m.emission) > 0.0f;
            }))
     {
-        cerr << "No emissive material or environment in " << gltfName << ": the render will be black" << endl;
+        cerr << "No light, emissive material or environment in " << gltfName << ": the render will be black" << endl;
     }
 
     // The file's hints where it has them, the defaults elsewhere.

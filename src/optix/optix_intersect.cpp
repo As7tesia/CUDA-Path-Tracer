@@ -32,7 +32,8 @@ namespace
 {
 // Everything OptiX owns for the lifetime of the scene, created by
 // optixIntersectInit and released by optixIntersectFree.
-constexpr int NUM_GROUPS = 5;         // raygen, miss, cube hit, sphere hit, mesh hit
+constexpr int NUM_GROUPS = 6;         // raygen, path miss, shadow miss, cube hit, sphere hit, mesh hit
+constexpr int NUM_MISS_GROUPS = 2;    // miss index 0 = path rays, 1 = shadow rays
 constexpr int NUM_HIT_GROUPS = 3;     // sbtOffset 0 = cube, 1 = sphere, 2 = mesh
 
 OptixDeviceContext context = nullptr;
@@ -284,7 +285,7 @@ bool buildIas(const Scene* scene, OptixTraversableHandle cubeGas, OptixTraversab
     return ok;
 }
 
-// Module from the embedded OptiX-IR, five program groups, one pipeline.
+// Module from the embedded OptiX-IR, six program groups, one pipeline.
 bool buildPipeline()
 {
     OptixModuleCompileOptions moduleOptions = {};  // defaults: full optimization, line info
@@ -314,19 +315,22 @@ bool buildPipeline()
     descs[1].kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
     descs[1].miss.module = module;
     descs[1].miss.entryFunctionName = "__miss__paths";
-    descs[2].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-    descs[2].hitgroup.moduleCH = module;
-    descs[2].hitgroup.entryFunctionNameCH = "__closesthit__cube";
+    descs[2].kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
+    descs[2].miss.module = module;
+    descs[2].miss.entryFunctionName = "__miss__shadow";
     descs[3].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     descs[3].hitgroup.moduleCH = module;
-    descs[3].hitgroup.entryFunctionNameCH = "__closesthit__sphere";
-    descs[3].hitgroup.moduleIS = module;
-    descs[3].hitgroup.entryFunctionNameIS = "__intersection__sphere";
-    descs[4].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;  // built-in triangle intersection, no IS
+    descs[3].hitgroup.entryFunctionNameCH = "__closesthit__cube";
+    descs[4].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     descs[4].hitgroup.moduleCH = module;
-    descs[4].hitgroup.entryFunctionNameCH = "__closesthit__mesh";
-    descs[4].hitgroup.moduleAH = module;
-    descs[4].hitgroup.entryFunctionNameAH = "__anyhit__mesh";
+    descs[4].hitgroup.entryFunctionNameCH = "__closesthit__sphere";
+    descs[4].hitgroup.moduleIS = module;
+    descs[4].hitgroup.entryFunctionNameIS = "__intersection__sphere";
+    descs[5].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;  // built-in triangle intersection, no IS
+    descs[5].hitgroup.moduleCH = module;
+    descs[5].hitgroup.entryFunctionNameCH = "__closesthit__mesh";
+    descs[5].hitgroup.moduleAH = module;
+    descs[5].hitgroup.entryFunctionNameAH = "__anyhit__mesh";
     OptixProgramGroupOptions groupOptions = {};
     logSize = sizeof(log);
     result = optixProgramGroupCreate(context, descs, NUM_GROUPS, &groupOptions, log, &logSize, groups);
@@ -382,8 +386,8 @@ bool buildSbt()
     sbt.raygenRecord = dev_sbtRecords;
     sbt.missRecordBase = dev_sbtRecords + sizeof(Record);
     sbt.missRecordStrideInBytes = sizeof(Record);
-    sbt.missRecordCount = 1;
-    sbt.hitgroupRecordBase = dev_sbtRecords + 2 * sizeof(Record);
+    sbt.missRecordCount = NUM_MISS_GROUPS;  // path rays, shadow rays
+    sbt.hitgroupRecordBase = dev_sbtRecords + (1 + NUM_MISS_GROUPS) * sizeof(Record);
     sbt.hitgroupRecordStrideInBytes = sizeof(Record);
     sbt.hitgroupRecordCount = NUM_HIT_GROUPS;  // cube, sphere, mesh
     return true;
@@ -504,16 +508,21 @@ void optixIntersectFree()
 
 void optixIntersect(int iter, int numPaths, const PathSegment* paths,
                     ShadeableIntersection* intersections, int* materialIds,
-                    int numMaterials, cudaStream_t stream)
+                    int numMaterials, const ShadowRay* shadowRays, const int* shadowCount,
+                    int shadowBound, glm::vec3* image, cudaStream_t stream)
 {
-    if (numPaths <= 0)
+    if (numPaths + shadowBound <= 0)
     {
         return;
     }
 
     OptixIntersectParams params = {};
     params.iter = iter;
+    params.numPaths = numPaths;
     params.paths = paths;
+    params.shadowRays = shadowRays;
+    params.shadowCount = shadowCount;
+    params.image = image;
     params.intersections = intersections;
     params.materialIds = materialIds;
     params.numMaterials = numMaterials;
@@ -528,7 +537,7 @@ void optixIntersect(int iter, int numPaths, const PathSegment* paths,
     CUDA_CHECK(cudaMemcpyAsync(dev_params, &params, sizeof(params), cudaMemcpyHostToDevice, stream));
 
     OptixResult result = optixLaunch(pipeline, stream, reinterpret_cast<CUdeviceptr>(dev_params),
-        sizeof(OptixIntersectParams), &sbt, numPaths, 1, 1);
+        sizeof(OptixIntersectParams), &sbt, numPaths + shadowBound, 1, 1);
     if (result != OPTIX_SUCCESS)
     {
         fatal("optixLaunch failed: %s (%s)", optixGetErrorName(result), optixGetErrorString(result));

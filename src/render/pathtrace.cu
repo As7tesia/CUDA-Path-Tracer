@@ -14,6 +14,7 @@
 #include "render/mesh_hit.h"
 #include "render/bsdf.h"
 #include "render/environment.h"
+#include "render/nee.h"
 #include "render/pbr_surface.h"
 #include "render/sampling.h"
 #include "render/wavefront_ops.h"
@@ -91,6 +92,9 @@ static MeshBuffers dev_mesh = {};
 static cudaTextureObject_t* dev_textures = NULL;
 // The scene's environment (textures.cpp), radiance zero when it has none.
 static EnvironmentMap dev_environment = {};
+// Next event estimation's light list (nee.h, from Scene's), numLights 0 when
+// the scene has nothing it can sample.
+static LightList dev_lights = {};
 
 // Device copy of a host vector, or null when it is empty.
 template <typename T>
@@ -117,6 +121,9 @@ void setRussianRoulette(bool enabled) { useRussianRoulette = enabled; }
 static bool useMaterialSort = true;
 void setMaterialSort(bool enabled) { useMaterialSort = enabled; }
 
+static bool useNee = true;
+void setNextEventEstimation(bool enabled) { useNee = enabled; }
+
 // OptiX intersection stage. useOptix is the request; optixReady is whether
 // optixIntersectInit succeeded, which is what intersectScene checks.
 static bool useOptix = true;
@@ -124,6 +131,10 @@ static bool optixValidation = false;
 static bool optixReady = false;
 void setOptix(bool enabled) { useOptix = enabled; }
 void setOptixValidation(bool enabled) { optixValidation = enabled; }
+
+// Shadow rays are traced by the OptiX launch, so next event estimation needs
+// OptiX, and a light to sample.
+bool pathtraceNeeAvailable() { return optixReady && dev_lights.numLights > 0; }
 
 static ToneMapMode toneMapMode = TONEMAP_AGX_PUNCHY;
 static float toneMapExposure = 1.f;
@@ -150,11 +161,15 @@ struct StageTiming
     int maxDepth = 0;                 // bounces the events cover
     int iterations = 0;               // iterations summed so far
     double generateMs = 0.0;
+    double shadowTailMs = 0.0;        // the launch of the last bounce's shadow rays, after the loop
     std::vector<double> stageMs;      // [depth * NUM_STAGES + stage]
     std::vector<double> alive;        // [depth]: paths entering bounce depth; [maxDepth]: left after the last
-    std::vector<cudaEvent_t> events;  // 0 before generate, 1 after, then 2 + depth * NUM_STAGES + stage
+    // 0 before generate, 1 after, then 2 + depth * NUM_STAGES + stage, then
+    // one after the shadow tail
+    std::vector<cudaEvent_t> events;
 
     int eventIndex(int depth, int stage) const { return 2 + depth * NUM_STAGES + stage; }
+    int tailIndex() const { return 2 + maxDepth * NUM_STAGES; }
     bool ready(int traceDepth) const { return !events.empty() && traceDepth <= maxDepth; }
 } stageTiming;
 
@@ -173,7 +188,7 @@ void stageTimingInit(int maxDepth)
     stageTiming.maxDepth = maxDepth;
     stageTiming.stageMs.assign((size_t)maxDepth * NUM_STAGES, 0.0);
     stageTiming.alive.assign((size_t)maxDepth + 1, 0.0);
-    stageTiming.events.resize(2 + (size_t)maxDepth * NUM_STAGES);
+    stageTiming.events.resize(3 + (size_t)maxDepth * NUM_STAGES);
     for (cudaEvent_t& e : stageTiming.events)
     {
         CUDA_CHECK(cudaEventCreate(&e));
@@ -184,10 +199,12 @@ void stageTimingInit(int maxDepth)
 void stageTimingAccumulate(int bounces)
 {
     StageTiming& st = stageTiming;
-    CUDA_CHECK(cudaEventSynchronize(st.events[st.eventIndex(bounces - 1, STAGE_COMPACT)]));
+    CUDA_CHECK(cudaEventSynchronize(st.events[st.tailIndex()]));
     float ms = 0.0f;
     CUDA_CHECK(cudaEventElapsedTime(&ms, st.events[0], st.events[1]));
     st.generateMs += ms;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, st.events[st.eventIndex(bounces - 1, STAGE_COMPACT)], st.events[st.tailIndex()]));
+    st.shadowTailMs += ms;
     int previous = 1;
     for (int depth = 0; depth < bounces; ++depth)
     {
@@ -212,7 +229,9 @@ void pathtraceTimingReport()
     }
     printf("TIMING,size.PathSegment_bytes,%zu\n", sizeof(PathSegment));
     printf("TIMING,size.ShadeableIntersection_bytes,%zu\n", sizeof(ShadeableIntersection));
+    printf("TIMING,size.ShadowRay_bytes,%zu\n", sizeof(ShadowRay));
     printf("TIMING,render.generate,%.4f\n", st.generateMs / st.iterations);
+    printf("TIMING,render.shadow_tail,%.4f\n", st.shadowTailMs / st.iterations);
     printf("BOUNCE,depth,alive_in,alive_out");
     for (int stage = 0; stage < NUM_STAGES; ++stage)
     {
@@ -251,6 +270,13 @@ void pathtraceInit(Scene* scene)
     dev_geoms = uploadVector(scene->geoms);
     dev_materials = uploadVector(scene->materials);
 
+    dev_lights.triangles = uploadVector(scene->lightTriangles);
+    dev_lights.punctual = uploadVector(scene->punctualLights);
+    dev_lights.cdf = uploadVector(scene->lightCdf);
+    dev_lights.emitterAreaPdf = uploadVector(scene->emitterAreaPdf);
+    dev_lights.numTriangles = (int)scene->lightTriangles.size();
+    dev_lights.numLights = (int)scene->lightCdf.size();
+
     CUDA_CHECK(cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection)));
     CUDA_CHECK(cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection)));
 
@@ -283,6 +309,10 @@ void pathtraceInit(Scene* scene)
     {
         fprintf(stderr, "OptiX unavailable, using the naive intersection kernel\n");
     }
+    if (useNee && !optixReady && dev_lights.numLights > 0)
+    {
+        fprintf(stderr, "Next event estimation needs OptiX for its shadow rays; lights are found by BSDF sampling only\n");
+    }
 
     if (timingEnabled())
     {
@@ -301,6 +331,11 @@ void pathtraceFree()
     cudaFree(dev_paths);
     cudaFree(dev_geoms);
     cudaFree(dev_materials);
+    cudaFree((void*)dev_lights.triangles);
+    cudaFree((void*)dev_lights.punctual);
+    cudaFree((void*)dev_lights.cdf);
+    cudaFree((void*)dev_lights.emitterAreaPdf);
+    dev_lights = {};
     cudaFree(dev_intersections);
     cudaFree(dev_materialIds);
     if (optixReady)
@@ -372,6 +407,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         segment.pixelIndex = index;
         segment.remainingBounces = traceDepth;
         segment.medium = -1;  // the camera sits in air
+        segment.pdf = 0.0f;   // a light the camera sees directly counts in full
     }
 }
 
@@ -470,12 +506,15 @@ __global__ void computeIntersections(
 
 // The intersection stage behind one call: OptiX when it initialized, else
 // the naive kernel above. Both fill dev_intersections and dev_materialIds the
-// same way, so nothing downstream knows which one ran.
-static void intersectScene(int iter, int numPaths, int numMaterials)
+// same way, so nothing downstream knows which one ran. OptiX also traces the
+// shadow rays the last shade launch queued, at most shadowBound of them;
+// without OptiX next event estimation is off and there are none.
+static void intersectScene(int iter, int numPaths, int numMaterials, const ShadowQueue& shadows, int shadowBound)
 {
     if (optixReady)
     {
-        optixIntersect(iter, numPaths, dev_paths, dev_intersections, dev_materialIds, numMaterials);
+        optixIntersect(iter, numPaths, dev_paths, dev_intersections, dev_materialIds, numMaterials, shadows.rays,
+            shadows.count, shadowBound, dev_image);
         return;
     }
     dim3 numBlocks = (numPaths + PATH_BLOCK_SIZE - 1) / PATH_BLOCK_SIZE;
@@ -500,17 +539,30 @@ static_assert(PATH_BLOCK_SIZE % 32 == 0, "shadeMaterial's blocks must be whole w
 // Shades paths[0, numPaths) and appends the paths that go on to
 // survivors.paths, compacted: the compaction is fused into shading, so no
 // separate pass reads the paths again to drop the ones that ended.
+//
+// With nee (next event estimation, which needs OptiX and a light in lights),
+// every hit that is not the path's last also samples a light and appends a
+// shadow ray carrying that sample's light to shadows, for the next OptiX
+// launch to trace. Each emitter's light then reaches the image along two
+// strategies, the light sample and a BSDF-sampled ray that happens to hit
+// the emitter, and the power heuristic splits it between them: both weights
+// come from the same two densities for the same direction (the BSDF's,
+// evalPbr, and the light's, sampleLight), so they add up to 1 and every
+// direction counts once.
 __global__ void shadeMaterial(
     int iter,
     int numPaths,
     int depth,
     bool russianRoulette,
+    bool nee,
     ShadeableIntersection* shadeableIntersections,
     const PathSegment* pathSegments,
     SurvivorBuffer survivors,
+    ShadowQueue shadows,
     Material* materials,
     const cudaTextureObject_t* textures,
     EnvironmentMap environment,
+    LightList lights,
     glm::vec3* image)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -529,13 +581,18 @@ __global__ void shadeMaterial(
         seg = pathSegments[idx];
         alive = seg.remainingBounces > 0;
     }
+    // This hit's light sample, appended to the shadow queue at the end like
+    // the survivors.
+    ShadowRay shadow;
+    bool queueShadow = false;
     if (alive)
     {
         ShadeableIntersection intersection = shadeableIntersections[idx];
 
         // A path ends by setting remainingBounces to 0 and is then left out
         // of the survivors. Its color is not read again: light reaches the
-        // image only through the environment and the emission added below.
+        // image only through the environment, the emission added below and
+        // the light samples it queues.
         if (intersection.t <= 0.0f)
         {
             // A miss: the path leaves the scene and adds the environment's
@@ -584,9 +641,27 @@ __global__ void shadeMaterial(
             // emitter also reflects, like any other surface. Each pixel has
             // exactly one path per iteration, so no two threads add to the
             // same pixel.
+            //
+            // With next event estimation, a ray the BSDF sampled from a rough
+            // lobe (pdf > 0) shares this light with the light sample the
+            // previous hit took: the light's density for the same direction
+            // is its area density times t^2 / cos at the emitter, with the
+            // flat triangle's cosine, as sampleLight computes it. A camera
+            // ray, a smooth lobe's ray and an emitter NEE does not sample
+            // (area density 0) keep all of it.
             if (emission != glm::vec3(0.0f))
             {
-                image[seg.pixelIndex] += seg.color * emission;
+                float weight = 1.0f;
+                if (nee && seg.pdf > 0.0f)
+                {
+                    const float areaPdf = lights.emitterAreaPdf[intersection.materialId];
+                    if (areaPdf > 0.0f)
+                    {
+                        const float lightPdf = areaPdf * intersection.t * intersection.t / intersection.cosGeometric;
+                        weight = powerHeuristic(seg.pdf, lightPdf);
+                    }
+                }
+                image[seg.pixelIndex] += seg.color * emission * weight;
             }
 
             if (lastBounce)
@@ -595,6 +670,40 @@ __global__ void shadeMaterial(
             }
             else
             {
+                // Next event estimation: one light sample per hit, before
+                // Russian roulette as in PBRT, so a path that ends here still
+                // gets its direct light. The BSDF is evaluated toward the
+                // light, and the power heuristic weighs the sample against
+                // the BSDF's density for that direction. A smooth material
+                // gives nothing (evalPbr is zero), and no shadow ray goes out.
+                if (nee)
+                {
+                    thrust::uniform_real_distribution<float> u01(0, 1);
+                    const float u0 = u01(rng);
+                    const float u1 = u01(rng);
+                    const float u2 = u01(rng);
+                    LightSample light;
+                    if (sampleLight(lights, materials, textures, hitPoint, u0, u1, u2, light))
+                    {
+                        const BsdfEval f = evalPbr(wo, light.wi, intersection.surfaceNormal, intersection.outside,
+                            material, surface);
+                        if (f.fCos != glm::vec3(0.0f))
+                        {
+                            const float weight = light.pdf > 0.0f ? powerHeuristic(light.pdf, f.pdf) : 1.0f;
+                            // The shadow ray leaves on the side the light is
+                            // on: through the surface for a transmission.
+                            const float side = glm::dot(light.wi, intersection.surfaceNormal) > 0.0f ? 1.0f : -1.0f;
+                            shadow.origin = offsetOrigin(hitPoint, side * intersection.surfaceNormal);
+                            shadow.direction = light.wi;
+                            shadow.tMax = light.tMax;
+                            shadow.contribution = seg.color * f.fCos * light.weightedLight * weight;
+                            shadow.pixelIndex = seg.pixelIndex;
+                            shadow.alphaSeed = shadowAlphaSeed(iter, seg.pixelIndex, seg.remainingBounces);
+                            queueShadow = true;
+                        }
+                    }
+                }
+
                 // Russian roulette from the third bounce: the path survives
                 // with a probability that follows the luminance of its
                 // throughput (at most 0.95), and a survivor's throughput is
@@ -665,6 +774,27 @@ __global__ void shadeMaterial(
     {
         *survivors.nextCount = 0;
     }
+
+    // Shadow rays the same way. Without next event estimation the queue
+    // and its counters are left alone.
+    if (nee)
+    {
+        const unsigned int warpShadows = __ballot_sync(0xffffffffu, queueShadow);
+        int shadowBase = 0;
+        if (lane == 0 && warpShadows != 0)
+        {
+            shadowBase = atomicAdd(shadows.count, __popc(warpShadows));
+        }
+        shadowBase = __shfl_sync(0xffffffffu, shadowBase, 0);
+        if (queueShadow)
+        {
+            shadows.rays[shadowBase + __popc(warpShadows & ((1u << lane) - 1u))] = shadow;
+        }
+        if (idx == 0)
+        {
+            *shadows.nextCount = 0;
+        }
+    }
 }
 
 // Number of bits needed to hold every value in [0, maxValue]. Sets the radix
@@ -710,6 +840,14 @@ void pathtrace(uchar4* pbo, int iter)
     int depth = 0;
     int numPaths = pixelcount;
 
+    // Next event estimation's shadow rays are traced one bounce late, by the
+    // next bounce's intersection launch: the queue the last shade launch
+    // filled, and an upper bound on its count, the number of paths that
+    // launch shaded (0: nothing queued).
+    const bool nee = useNee && pathtraceNeeAvailable();
+    ShadowQueue queuedShadows = {};
+    int shadowBound = 0;
+
     // One bounce per pass: intersect, sort by material, and shade, which makes
     // the next rays and compacts away the paths that ended.
     bool iterationComplete = false;
@@ -724,7 +862,7 @@ void pathtrace(uchar4* pbo, int iter)
 
         // tracing
         dim3 numBlocks = (numPaths + PATH_BLOCK_SIZE - 1) / PATH_BLOCK_SIZE;
-        intersectScene(iter, numPaths, numMaterials);
+        intersectScene(iter, numPaths, numMaterials, queuedShadows, shadowBound);
         checkCUDAError("trace one bounce");
 #if ERRORCHECK
         cudaDeviceSynchronize();
@@ -754,17 +892,28 @@ void pathtrace(uchar4* pbo, int iter)
             numPaths,
             depth + 1,
             useRussianRoulette,
+            nee,
             dev_intersections,
             dev_paths,
             wavefrontSurvivors(),
+            wavefrontShadowQueue(),
             dev_materials,
             dev_textures,
             dev_environment,
+            dev_lights,
             dev_image
         );
         if (timing)
         {
             CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.eventIndex(depth, STAGE_SHADE)]));
+        }
+        // Every path of a bounce has the same bounces left, so the last
+        // bounce, which samples no lights, queues nothing.
+        shadowBound = 0;
+        if (nee)
+        {
+            queuedShadows = wavefrontSwapShadowQueue();
+            shadowBound = depth + 1 < traceDepth ? numPaths : 0;
         }
         // Swaps dev_paths for the survivors and reads their count back.
         numPaths = wavefrontSwapPaths(dev_paths);
@@ -781,14 +930,25 @@ void pathtrace(uchar4* pbo, int iter)
             guiData->tracedDepth = depth;
         }
     }
+
+    // The shadow rays of the last bounce that queued any: the paths ended
+    // (or ran out of bounces), so a launch of shadow rays alone.
+    if (shadowBound > 0)
+    {
+        optixIntersect(iter, 0, dev_paths, dev_intersections, dev_materialIds, numMaterials, queuedShadows.rays,
+            queuedShadows.count, shadowBound, dev_image);
+        checkCUDAError("trace the last shadow rays");
+    }
     if (timing)
     {
+        CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.tailIndex()]));
         stageTiming.alive[depth] += numPaths;  // survivors of the last bounce run
         stageTimingAccumulate(depth);
     }
 
     // No gather pass: shadeMaterial adds light to dev_image at the hit that
-    // emits it, or at the miss that reaches the environment.
+    // emits it, or at the miss that reaches the environment, and the OptiX
+    // launches add the light samples whose shadow rays get through.
 
     // Send results to OpenGL buffer for rendering (pbo is null in headless mode)
     if (pbo != nullptr)

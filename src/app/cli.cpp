@@ -10,7 +10,7 @@ namespace
 {
 const char* const USAGE =
     "Usage: %s SCENE [--headless] [--spp N] [--res WxH] [--depth N] [--out PATH.png] [--env FILE]\n"
-    "                     [--no-rr] [--sort] [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
+    "                     [--no-rr] [--sort] [--no-nee] [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
     "                     [--no-optix] [--optix-validate] [--timing]\n"
     "       %s --list\n"
     "  SCENE            a scene .json, a .gltf / .glb file that is the whole scene, or a scene name:\n"
@@ -20,12 +20,14 @@ const char* const USAGE =
     "  --spp N          override the scene's ITERATIONS\n"
     "  --res WxH        override the scene's RES\n"
     "  --depth N        override the scene's DEPTH, the most rays a path may trace\n"
-    "  --out PATH       write exactly this file (default: img/auto_saved/<FILE>.<time>.<spp>samp.png)\n"
+    "  --out PATH       write exactly this file (default: img/auto_saved/<FILE>.<time>.<spp>samp.png);\n"
+    "                   a .hdr path keeps the scene-linear average, without view transform or exposure\n"
     "  --env FILE       light the scene with this lat-long .hdr or .exr instead of its own environment\n"
     "  --no-rr          disable Russian roulette path termination\n"
     "  --sort           sort paths by material before shading (off by default: it costs 2 to 3.5x, see the README)\n"
     "  --no-sort        the default, kept for scripts\n"
-    "  --no-optix       intersect with the naive per-object kernel instead of OptiX\n"
+    "  --no-nee         no next event estimation: lights count only when a path hits them\n"
+    "  --no-optix       intersect with the naive per-object kernel instead of OptiX (implies --no-nee)\n"
     "  --optix-validate OptiX validation mode: checks every launch, slow\n"
     "  --timing         with --headless: print load, init and per-bounce stage times as CSV lines\n"
     "  --tonemap MODE   view transform for display and PNG (default agx-punchy; none = raw clamp)\n"
@@ -99,6 +101,10 @@ Options parseArguments(int argc, char** argv)
         else if (a == "--no-sort")
         {
             options.materialSort = false;
+        }
+        else if (a == "--no-nee")
+        {
+            options.nee = false;
         }
         else if (a == "--no-optix")
         {

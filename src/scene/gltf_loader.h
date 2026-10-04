@@ -59,7 +59,10 @@ struct GltfInfo
 // Appends a glTF file's meshes to the scene. Every (node, primitive) pair in
 // the file's default scene becomes one Geom of type MESH whose transform is
 // sceneTransform times the node's world transform; the primitive's vertices
-// and triangles go into the scene's flat mesh arrays (see Scene).
+// and triangles go into the scene's flat mesh arrays (see Scene). Its
+// KHR_lights_punctual point and directional lights go into
+// Scene::punctualLights under the same transforms, and so do a research
+// scene's PBRT distant lights when info is given.
 //
 // Materials go into Scene::materials, unless materialOverride is a material
 // index, which every primitive then uses: each glTF material becomes a
@@ -69,7 +72,7 @@ struct GltfInfo
 // Only triangle-list primitives with float positions are loaded. Prints a
 // summary line, or the error and returns false when the file cannot be
 // loaded. info, when given, receives the rest of what the file holds; a file
-// loaded without it (a mesh inside a scene JSON) has its infinite light
-// reported as ignored.
+// loaded without it (a mesh inside a scene JSON) has its PBRT infinite and
+// distant lights reported as ignored.
 bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int materialOverride, Scene& scene,
     GltfInfo* info = nullptr);

@@ -68,6 +68,8 @@ private:
     void loadFromJSON(const std::string& jsonName, const SceneOverrides& ov);
     void loadFromGltf(const std::string& gltfName, const SceneOverrides& ov);
     void initRenderState(const RenderSettings& settings, const CameraPose& pose);
+    // Fills the light list below once the scene is loaded (lights.cpp).
+    void buildLights();
 public:
     // filename is a scene JSON, or a glTF file (.gltf / .glb) that is the
     // whole scene: geometry, materials, lights and camera. Throws a
@@ -105,5 +107,23 @@ public:
     // The environment that renders, read: --env when given, else the scene
     // file's own. The window can replace it.
     Environment environment;
+
+    // Next event estimation's lights. punctualLights comes from the glTF
+    // loader (KHR_lights_punctual point and directional lights, PBRT distant
+    // lights); buildLights adds every emissive triangle (meshes, and cubes as
+    // their 12 triangles; emissive spheres are left to BSDF sampling) and the
+    // probabilities the shade kernel picks lights with, proportional to
+    // their power. Empty when the scene has no light to sample.
+    std::vector<PunctualLight> punctualLights;
+    std::vector<LightTriangle> lightTriangles;
+    // Running sum of the pick probabilities over lightTriangles, then
+    // punctualLights; the last entry is 1.
+    std::vector<float> lightCdf;
+    // Per material: the density per unit area of next event estimation
+    // landing on a point of one of its triangles, the pick probability over
+    // the area, which comes to the same value for every triangle of the
+    // material (lights.cpp). The light pdf of a ray that hits an emitter
+    // needs nothing else. 0 for a material NEE never samples.
+    std::vector<float> emitterAreaPdf;
     RenderState state;
 };

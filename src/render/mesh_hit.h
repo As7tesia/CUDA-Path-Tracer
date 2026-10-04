@@ -70,6 +70,16 @@ __device__ __forceinline__ unsigned int alphaPathSeed(int iter, int pixelIndex, 
     return utilhash(utilhash(utilhash(pixelIndex) ^ iter) ^ depth);
 }
 
+// The seed of a shadow ray's ALPHA_BLEND tests, for the path at depth that
+// casts it. It has to differ from every path segment's seed: a shadow ray
+// that crosses a blended triangle the path's own ray passed through would
+// otherwise repeat that decision, and the two would be correlated. Depths
+// stay below 2^16, so the flag bit keeps the two sets apart.
+__device__ __forceinline__ unsigned int shadowAlphaSeed(int iter, int pixelIndex, int depth)
+{
+    return alphaPathSeed(iter, pixelIndex, depth | 0x10000);
+}
+
 // Whether a hit at uv falls in a cut-out, where the ray goes on as if
 // nothing was there: the naive mesh test and the OptiX any-hit program.
 // glTF's alpha is the base color factor's alpha times the base color

@@ -2,12 +2,16 @@
 // OptiX-IR (see CMakeLists.txt), not linked like the other .cu files: the
 // driver compiles them at run time when optixModuleCreate runs.
 //
-// The programs produce exactly what computeIntersections in pathtrace.cu
-// produces, so shadeMaterial and the material sort cannot tell the two apart:
-// t along the normalized ray, the surface normal with the same orientation
-// convention as the naive tests, the uv, the tangent, the material id, the
-// outside flag, and the sort key. There is no payload: every program knows
-// its launch index and writes straight into the intersection buffer.
+// For path rays the programs produce what computeIntersections in
+// pathtrace.cu produces, so shadeMaterial and the material sort cannot tell
+// the two apart: t along the normalized ray, the surface normal with the same
+// orientation convention as the naive tests, the uv, the tangent, the
+// material id, the outside flag, and the sort key. They also write the
+// geometric cosine next event estimation needs, which the naive kernel
+// leaves out. The same launch traces the queued shadow rays (see
+// OptixIntersectParams), which stop at the first hit and add their light in
+// their miss program. There is no payload: every program knows its launch
+// index and writes straight into the buffers.
 
 #include <optix.h>
 
@@ -34,21 +38,50 @@ static __forceinline__ __device__ glm::vec3 toVec3(float3 v)
 // what shadeMaterial expects when it rebuilds the hit point as origin + t * dir.
 // No ray flags: the geometry and instance flags (optix_intersect.cpp) leave
 // any-hit on for alpha-tested (ALPHA_MASK and ALPHA_BLEND) instances only.
+//
+// Past the paths, one thread per queued shadow ray. The launch is as wide as
+// the number of paths the queuing shade launch had, which bounds the queue,
+// so the host never reads back how many rays it holds; the threads past
+// that count return. A shadow ray only asks whether anything lies before
+// tMax: it ends at the first hit it finds, runs no closest-hit program, and
+// takes miss program 1. The hit groups are the path rays' own, so the alpha
+// test still runs and cut-outs let light through.
 extern "C" __global__ void __raygen__paths()
 {
     const unsigned int i = optixGetLaunchIndex().x;
-    const Ray ray = params.paths[i].ray;
+    if (i < (unsigned int)params.numPaths)
+    {
+        const Ray ray = params.paths[i].ray;
+        optixTrace(params.handle,
+            toFloat3(ray.origin),
+            toFloat3(glm::normalize(ray.direction)),
+            0.0f,                  // tmin: the naive tests accept any t > 0 too
+            1e16f,                 // tmax
+            0.0f,                  // ray time, no motion blur
+            OptixVisibilityMask(255),
+            OPTIX_RAY_FLAG_NONE,
+            0,                     // SBT offset, added to the instance's sbtOffset
+            1,                     // SBT stride: one set of hit groups for both kinds of ray
+            0);                    // miss program index
+        return;
+    }
+    const unsigned int s = i - params.numPaths;
+    if (s >= (unsigned int)*params.shadowCount)
+    {
+        return;
+    }
+    const ShadowRay& ray = params.shadowRays[s];
     optixTrace(params.handle,
         toFloat3(ray.origin),
-        toFloat3(glm::normalize(ray.direction)),
-        0.0f,                  // tmin: the naive tests accept any t > 0 too
-        1e16f,                 // tmax
-        0.0f,                  // ray time, no motion blur
+        toFloat3(ray.direction),
+        0.0f,                      // the origin already sits off the surface
+        ray.tMax,
+        0.0f,
         OptixVisibilityMask(255),
-        OPTIX_RAY_FLAG_NONE,
-        0,                     // SBT offset, added to the instance's sbtOffset
-        1,                     // SBT stride: one ray type
-        0);                    // miss program index
+        OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT,
+        0,
+        1,
+        1);                        // __miss__shadow
 }
 
 // A miss is t = -1 and the one-past-the-last material id as the sort key,
@@ -60,14 +93,27 @@ extern "C" __global__ void __miss__paths()
     params.materialIds[i] = params.numMaterials;
 }
 
+// A shadow ray that reached tMax without a hit: nothing blocks the light, so
+// its contribution goes into the pixel. A path queues at most one shadow ray
+// per bounce and each pixel has one path, so no two threads add to the same
+// pixel, and the shade kernels that also add to it run before and after the
+// launch.
+extern "C" __global__ void __miss__shadow()
+{
+    const ShadowRay& ray = params.shadowRays[optixGetLaunchIndex().x - params.numPaths];
+    params.image[ray.pixelIndex] += ray.contribution;
+}
+
 // The hit instance's record: material, and mesh for MESH instances.
 static __forceinline__ __device__ InstanceRecord instance()
 {
     return params.instances[optixGetInstanceId()];
 }
 
+// geometricNormal is unit length in world space; only its cosine with the
+// ray is kept (ShadeableIntersection::cosGeometric).
 static __forceinline__ __device__ void writeHit(int materialId, glm::vec3 normal, glm::vec2 uv, glm::vec4 tangent,
-    bool outside)
+    bool outside, glm::vec3 geometricNormal)
 {
     const unsigned int i = optixGetLaunchIndex().x;
 
@@ -78,6 +124,7 @@ static __forceinline__ __device__ void writeHit(int materialId, glm::vec3 normal
     isect.tangent = tangent;
     isect.materialId = materialId;
     isect.outside = outside;
+    isect.cosGeometric = fabsf(glm::dot(geometricNormal, toVec3(optixGetWorldRayDirection())));
     params.intersections[i] = isect;
     params.materialIds[i] = materialId;
 }
@@ -107,7 +154,7 @@ extern "C" __global__ void __closesthit__cube()
     {
         normal = -normal;
     }
-    writeHit(instance().materialId, normal, glm::vec2(0.0f), glm::vec4(0.0f), outside);
+    writeHit(instance().materialId, normal, glm::vec2(0.0f), glm::vec4(0.0f), outside, normal);
 }
 
 // Unit sphere GAS: one custom primitive, center at the origin, radius 0.5,
@@ -181,7 +228,7 @@ extern "C" __global__ void __closesthit__sphere()
         normal = -normal;
     }
 
-    writeHit(instance().materialId, normal, glm::vec2(0.0f), glm::vec4(0.0f), outside);
+    writeHit(instance().materialId, normal, glm::vec2(0.0f), glm::vec4(0.0f), outside, normal);
 }
 
 // Mesh GAS: OptiX's built-in triangle intersection reports which triangle of
@@ -217,7 +264,7 @@ extern "C" __global__ void __closesthit__mesh()
     const glm::vec2 uv = interpolate(params.buffers.uvs, tri, bary.x, bary.y);
     const glm::vec4 tangent = meshTangent(params.buffers.tangents, tri, bary.x, bary.y, inst.tangentSign, vectorToWorld);
 
-    writeHit(inst.materialId, normal, uv, tangent, outside);
+    writeHit(inst.materialId, normal, uv, tangent, outside, glm::normalize(normalToWorld(geometricNormal)));
 }
 
 // Any-hit for alpha-tested instances only (the others have it disabled by
@@ -225,7 +272,8 @@ extern "C" __global__ void __closesthit__mesh()
 // the same test meshIntersectionTest makes. OptiX may call this more than
 // once for the same triangle; the test gives the same answer every time.
 // The primitive index is the triangle's index in its mesh, since each mesh
-// GAS is built from that mesh's slice of the index array.
+// GAS is built from that mesh's slice of the index array. A shadow ray
+// carries its own seed.
 extern "C" __global__ void __anyhit__mesh()
 {
     const InstanceRecord inst = instance();
@@ -234,8 +282,17 @@ extern "C" __global__ void __anyhit__mesh()
     const glm::ivec3 tri = params.buffers.indices[mesh.indexOffset + triangle];
     const float2 bary = optixGetTriangleBarycentrics();
     const glm::vec2 uv = interpolate(params.buffers.uvs, tri, bary.x, bary.y);
-    const PathSegment& path = params.paths[optixGetLaunchIndex().x];
-    const unsigned int alphaSeed = alphaPathSeed(params.iter, path.pixelIndex, path.remainingBounces);
+    const unsigned int i = optixGetLaunchIndex().x;
+    unsigned int alphaSeed;
+    if (i < (unsigned int)params.numPaths)
+    {
+        const PathSegment& path = params.paths[i];
+        alphaSeed = alphaPathSeed(params.iter, path.pixelIndex, path.remainingBounces);
+    }
+    else
+    {
+        alphaSeed = params.shadowRays[i - params.numPaths].alphaSeed;
+    }
     if (alphaCutOut(params.materials[inst.materialId], uv, params.textures, alphaSeed, optixGetInstanceId(), triangle))
     {
         optixIgnoreIntersection();

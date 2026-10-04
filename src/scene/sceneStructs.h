@@ -157,6 +157,12 @@ struct PathSegment
     // a PBR surface, cleared when it refracts out. Its KHR_materials_volume
     // absorption applies to every segment in between.
     int medium;
+    // The solid-angle density scatterPbr sampled ray.direction with, over the
+    // BSDF's rough lobes (evalPbr's pdf). 0 for a camera ray and for a smooth
+    // lobe's direction, which next event estimation cannot sample: the
+    // emission such a ray reaches counts in full instead of through a MIS
+    // weight.
+    float pdf;
 };
 
 // Use with a corresponding PathSegment to do:
@@ -173,4 +179,55 @@ struct ShadeableIntersection
   glm::vec4 tangent;
   int materialId;
   bool outside;
+  // |cos| between the ray and the geometric normal at the hit. surfaceNormal
+  // is the interpolated normal on a mesh, and the light pdf of a hit on an
+  // emitter has to use the same flat-triangle cosine next event estimation
+  // samples the emitter with. Written by the OptiX hit programs only: next
+  // event estimation needs OptiX, so the naive kernel leaves it unset.
+  float cosGeometric;
+};
+
+// One emissive triangle in world space, a light next event estimation picks
+// (lights.cpp). cross(e1, e2) is the front-face normal, so a mirroring
+// instance transform has its corners 1 and 2 swapped. Cubes have uv (0, 0)
+// at every corner.
+struct LightTriangle
+{
+    glm::vec3 p0;
+    glm::vec3 e1;  // p1 - p0
+    glm::vec3 e2;  // p2 - p0
+    glm::vec2 uv0;
+    glm::vec2 uv1;
+    glm::vec2 uv2;
+    int materialId;
+};
+
+enum PunctualLightType
+{
+    LIGHT_POINT,
+    LIGHT_DISTANT
+};
+
+// A light without a surface: a KHR_lights_punctual point or directional
+// light, or a PBRT distant light. No ray can hit one, so only next event
+// estimation reaches it, and its light counts without a MIS weight.
+struct PunctualLight
+{
+    PunctualLightType type;
+    glm::vec3 position;   // LIGHT_POINT: where it is; LIGHT_DISTANT: unit direction toward it
+    glm::vec3 intensity;  // LIGHT_POINT: radiant intensity (W/sr); LIGHT_DISTANT: irradiance facing it (W/m^2)
+    float pickPdf;        // the probability next event estimation picks it with (lights.cpp)
+};
+
+// A shadow ray of next event estimation, queued by shadeMaterial and traced
+// by the next OptiX launch: when nothing lies between origin and tMax, the
+// light is visible and contribution goes into the pixel.
+struct ShadowRay
+{
+    glm::vec3 origin;
+    glm::vec3 direction;     // unit length
+    float tMax;              // just short of the point on the light
+    glm::vec3 contribution;  // the light sample's whole term, MIS weight included
+    int pixelIndex;
+    unsigned int alphaSeed;  // seeds the ALPHA_BLEND test, see shadowAlphaSeed (mesh_hit.h)
 };

@@ -26,6 +26,13 @@ size_t cubTempBytes = 0;
 int* dev_survivorCounts = nullptr;
 int survivorSlot = 0;
 
+// The shadow queue (wavefront_ops.h): one ray buffer and two counters. The
+// shade kernel appends into dev_shadowCounts[shadowSlot]; the slot flips per
+// shade launch and carries over between iterations, like survivorSlot.
+ShadowRay* dev_shadowRays = nullptr;
+int* dev_shadowCounts = nullptr;
+int shadowSlot = 0;
+
 // Also catches a missing wavefrontInit: CUB treats a null temp pointer as a
 // size query and would return success without doing any work.
 void checkCapacity(int numPaths)
@@ -71,6 +78,10 @@ void wavefrontInit(int maxPaths)
     CUDA_CHECK(cudaMalloc(&dev_survivorCounts, 3 * sizeof(int)));
     CUDA_CHECK(cudaMemset(dev_survivorCounts, 0, 3 * sizeof(int)));
     survivorSlot = 0;
+    CUDA_CHECK(cudaMalloc(&dev_shadowRays, maxPaths * sizeof(ShadowRay)));
+    CUDA_CHECK(cudaMalloc(&dev_shadowCounts, 2 * sizeof(int)));
+    CUDA_CHECK(cudaMemset(dev_shadowCounts, 0, 2 * sizeof(int)));
+    shadowSlot = 0;
 
     // With a null temp pointer CUB only reports how much temporary storage it
     // needs, here for the sort at the largest input.
@@ -87,6 +98,8 @@ void wavefrontFree()
     cudaFree(dev_sortedIndices);
     cudaFree(dev_sortedKeys);
     cudaFree(dev_survivorCounts);
+    cudaFree(dev_shadowRays);
+    cudaFree(dev_shadowCounts);
     cudaFree(dev_cubTemp);
 
     dev_sparePaths = nullptr;
@@ -96,6 +109,9 @@ void wavefrontFree()
     dev_sortedKeys = nullptr;
     dev_survivorCounts = nullptr;
     survivorSlot = 0;
+    dev_shadowRays = nullptr;
+    dev_shadowCounts = nullptr;
+    shadowSlot = 0;
     dev_cubTemp = nullptr;
     cubTempBytes = 0;
     capacity = 0;
@@ -104,6 +120,18 @@ void wavefrontFree()
 SurvivorBuffer wavefrontSurvivors()
 {
     return { dev_sparePaths, dev_survivorCounts + survivorSlot, dev_survivorCounts + (survivorSlot + 1) % 3 };
+}
+
+ShadowQueue wavefrontShadowQueue()
+{
+    return { dev_shadowRays, dev_shadowCounts + shadowSlot, dev_shadowCounts + (shadowSlot ^ 1) };
+}
+
+ShadowQueue wavefrontSwapShadowQueue()
+{
+    const ShadowQueue filled = { dev_shadowRays, dev_shadowCounts + shadowSlot, nullptr };
+    shadowSlot ^= 1;
+    return filled;
 }
 
 int wavefrontSwapPaths(PathSegment*& paths, cudaStream_t stream)

@@ -19,10 +19,18 @@ struct InstanceRecord
     float tangentSign;  // Geom::tangentSign
 };
 
+// One launch traces two kinds of rays: launch indices below numPaths are
+// path rays, the ones past it the shadow rays the previous shade launch
+// queued (next event estimation), which only ask whether anything blocks
+// them.
 struct OptixIntersectParams
 {
     int iter;                              // seeds the ALPHA_BLEND test (alphaPathSeed)
-    const PathSegment* paths;              // paths[i].ray is the ray for launch index i
+    int numPaths;
+    const PathSegment* paths;              // paths[i].ray is the ray for launch index i < numPaths
+    const ShadowRay* shadowRays;           // shadowRays[i - numPaths] for launch index i >= numPaths
+    const int* shadowCount;                // how many shadowRays the queue holds; the launch may be wider
+    glm::vec3* image;                      // a shadow ray that reaches its light adds its contribution here
     ShadeableIntersection* intersections;  // closest-hit and miss write intersections[i]
     int* materialIds;                      // sort key per path: materialId on hit, numMaterials on miss
     int numMaterials;

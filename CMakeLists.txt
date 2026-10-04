@@ -86,6 +86,7 @@ set(headers
     src/render/environment.h
     src/render/intersections.h
     src/render/mesh_hit.h
+    src/render/nee.h
     src/render/pathtrace.h
     src/render/pbr_surface.h
     src/render/sampling.h
@@ -114,6 +115,7 @@ set(sources
     src/render/wavefront_ops.cu
     src/scene/environment.cpp
     src/scene/gltf_loader.cpp
+    src/scene/lights.cpp
     src/scene/scene.cpp
     src/stb.cpp
     src/timing.cpp

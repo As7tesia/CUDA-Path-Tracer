@@ -30,6 +30,13 @@ void optixIntersectFree();
 // Traces paths[0, numPaths) and writes intersections and materialIds for each.
 // The buffers may change between calls (they ping-pong in the wavefront loop).
 // iter seeds the ALPHA_BLEND test.
+//
+// The same launch traces the shadow rays in shadowRays, *shadowCount of them
+// (a device value; next event estimation), and adds the contribution of each
+// one that nothing blocks to image. shadowBound is a host-side upper bound
+// on that count, which sets how wide the launch is; 0 traces no shadow rays.
+// numPaths may be 0 to trace only shadow rays.
 void optixIntersect(int iter, int numPaths, const PathSegment* paths,
                     ShadeableIntersection* intersections, int* materialIds,
-                    int numMaterials, cudaStream_t stream = 0);
+                    int numMaterials, const ShadowRay* shadowRays, const int* shadowCount,
+                    int shadowBound, glm::vec3* image, cudaStream_t stream = 0);

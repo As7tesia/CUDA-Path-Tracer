@@ -38,6 +38,10 @@
 
 namespace
 {
+// Lumens per watt, the photometric constant KHR_lights_punctual's candela
+// and lux are converted with (see Loader::lightFor).
+constexpr double LUMENS_PER_WATT = 683.0;
+
 // A window onto one accessor's elements: glTF stores vertex attributes in
 // buffer views that may interleave several attributes, so element i sits at
 // data + i * stride, not at i * sizeof(element).
@@ -414,20 +418,87 @@ std::optional<GltfEnvironment> pbrtEnvironment(const tinygltf::Model& model, con
     return std::nullopt;
 }
 
-// Names the lights in the file that do not reach the render, so a dark image
-// explains itself. Emissive surfaces light a scene, and PBRT's infinite
-// lights become the environment when the file is the whole scene
-// (environmentRead). Punctual lights (KHR_lights_punctual, which tinygltf
-// parses into model.lights) and PBRT's distant lights have no surface a path
-// could hit and wait for direct light sampling. The research scenes list the
-// PBRT ones under extras.pbrt.light_sources and mark those glTF cannot
-// express as "metadata_only"; the list's area lights are in the file as
-// emissive meshes.
-void reportUnusedLights(const tinygltf::Model& model, const std::string& path, bool environmentRead)
+// Whether an entry of extras.pbrt.light_sources is a PBRT distant light.
+bool isDistantLight(const tinygltf::Value& light)
 {
-    if (!model.lights.empty())
+    const tinygltf::Value& kind = member(light, "pbrt");
+    return kind.IsString() && kind.Get<std::string>() == "distant";
+}
+
+// The file's PBRT distant lights, appended to the scene's punctual lights.
+// radiance_rgb is the irradiance facing the light, in the units the
+// emission uses; the light shines from "from" toward "to" under
+// pbrt_transform, which lists PBRT's matrix column by column. The research
+// scenes keep PBRT's world coordinates, so the direction needs nothing else.
+void addPbrtDistantLights(const tinygltf::Model& model, Scene& scene)
+{
+    const tinygltf::Value& sources = member(member(model.extras, "pbrt"), "light_sources");
+    auto vec3Member = [](const tinygltf::Value& object, const char* key, glm::vec3 fallback) {
+        const tinygltf::Value& v = member(object, key);
+        return v.ArrayLen() == 3 ? glm::vec3(v.Get(0).GetNumberAsDouble(), v.Get(1).GetNumberAsDouble(),
+                                       v.Get(2).GetNumberAsDouble())
+                                 : fallback;
+    };
+    for (size_t i = 0; i < sources.ArrayLen(); ++i)
     {
-        fprintf(stderr, "glTF %s: %zu punctual lights ignored (not supported yet)\n", path.c_str(), model.lights.size());
+        const tinygltf::Value& light = sources.Get(i);
+        if (!isDistantLight(light))
+        {
+            continue;
+        }
+        glm::mat4 worldFromLight(1.0f);
+        const tinygltf::Value& transform = member(light, "pbrt_transform");
+        if (transform.ArrayLen() == 16)
+        {
+            for (int k = 0; k < 16; ++k)
+            {
+                worldFromLight[k / 4][k % 4] = (float)transform.Get(k).GetNumberAsDouble();
+            }
+        }
+        const glm::vec3 toLight = vec3Member(light, "from", glm::vec3(0.0f, 0.0f, 0.0f))
+                                - vec3Member(light, "to", glm::vec3(0.0f, 0.0f, 1.0f));
+        PunctualLight p{};
+        p.type = LIGHT_DISTANT;
+        p.position = glm::normalize(glm::mat3(worldFromLight) * toLight);
+        p.intensity = vec3Member(light, "radiance_rgb", glm::vec3(1.0f));
+        if (maxComponent(p.intensity) > 0.0f)
+        {
+            scene.punctualLights.push_back(p);
+        }
+    }
+}
+
+// Names the lights in the file that do not reach the render, so a dark image
+// explains itself. Emissive surfaces light a scene, and so do the punctual
+// lights (KHR_lights_punctual, which tinygltf parses into model.lights)
+// except spot lights. PBRT's infinite and distant lights become the
+// environment and distant lights when the file is the whole scene
+// (sceneLightsRead). The research scenes list the PBRT lights under
+// extras.pbrt.light_sources and mark those glTF cannot express as
+// "metadata_only"; the list's area lights are in the file as emissive meshes.
+void reportUnusedLights(const tinygltf::Model& model, const std::string& path, bool sceneLightsRead)
+{
+    int spot = 0;
+    int dark = 0;
+    int ranged = 0;
+    for (const tinygltf::Light& light : model.lights)
+    {
+        spot += light.type == "spot";
+        dark += light.type != "spot" && light.intensity <= 0.0;
+        ranged += light.type != "spot" && light.intensity > 0.0 && light.range > 0.0;
+    }
+    if (spot > 0)
+    {
+        fprintf(stderr, "glTF %s: %d spot lights ignored (not supported)\n", path.c_str(), spot);
+    }
+    if (dark > 0)
+    {
+        fprintf(stderr, "glTF %s: %d punctual lights have intensity 0 and add no light\n", path.c_str(), dark);
+    }
+    if (ranged > 0)
+    {
+        fprintf(stderr, "glTF %s: range of %d punctual lights ignored, they light without a cutoff\n", path.c_str(),
+            ranged);
     }
     const tinygltf::Value& sources = member(member(model.extras, "pbrt"), "light_sources");
     for (size_t i = 0; i < sources.ArrayLen(); ++i)
@@ -439,16 +510,16 @@ void reportUnusedLights(const tinygltf::Model& model, const std::string& path, b
         {
             continue;
         }
-        if (isInfiniteLight(light))
+        if (isInfiniteLight(light) || isDistantLight(light))
         {
-            if (!environmentRead)
+            if (!sceneLightsRead)
             {
-                fprintf(stderr, "glTF %s: PBRT infinite light ignored (only read when the file is the whole scene)\n",
-                    path.c_str());
+                fprintf(stderr, "glTF %s: PBRT %s light ignored (only read when the file is the whole scene)\n",
+                    path.c_str(), kind.Get<std::string>().c_str());
             }
             continue;
         }
-        fprintf(stderr, "glTF %s: PBRT %s light ignored (not supported yet)\n", path.c_str(),
+        fprintf(stderr, "glTF %s: PBRT %s light ignored (not supported)\n", path.c_str(),
             kind.IsString() ? kind.Get<std::string>().c_str() : "unnamed");
     }
 }
@@ -798,6 +869,44 @@ struct Loader
         camera = c;
     }
 
+    // A KHR_lights_punctual light at a node, in world space: a point light at
+    // the node's origin, a directional light shining down the node's -Z axis.
+    // glTF gives a point light's intensity in candela and a directional
+    // light's in lux; dividing by 683 lm/W turns them back into the radiant
+    // units the emission uses, undoing the conversion Blender's exporter
+    // makes. Spot lights and lights of intensity 0 are left out
+    // (reportUnusedLights names them).
+    void lightFor(int gltfLight, const glm::mat4& world)
+    {
+        if (gltfLight < 0 || gltfLight >= (int)model.lights.size())
+        {
+            return;
+        }
+        const tinygltf::Light& source = model.lights[gltfLight];
+        const glm::vec3 color = source.color.size() == 3
+            ? glm::vec3((float)source.color[0], (float)source.color[1], (float)source.color[2]) : glm::vec3(1.0f);
+        PunctualLight light{};
+        light.intensity = color * (float)(source.intensity / LUMENS_PER_WATT);
+        if (source.type == "point")
+        {
+            light.type = LIGHT_POINT;
+            light.position = glm::vec3(world[3]);
+        }
+        else if (source.type == "directional")
+        {
+            light.type = LIGHT_DISTANT;
+            light.position = glm::normalize(glm::vec3(world[2]));  // toward the light
+        }
+        else
+        {
+            return;
+        }
+        if (maxComponent(light.intensity) > 0.0f)
+        {
+            scene.punctualLights.push_back(light);
+        }
+    }
+
     // Appends the primitive's vertices and triangles to the scene's flat
     // arrays and returns its TriangleMesh index, or -1 if it cannot be used.
     int meshFor(int meshIndex, int primIndex)
@@ -1089,6 +1198,7 @@ struct Loader
         const tinygltf::Node& node = model.nodes[nodeIndex];
         const glm::mat4 world = parent * nodeLocalMatrix(node);
         cameraFor(node.camera, world);
+        lightFor(node.light, world);
         if (node.mesh >= 0 && node.mesh < (int)model.meshes.size())
         {
             const tinygltf::Mesh& mesh = model.meshes[node.mesh];
@@ -1221,6 +1331,7 @@ bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int mate
         info->camera = l.camera;
         info->render = renderHints(model);
         info->environment = pbrtEnvironment(model, path);
+        addPbrtDistantLights(model, scene);
     }
     return true;
 }

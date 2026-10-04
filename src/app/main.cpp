@@ -416,6 +416,22 @@ static void renderImGui()
         ImGui::TextColored(ImVec4(0.8f, 0.1f, 0.1f, 1.0f), "%s", environmentError.c_str());
         ImGui::PopTextWrapPos();
     }
+
+    // Next event estimation against BSDF sampling alone. A scene that cannot
+    // use it shows the box grayed out, with the reason under it.
+    ImGui::Separator();
+    const bool neeAvailable = pathtraceNeeAvailable();
+    ImGui::BeginDisabled(!neeAvailable);
+    if (ImGui::Checkbox("Next event estimation (NEE + MIS)", &options.nee))
+    {
+        setNextEventEstimation(options.nee);
+        camchanged = true;  // the image starts over
+    }
+    ImGui::EndDisabled();
+    if (!neeAvailable)
+    {
+        ImGui::TextDisabled("needs OptiX and a light to sample");
+    }
     ImGui::End();
 
     ImGui::Render();
@@ -607,6 +623,7 @@ int main(int argc, char** argv)
     setTiming(options.timing);
     setRussianRoulette(options.russianRoulette);
     setMaterialSort(options.materialSort);
+    setNextEventEstimation(options.nee);
     setOptix(options.optix);
     setOptixValidation(options.optixValidation);
     setToneMap(options.toneMap, options.exposure);
@@ -673,6 +690,9 @@ static void saveImage()
     pathtraceDownloadImage();
     // output image file
     Image img(width, height);
+    // An --out path ending in .hdr keeps the scene-linear average itself, no
+    // view transform and no clipping, for comparing renders by their numbers.
+    const bool hdr = lowercaseExtension(options.outPath) == ".hdr";
 
     for (int x = 0; x < width; x++)
     {
@@ -680,16 +700,16 @@ static void saveImage()
         {
             int index = x + (y * width);
             glm::vec3 pix = renderState->image[index] / samples;   // scene-linear average
-            img.setPixel(x, y, applyToneMap(pix, options.toneMap, options.exposure));
+            img.setPixel(x, y, hdr ? pix : applyToneMap(pix, options.toneMap, options.exposure));
         }
     }
 
     std::string filename;
     if (!options.outPath.empty())
     {
-        // savePNG appends ".png" itself
+        // savePNG and saveHDR append the extension themselves
         filename = options.outPath;
-        if (filename.size() > 4 && filename.substr(filename.size() - 4) == ".png")
+        if (filename.size() > 4 && (filename.substr(filename.size() - 4) == ".png" || hdr))
         {
             filename = filename.substr(0, filename.size() - 4);
         }
@@ -708,7 +728,14 @@ static void saveImage()
         std::filesystem::create_directories(dir);
     }
 
-    img.savePNG(filename);
+    if (hdr)
+    {
+        img.saveHDR(filename);
+    }
+    else
+    {
+        img.savePNG(filename);
+    }
 }
 
 // Headless mode: no GLFW / GL / ImGui / PBO. Render state.iterations samples,

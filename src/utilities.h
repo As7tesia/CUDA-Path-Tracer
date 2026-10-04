@@ -21,6 +21,16 @@ inline float maxComponent(glm::vec3 v)
     return glm::max(v.x, glm::max(v.y, v.z));
 }
 
+// Rec. 709 luminance of a linear color: how bright it looks, for weighting
+// lights by power.
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+inline float luminance(glm::vec3 c)
+{
+    return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
+}
+
 // Handy-dandy hash function that provides seeds for random number generation.
 // Here rather than in sampling.h so the OptiX programs, which cannot include
 // thrust, can hash too (mesh_hit.h).
