@@ -7,36 +7,6 @@ CUDA Path Tracer
     - [LinkedIn](https://www.linkedin.com/in/yichen-huang-970b582bb/), [personal website](https://as7tesia.com/)
 * Tested on: Windows 11, AMD Ryzen 5950X @ 4.3GHz (PBO Enabled), 64GB(3200 MT/s), RTX 3090 24GB
 
-### Status
-
-What works today, and what each missing piece needs before it can work. Last updated 2026-10-01.
-
-#### glTF
-
-A `.gltf` or `.glb` file loads in two ways: as the whole scene when it is the scene argument, or as a `"TYPE":"mesh"` object inside a scene JSON.
-
-| Part | Works today |
-|---|---|
-| Geometry | Triangle lists with float positions, indexed or not. Normals come from the file, or are generated area-weighted when it has none. Tangents come from the file, or are generated with MikkTSpace when the primitive's material has a normal map. Node transforms as a matrix or as translation, rotation, scale. One instance per (node, primitive) pair |
-| Camera | The first perspective camera in the node tree gives position, direction and `yfov`. A camera transform that mirrors flips the image. A file without a camera gets one that frames the scene's bounding sphere |
-| Lights | Emissive surfaces: `emissiveFactor` times the emissive texture times `KHR_materials_emissive_strength`. An emitter also reflects through its BSDF |
-| Materials | The glTF metallic-roughness BSDF with GGX microfacets (see [Materials](#materials-gltf-metallic-roughness)): base color, metallic, roughness, normal map, alpha mask, `KHR_materials_ior`, `_transmission`, `_volume` absorption, and the factors of `_specular` and `_clearcoat` |
-| Textures | Base color, metallic-roughness, normal, emissive and transmission. PNG and JPEG, as files next to the glTF, data URIs or buffer views, decoded by tinygltf through stb_image. 16-bit images are converted to 8 bits per channel. Texture coordinates from `TEXCOORD_0`, wrap modes and the magnification filter from the sampler, no mipmaps. The texture unit decodes sRGB (base color, emissive) to linear before filtering |
-| Render settings | glTF has none. Resolution and depth come from the flags, then from `extras.pbrt.render` when the file has it, then from the defaults (1024 high, depth 8). 5000 spp unless `--spp` is given |
-
-| glTF feature | What happens today | Needs |
-|---|---|---|
-| Alpha blend | Rendered opaque: every Bistro material (the foliage) and Intel Sponza's `dirt_decal` | Alpha as coverage in the any-hit program that already handles alpha mask: the ray passes with probability 1 - alpha, from a random number both intersection paths can compute |
-| One-sided emitters (`doubleSided` false) | An emitter emits from both faces | A front-face test on emission in the shade kernel |
-| Environment light (PBRT infinite light in the research scenes) | Ignored, named on stderr | Environment lighting: radiance returned when a ray misses, from an HDRI map (`.exr`, `.pfm`) or a constant color |
-| Punctual lights (`KHR_lights_punctual`), PBRT distant lights | Ignored, named on stderr | Direct light sampling (next event estimation). These lights have no surface for a path to hit |
-| Scenes lit through a small opening (veach-ajar) | Mostly noise | Direct light sampling (next event estimation) |
-| Camera roll | Dropped, with a note printed | An interactive camera that keeps its own up vector. The viewport camera always uses world +Y |
-
-Of the 26 [glTF research scenes](https://github.com/ErfanMo77/gltf-research-scenes), 15 have an emissive surface and render with their glTF materials. The other 11 render black: 10 are lit by an environment light, and dragon by a distant light alone. cornell-caustic renders nearly black too, as it did with every material diffuse: its `extras.pbrt.render` names SPPM as the integrator.
-
-Skipped by the loader, with no work planned: occlusion maps (they stand in for the shadowing a path tracer computes), the textures of `KHR_materials_specular` and `_clearcoat` (the clearcoat normal map among them), the thickness of `KHR_materials_volume`, sheen and the other `KHR_materials_*` extensions, vertex colors, texture coordinate sets after `TEXCOORD_0`, `KHR_texture_transform`. The loader names the extensions it skips, on the materials and on the texture slots it reads, and counts the blend materials on stderr.
-
 ### Viewport controls
 
 The viewport navigates like the Unreal Engine 5 level editor: hold the right mouse button to look around and fly, or hold Alt for the Maya-style orbit. Any camera move restarts the accumulation.
@@ -382,7 +352,7 @@ living-room, lit by its sky map alone, 1024x576, 256 spp, AgX. Bottom row: the c
 - **Noise**: RMSE against a 2048 spp render 24.5, 16.1 and 14.9: 0.43x and 0.37x the variance. The light samples clear the walls and the floor near the windows; what is left is indirect light and the window frames, which the samples hit from inside.
 - **Frame time**: 4.34, 7.42 and 6.85 ms/spp. Most environment shadow rays from inside a room end on a wall, and the table draws them anyway.
 
-#### Checking it
+#### Correctness
 
 The two strategies have to agree with BSDF sampling alone in the mean. A furnace, a white diffuse object under a constant environment of 1, is the sharpest check: every pixel's answer is exactly 1. `--out name.exr` keeps the scene-linear average as float32, which these numbers come from; see the last issue below for why `.hdr` is not good enough here.
 
@@ -581,3 +551,12 @@ The fix is just actually support alpha blending: a hit counts with probability a
 #### A 0.27% bias that was the image format
 
 The first furnace renders with environment NEE came out 0.27% dark in the mean against BSDF sampling, on the sphere, on a cube and on a flat floor alike, and the shadow rays, the MIS weights and the random number stream all checked out. The renders were compared as `.hdr`, Radiance RGBE: an 8-bit mantissa per channel, truncated, not rounded. The BSDF-only image is exactly 1.0 everywhere, which RGBE stores exactly. The NEE image is 1.0 plus a little noise, and every pixel slightly under 1.0 truncates down to 255/256 while every pixel slightly over stays at 1.0, so the whole image took 15 distinct values and its mean landed 0.27% low. Two noisy images truncate alike and their ratio hides this, which is why the NEE table above was fine in `.hdr`. `--out name.exr` now writes the float32 average as it is, through tinyexr, and the furnace means came back to 1.0000.
+
+### References
+
+- Veach 1997: Eric Veach, *Robust Monte Carlo Methods for Light Transport Simulation*, PhD thesis, Stanford University, 1997. The power heuristic for multiple importance sampling.
+- Walter et al. 2007: Bruce Walter, Stephen R. Marschner, Hongsong Li, Kenneth E. Torrance, "Microfacet Models for Refraction through Rough Surfaces", Eurographics Symposium on Rendering 2007. The generalized half vector and its Jacobian for rough refraction.
+- Dupuy and Benyoub 2023: Jonathan Dupuy, Anis Benyoub, "Sampling Visible GGX Normals with Spherical Caps", High-Performance Graphics 2023. The visible-normal sampling `scatterPbr` uses.
+- Karlík et al. 2019: Ondřej Karlík, Martin Šik, Petr Vévoda, Tomáš Skřivan, Jaroslav Křivánek, "MIS Compensation: Optimizing Sampling Techniques in Multiple Importance Sampling", ACM Transactions on Graphics 38(6), SIGGRAPH Asia 2019. The average subtracted from the environment's sampling table.
+- PBRT-v4: Matt Pharr, Wenzel Jakob, Greg Humphreys, *Physically Based Rendering: From Theory to Implementation*, 4th edition, MIT Press 2023, https://pbr-book.org. The power light sampler, the image-light power estimate and the compensated distribution follow its `PowerLightSampler` and `ImageInfiniteLight`.
+
