@@ -212,13 +212,15 @@ LensSystem parseLensJson(const std::string& text, const std::string& name)
             if (j.contains("aspheric"))
             {
                 const json& a = j.at("aspheric");
-                if (!a.is_array() || a.size() > 6)
+                if (!a.is_array())
                 {
-                    lensError(name, "surface %d: aspheric takes up to six coefficients, A4 to A14", (int)i + 1);
+                    lensError(name, "surface %d: aspheric is not an array [A4, A6, ...]", (int)i + 1);
                 }
+                s.asphericOffset = (int)lens.aspheric.size();
+                s.asphericCount = (int)a.size();
                 for (size_t k = 0; k < a.size(); ++k)
                 {
-                    s.aspheric[k] = a.at(k).get<float>();
+                    lens.aspheric.push_back(a.at(k).get<float>());
                 }
             }
             if (j.contains("focus"))

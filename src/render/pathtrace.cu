@@ -95,10 +95,11 @@ static EnvironmentMap dev_environment = {};
 // Next event estimation's light list (nee.h, from Scene's), numLights 0 when
 // the scene has nothing it can sample. uploadLights fills it from hst_scene.
 static LightList dev_lights = {};
-// The real lens's surfaces (Scene::lens), null when the scene has none.
-// Uploaded here so the table is runtime data; nothing reads it until the
-// lens trace is built.
+// The real lens's surfaces and their aspheric coefficients (Scene::lens),
+// null when the scene has none. Uploaded here so the table is runtime data;
+// nothing reads it until the lens trace is built.
 static LensSurface* dev_lens = NULL;
+static float* dev_lensAspheric = NULL;
 static void uploadLights();
 static void freeLights();
 
@@ -276,6 +277,7 @@ void pathtraceInit(Scene* scene)
     dev_geoms = uploadVector(scene->geoms);
     dev_materials = uploadVector(scene->materials);
     dev_lens = uploadVector(scene->lens.surfaces);
+    dev_lensAspheric = uploadVector(scene->lens.aspheric);
 
     uploadLights();
 
@@ -335,6 +337,8 @@ void pathtraceFree()
     cudaFree(dev_materials);
     cudaFree(dev_lens);
     dev_lens = NULL;
+    cudaFree(dev_lensAspheric);
+    dev_lensAspheric = NULL;
     freeLights();
     cudaFree(dev_intersections);
     cudaFree(dev_materialIds);

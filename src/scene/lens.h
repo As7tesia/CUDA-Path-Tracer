@@ -22,7 +22,11 @@ struct LensSurface
     float abbe;            // V_d of that glass; 0 = not known, the glass then has one index for every wavelength
     float apertureRadius;  // half the clear diameter; a ray farther from the axis is blocked
     float conic;           // k in the (1 + k) sag form: 0 is a sphere, -1 a paraboloid
-    float aspheric[6];     // A4, A6 ... A14 of the sag polynomial, mm^-3, mm^-5 ...; all zero on a spherical surface
+    // The sag polynomial's coefficients A4, A6 ... as many as the file
+    // lists, in LensSystem::aspheric from asphericOffset on. Count 0 on a
+    // spherical surface.
+    int asphericOffset;
+    int asphericCount;
     int isStop;            // 1 on the aperture stop, a flat opening with no glass of its own
 };
 
@@ -33,6 +37,9 @@ struct LensSystem
     std::string source;          // where the numbers came from
     std::string apertureSource;  // where the clear apertures came from; patents rarely print them
     std::vector<LensSurface> surfaces;  // scene side first
+    // Every aspheric surface's A4, A6 ... in a row (mm^-3, mm^-5 ...), the
+    // surfaces pointing into it. Empty for an all-spherical lens.
+    std::vector<float> aspheric;
     int stopIndex = -1;          // the one surface with isStop
     float focalLength = 0.0f;    // as the file states it, mm; 0 = not stated
     float fNumber = 0.0f;        // wide open, as stated; 0 = not stated

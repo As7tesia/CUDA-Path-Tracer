@@ -15,7 +15,7 @@ Prescriptions for the real-lens camera. A scene names one with `"LENS": "<file>"
 | `abbe` | V_d of that glass | 0 (unknown, no dispersion) |
 | `stop` | `true` on the aperture stop | false |
 | `conic` | k in the sag formula below | 0 |
-| `aspheric` | `[A4, A6, ...]`, up to A14 | none |
+| `aspheric` | `[A4, A6, ...]`, as many terms as the source lists | none |
 | `focus` | `[gap at infinity, gap at the closest focus]` on the one surface whose gap moves to focus | none |
 
 Aspheric sag, with c = 1 / radius and h the distance from the axis: `z = c h² / (1 + sqrt(1 - (1 + k) c² h²)) + A4 h⁴ + A6 h⁶ + ...`. Patents that write the conic as K = k + 1, or that include an h² term, are converted when the file is made, and the file's `source` says so.

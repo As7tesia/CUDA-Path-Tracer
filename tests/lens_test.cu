@@ -61,13 +61,13 @@ static void checkDgauss(const LensSystem& lens, const char* label)
     check(near(glass, 32.04f, 1e-3f), line);
     for (const LensSurface& s : lens.surfaces)
     {
-        if (s.conic != 0.0f || s.aspheric[0] != 0.0f || s.aspheric[5] != 0.0f)
+        if (s.conic != 0.0f || s.asphericCount != 0)
         {
             check(false, "dgauss: a surface has aspheric terms");
             return;
         }
     }
-    check(true, "dgauss: every surface is spherical");
+    check(lens.aspheric.empty(), "dgauss: every surface is spherical, no coefficients stored");
 }
 
 int main()
@@ -124,7 +124,7 @@ int main()
             int aspheric = 0;
             for (int i = 0; i < 28; ++i)
             {
-                const bool has = noct.surfaces[i].aspheric[0] != 0.0f;
+                const bool has = noct.surfaces[i].asphericCount != 0;
                 aspheric += has;
                 const bool expected = i == 0 || i == 19 || i == 27;
                 if (has != expected)
@@ -134,10 +134,18 @@ int main()
                 }
             }
             check(aspheric == 3, "noct: aspheres on surfaces 1, 20 and 28 only");
-            check(noct.surfaces[0].conic == 0.0f && near(noct.surfaces[0].aspheric[0], -3.82177e-7f, 1e-12f)
-                && near(noct.surfaces[0].aspheric[3], -1.32266e-18f, 1e-23f) && noct.surfaces[0].aspheric[4] == 0.0f,
-                "noct: surface 1 k 0, A4 -3.82177e-7, A10 -1.32266e-18, no A12");
-            check(near(noct.surfaces[27].aspheric[5], -1.70470e-19f, 1e-24f), "noct: surface 28 has A14");
+            // Four, four and six terms, stored one after the other
+            const LensSurface& s1 = noct.surfaces[0];
+            const LensSurface& s20 = noct.surfaces[19];
+            const LensSurface& s28 = noct.surfaces[27];
+            check(s1.asphericOffset == 0 && s1.asphericCount == 4 && s20.asphericOffset == 4 && s20.asphericCount == 4
+                && s28.asphericOffset == 8 && s28.asphericCount == 6 && noct.aspheric.size() == 14,
+                "noct: 4 + 4 + 6 coefficients, each surface's run following the last");
+            check(s1.conic == 0.0f && near(noct.aspheric[s1.asphericOffset], -3.82177e-7f, 1e-12f)
+                && near(noct.aspheric[s1.asphericOffset + 3], -1.32266e-18f, 1e-23f),
+                "noct: surface 1 k 0, A4 -3.82177e-7, A10 -1.32266e-18");
+            check(near(noct.aspheric[s20.asphericOffset + 1], -4.51771e-10f, 1e-15f), "noct: surface 20 A6 -4.51771e-10");
+            check(near(noct.aspheric[s28.asphericOffset + 5], -1.70470e-19f, 1e-24f), "noct: surface 28 A14 -1.70470e-19");
             check(noct.focusSurface == 21 && near(noct.focusGap.x, 2.68f) && near(noct.focusGap.y, 21.29f)
                 && near(noct.surfaces[21].thickness, 2.68f), "noct: surface 22 focuses, 2.68 mm at infinity, 21.29 close, table at infinity");
             check(near(noct.closeFocusMagnification, -0.194f), "noct: close focus magnification -0.194");
@@ -169,7 +177,7 @@ int main()
         {"json without a stop", "{\"surfaces\": [{\"radius\": 10, \"thickness\": 1, \"aperture\": 5}, {\"radius\": -10, \"thickness\": 0, \"aperture\": 5}]}", true},
         {"json with two stops", "{\"surfaces\": [{\"radius\": 0, \"thickness\": 1, \"aperture\": 5, \"stop\": true}, {\"radius\": 0, \"thickness\": 0, \"aperture\": 5, \"stop\": true}]}", true},
         {"json with a zero gap inside", "{\"surfaces\": [{\"radius\": 10, \"thickness\": 0, \"aperture\": 5}, {\"radius\": 0, \"thickness\": 0, \"aperture\": 5, \"stop\": true}]}", true},
-        {"json with seven aspheric terms", "{\"surfaces\": [{\"radius\": 0, \"thickness\": 1, \"aperture\": 5, \"stop\": true, \"aspheric\": [1,2,3,4,5,6,7]}]}", true},
+        {"json whose aspheric is not an array", "{\"surfaces\": [{\"radius\": 0, \"thickness\": 1, \"aperture\": 5, \"stop\": true, \"aspheric\": 1e-6}]}", true},
         {"json missing a radius", "{\"surfaces\": [{\"thickness\": 1, \"aperture\": 5, \"stop\": true}]}", true},
         {"json that is not json", "{surfaces: [", true},
         {"dat with a short row", "# comment\n10 1 1.5\n0 1 0 5\n", false},
