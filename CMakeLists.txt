@@ -95,6 +95,7 @@ set(headers
     src/render/wavefront_ops.h
     src/scene/environment.h
     src/scene/gltf_loader.h
+    src/scene/lens.h
     src/scene/scene.h
     src/scene/sceneStructs.h
     src/timing.h
@@ -115,6 +116,7 @@ set(sources
     src/render/wavefront_ops.cu
     src/scene/environment.cpp
     src/scene/gltf_loader.cpp
+    src/scene/lens.cpp
     src/scene/lights.cpp
     src/scene/scene.cpp
     src/stb.cpp
@@ -216,6 +218,16 @@ set_target_properties(bsdf_test PROPERTIES CUDA_ARCHITECTURES native)
 if(MSVC)
     # C4819: the CUDA headers hold characters outside the system code page.
     target_compile_options(bsdf_test PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4819>")
+endif()
+
+# Host-side check of the lens loaders (tests/lens_test.cu), built the same way:
+#   cmake --build build --config Release --target lens_test
+#   build/bin/Release/lens_test.exe        (from the repository root, it reads scenes/lenses/)
+add_executable(lens_test EXCLUDE_FROM_ALL tests/lens_test.cu src/scene/lens.cpp)
+target_include_directories(lens_test PRIVATE src)
+set_target_properties(lens_test PROPERTIES CUDA_ARCHITECTURES native)
+if(MSVC)
+    target_compile_options(lens_test PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4819>")
 endif()
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${CMAKE_PROJECT_NAME})

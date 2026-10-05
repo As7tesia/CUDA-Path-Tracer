@@ -95,6 +95,10 @@ static EnvironmentMap dev_environment = {};
 // Next event estimation's light list (nee.h, from Scene's), numLights 0 when
 // the scene has nothing it can sample. uploadLights fills it from hst_scene.
 static LightList dev_lights = {};
+// The real lens's surfaces (Scene::lens), null when the scene has none.
+// Uploaded here so the table is runtime data; nothing reads it until the
+// lens trace is built.
+static LensSurface* dev_lens = NULL;
 static void uploadLights();
 static void freeLights();
 
@@ -271,6 +275,7 @@ void pathtraceInit(Scene* scene)
 
     dev_geoms = uploadVector(scene->geoms);
     dev_materials = uploadVector(scene->materials);
+    dev_lens = uploadVector(scene->lens.surfaces);
 
     uploadLights();
 
@@ -328,6 +333,8 @@ void pathtraceFree()
     cudaFree(dev_paths);
     cudaFree(dev_geoms);
     cudaFree(dev_materials);
+    cudaFree(dev_lens);
+    dev_lens = NULL;
     freeLights();
     cudaFree(dev_intersections);
     cudaFree(dev_materialIds);
@@ -399,6 +406,10 @@ static void freeLights()
 
 // One path per pixel, starting at the camera: a ray through a random point
 // in the pixel (antialiasing), white throughput and traceDepth bounces left.
+// The pinhole sends it from the eye; the thin lens from a random point on
+// the aperture, aimed so that rays through one pixel meet on the plane in
+// focus. The pinhole draws its two random numbers first and nothing else, so
+// its image does not change when the other cameras draw more.
 __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, PathSegment* pathSegments)
 {
     int x = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -408,7 +419,6 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         int index = x + (y * cam.resolution.x);
         PathSegment& segment = pathSegments[index];
 
-        segment.ray.origin = cam.position;
         segment.color = glm::vec3(1.0f, 1.0f, 1.0f);
 
         // jitter the x and y pixel coordinates as floats
@@ -416,12 +426,32 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         thrust::uniform_real_distribution<float> u01(0, 1);
         float jx = u01(rng);   // in [0, 1)
         float jy = u01(rng);
-        // Pixel (0, 0) is the top left of the image, as the PNG and the
-        // viewport texture store it: x runs along right, y against up.
-        segment.ray.direction = glm::normalize(cam.view
+        // The direction through the pixel, 1 along view, so that position +
+        // d * t lies on the plane t ahead of the camera. Pixel (0, 0) is the
+        // top left of the image, as the PNG and the viewport texture store
+        // it: x runs along right, y against up.
+        const glm::vec3 d = cam.view
             + cam.right * cam.pixelLength.x * (float(x + jx) - (float)cam.resolution.x * 0.5f)
-            - cam.up * cam.pixelLength.y * ((float)(y + jy) - (float)cam.resolution.y * 0.5f)
-        );
+            - cam.up * cam.pixelLength.y * ((float)(y + jy) - (float)cam.resolution.y * 0.5f);
+
+        if (cam.type == CAMERA_THIN_LENS)
+        {
+            // Every ray through this pixel passes the same point of the plane
+            // in focus, so that plane is sharp and everything off it blurs by
+            // the aperture's size. A uniform point on the aperture disk: the
+            // radius goes as sqrt(u) so the area is covered evenly.
+            const glm::vec3 focus = cam.position + d * cam.focusDistance;
+            const float r = cam.apertureRadius * sqrtf(u01(rng));
+            const float phi = TWO_PI * u01(rng);
+            segment.ray.origin = cam.position + cam.right * (r * cosf(phi)) + cam.up * (r * sinf(phi));
+            segment.ray.direction = glm::normalize(focus - segment.ray.origin);
+        }
+        else
+        {
+            // The pinhole, and the real lens until its trace is built
+            segment.ray.origin = cam.position;
+            segment.ray.direction = glm::normalize(d);
+        }
 
         segment.pixelIndex = index;
         segment.remainingBounces = traceDepth;

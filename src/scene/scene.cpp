@@ -66,6 +66,43 @@ RenderSettings withOverrides(RenderSettings settings, const SceneOverrides& ov)
     return settings;
 }
 
+// The camera a scene's LENS key or --lens asks for: "pinhole", "thin", or a
+// lens file for the real lens.
+void setCameraType(CameraPose& pose, const std::string& value)
+{
+    pose.lensFile.clear();
+    if (value == "pinhole")
+    {
+        pose.type = CAMERA_PINHOLE;
+    }
+    else if (value == "thin")
+    {
+        pose.type = CAMERA_THIN_LENS;
+    }
+    else
+    {
+        pose.type = CAMERA_REAL_LENS;
+        pose.lensFile = value;
+    }
+}
+
+CameraPose withOverrides(CameraPose pose, const SceneOverrides& ov)
+{
+    if (!ov.lens.empty())
+    {
+        setCameraType(pose, ov.lens);
+    }
+    if (ov.apertureRadius > 0.0f)
+    {
+        pose.apertureRadius = ov.apertureRadius;
+    }
+    if (ov.focusDistance > 0.0f)
+    {
+        pose.focusDistance = ov.focusDistance;
+    }
+    return pose;
+}
+
 // A scene JSON array of three numbers. Throws, like json::at, when the key is
 // missing or holds something else.
 glm::vec3 vec3At(const json& object, const char* key)
@@ -424,8 +461,16 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
     pose.up = vec3At(cameraData, "UP");
     pose.fovy = cameraData.at("FOVY").get<float>();
     pose.mirrored = false;
+    // Optional: LENS picks the camera (pinhole without it), APERTURE and
+    // FOCUS set the thin lens
+    if (cameraData.contains("LENS"))
+    {
+        setCameraType(pose, cameraData.at("LENS").get<std::string>());
+    }
+    pose.apertureRadius = cameraData.value("APERTURE", 0.0f);
+    pose.focusDistance = cameraData.value("FOCUS", 0.0f);
 
-    initRenderState(withOverrides(settings, ov), pose);
+    initRenderState(withOverrides(settings, ov), withOverrides(pose, ov));
 }
 
 void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
@@ -543,7 +588,7 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
         pose.mirrored = false;
     }
 
-    initRenderState(settings, pose);
+    initRenderState(settings, withOverrides(pose, ov));
 }
 
 void Scene::initRenderState(const RenderSettings& settings, const CameraPose& pose)
@@ -558,6 +603,16 @@ void Scene::initRenderState(const RenderSettings& settings, const CameraPose& po
     camera.lookAt = pose.lookAt;
     camera.up = pose.up;
     camera.mirrored = pose.mirrored;
+    camera.type = pose.type;
+    camera.apertureRadius = pose.apertureRadius;
+    camera.focusDistance = pose.focusDistance > 0.0f ? pose.focusDistance : glm::length(pose.lookAt - pose.eye);
+    if (camera.type == CAMERA_REAL_LENS)
+    {
+        lens = loadLens(pose.lensFile);  // throws with the file's name
+        printf("lens %s: %d surfaces, stop at surface %d, %.1f mm long\n", lens.name.c_str(),
+            (int)lens.surfaces.size(), lens.stopIndex + 1, lensLength(lens));
+        fprintf(stderr, "the real-lens trace is not built yet; rendering with the pinhole\n");
+    }
 
     // fovy is the full vertical field of view in degrees, so the half angle
     // sets the image plane's half height at unit distance.

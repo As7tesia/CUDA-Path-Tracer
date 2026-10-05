@@ -1,6 +1,7 @@
 #pragma once
 
 #include "scene/environment.h"
+#include "scene/lens.h"
 #include "scene/sceneStructs.h"
 #include <string>
 #include <vector>
@@ -22,6 +23,12 @@ struct SceneOverrides
     // Whether the environment joins the light list; --no-env-nee leaves it
     // to BSDF sampling, with next event estimation for the other lights
     bool environmentLight = true;
+    // --lens: "pinhole", "thin", or a lens file (lens.h) for the real lens
+    std::string lens;
+    // --aperture and --focus, the thin lens's radius and focus distance in
+    // scene units; 0 keeps the scene's
+    float apertureRadius = 0.0f;
+    float focusDistance = 0.0f;
 };
 
 // What a scene file says about the render itself. A scene JSON states all of
@@ -43,6 +50,10 @@ struct CameraPose
     glm::vec3 up;
     float fovy;        // full vertical field of view, degrees
     bool mirrored;     // see Camera::mirrored
+    CameraType type = CAMERA_PINHOLE;
+    std::string lensFile;           // the real lens's prescription, when type is CAMERA_REAL_LENS
+    float apertureRadius = 0.0f;    // the thin lens's, scene units
+    float focusDistance = 0.0f;     // scene units; 0 = the distance to lookAt
 };
 
 // The scene file a command-line argument names: the argument itself when it
@@ -115,6 +126,10 @@ public:
     // The environment that renders, read: --env when given, else the scene
     // file's own. The window can replace it.
     Environment environment;
+    // The real lens's prescription, loaded when the camera names one. No
+    // surfaces when it does not.
+    LensSystem lens;
+    bool hasLens() const { return !lens.surfaces.empty(); }
 
     // Next event estimation's lights. punctualLights comes from the glTF
     // loader (KHR_lights_punctual point and directional lights, PBRT distant

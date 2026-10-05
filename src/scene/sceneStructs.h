@@ -124,6 +124,18 @@ struct Material
     int transmissionTexture = -1;                 // R
 };
 
+// How generateRayFromCamera makes a ray. All three stay selectable: the
+// pinhole is the cmp reference, the thin lens the README baseline against
+// the real lens.
+enum CameraType
+{
+    CAMERA_PINHOLE,
+    CAMERA_THIN_LENS,
+    // A lens prescription (Scene::lens), traced surface by surface. Until
+    // that trace exists the kernel renders it as the pinhole.
+    CAMERA_REAL_LENS,
+};
+
 struct Camera
 {
     glm::ivec2 resolution;
@@ -136,6 +148,12 @@ struct Camera
     // right is -cross(view, up) instead of cross(view, up), so the image is
     // flipped left to right. Set by a glTF camera whose transform mirrors.
     bool mirrored;
+    CameraType type;
+    // The thin lens: the aperture's radius, in the plane through position
+    // spanned by right and up, and the distance along view to the plane in
+    // focus. Both in scene units.
+    float apertureRadius;
+    float focusDistance;
 };
 
 struct RenderState

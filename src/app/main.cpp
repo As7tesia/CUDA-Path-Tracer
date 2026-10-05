@@ -20,6 +20,7 @@
 #include <cuda_gl_interop.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -431,6 +432,51 @@ static void renderImGui()
     if (!neeAvailable)
     {
         ImGui::TextDisabled("needs OptiX and a light to sample");
+    }
+
+    // The camera: pinhole, thin lens or the real lens. The real lens needs a
+    // prescription, which only the scene file or --lens loads. The thin
+    // lens's two numbers drag in steps scaled to the scene, since a radius
+    // that blurs a room is a wall for a figurine.
+    ImGui::Separator();
+    Camera& cam = renderState->camera;
+    const char* cameraNames[] = {"Pinhole", "Thin lens", "Real lens"};
+    ImGui::SetNextItemWidth(240);
+    if (ImGui::BeginCombo("Camera", cameraNames[cam.type]))
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            const bool allowed = i != CAMERA_REAL_LENS || scene->hasLens();
+            if (ImGui::Selectable(cameraNames[i], i == (int)cam.type, allowed ? 0 : ImGuiSelectableFlags_Disabled)
+                && i != (int)cam.type)
+            {
+                cam.type = (CameraType)i;
+                camchanged = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (cam.type == CAMERA_THIN_LENS)
+    {
+        const float step = 0.001f * viewportPose.pivotDistance;
+        ImGui::SetNextItemWidth(240);
+        if (ImGui::DragFloat("Aperture radius", &cam.apertureRadius, step, 0.0f, FLT_MAX, "%.4g"))
+        {
+            camchanged = true;
+        }
+        ImGui::SetNextItemWidth(240);
+        if (ImGui::DragFloat("Focus distance", &cam.focusDistance, 10.0f * step, 10.0f * step, FLT_MAX, "%.4g"))
+        {
+            camchanged = true;
+        }
+    }
+    if (scene->hasLens())
+    {
+        ImGui::TextDisabled("%s, %d surfaces", scene->lens.name.c_str(), (int)scene->lens.surfaces.size());
+        if (cam.type == CAMERA_REAL_LENS)
+        {
+            ImGui::TextDisabled("not traced yet, renders as the pinhole");
+        }
     }
     ImGui::End();
 

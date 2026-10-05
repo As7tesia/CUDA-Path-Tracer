@@ -12,6 +12,7 @@ const char* const USAGE =
     "Usage: %s SCENE [--headless] [--spp N] [--res WxH] [--depth N] [--out PATH.png] [--env FILE]\n"
     "                     [--no-rr] [--sort] [--no-nee] [--no-env-nee] [--no-env-compensation]\n"
     "                     [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
+    "                     [--lens pinhole|thin|FILE] [--aperture R] [--focus D]\n"
     "                     [--no-optix] [--optix-validate] [--timing]\n"
     "       %s --list\n"
     "  SCENE            a scene .json, a .gltf / .glb file that is the whole scene, or a scene name:\n"
@@ -25,6 +26,10 @@ const char* const USAGE =
     "                   a .hdr or .exr path keeps the scene-linear average, without view transform or\n"
     "                   exposure; .exr is exact float32, .hdr truncates to 8-bit mantissas\n"
     "  --env FILE       light the scene with this lat-long .hdr or .exr instead of its own environment\n"
+    "  --lens TYPE      the camera: pinhole (the scene's default), thin (a thin lens), or a lens file\n"
+    "                   in scenes/lenses/ (a .json or PBRT .dat prescription) for the real lens\n"
+    "  --aperture R     the thin lens's aperture radius, scene units (0 is a pinhole)\n"
+    "  --focus D        the thin lens's focus distance, scene units (default: the distance to LOOKAT)\n"
     "  --no-rr          disable Russian roulette path termination\n"
     "  --sort           sort paths by material before shading (off by default: it costs 2 to 3.5x, see the README)\n"
     "  --no-sort        the default, kept for scripts\n"
@@ -93,6 +98,30 @@ Options parseArguments(int argc, char** argv)
         else if (a == "--env")
         {
             options.overrides.environmentFile = needValue("--env");
+        }
+        else if (a == "--lens")
+        {
+            options.overrides.lens = needValue("--lens");
+        }
+        else if (a == "--aperture")
+        {
+            const char* value = needValue("--aperture");
+            char* end = nullptr;
+            options.overrides.apertureRadius = strtof(value, &end);
+            if (end == value || *end != '\0' || !(options.overrides.apertureRadius >= 0.0f))
+            {
+                fatal("--aperture expects a number of 0 or more, not \"%s\"", value);
+            }
+        }
+        else if (a == "--focus")
+        {
+            const char* value = needValue("--focus");
+            char* end = nullptr;
+            options.overrides.focusDistance = strtof(value, &end);
+            if (end == value || *end != '\0' || !(options.overrides.focusDistance > 0.0f))
+            {
+                fatal("--focus expects a positive number, not \"%s\"", value);
+            }
         }
         else if (a == "--no-rr")
         {
