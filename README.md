@@ -7,120 +7,40 @@ CUDA Path Tracer
     - [LinkedIn](https://www.linkedin.com/in/yichen-huang-970b582bb/), [personal website](https://as7tesia.com/)
 * Tested on: Windows 11, AMD Ryzen 5950X @ 4.3GHz (PBO Enabled), 64GB(3200 MT/s), RTX 3090 24GB
 
-### Viewport controls
+![Intel Sponza](img/readme/cover_sponza_intel.png)
 
-The viewport navigates like the Unreal Engine 5 level editor: hold the right mouse button to look around and fly, or hold Alt for the Maya-style orbit. Any camera move restarts the accumulation.
+Intel Sponza with the curtains package, 1920x1080, 1024 spp, DEPTH 8, AgX punchy, no denoising, 12.5 s on the RTX 3090 (12.2 ms per sample).
 
-| Input | Action |
-|---|---|
-| RMB drag | Look around in place |
-| RMB + W / S | Fly forward / back |
-| RMB + A / D | Fly left / right |
-| RMB + E / Q | Fly up / down along world +Y |
-| RMB + wheel | Fly speed up / down, x1.25 per notch (shown in the ImGui panel) |
-| LMB drag | Up / down moves along the ground, left / right turns |
-| MMB drag, or LMB + RMB drag | Pan |
-| Wheel | Move forward / back in steps |
-| Alt + LMB drag | Orbit around the pivot |
-| Alt + RMB drag | Move toward / away from the pivot |
-| Alt + MMB drag | Pan |
-| F | Back to the scene file's camera |
-| Ctrl + S | Save the image |
-| Esc | Save the image and quit |
+### Rendering pipeline
 
-The ImGui panel also switches scenes without a restart. Its combo lists the scene JSONs in `scenes/` and the catalog's names (entries whose glTF is not downloaded are grayed out), and the field under it takes anything the command line takes: a name or a path to a .json, .gltf or .glb. The new scene is read first, so a bad file leaves the current scene in place with the error in the panel. On success the device buffers are rebuilt, the window takes the new scene's resolution, the camera starts at its scene camera and the accumulation starts over; `--res`, `--spp` and `--depth` from the command line still apply. The window is busy while a large scene loads (Intel Sponza takes a few seconds).
+The renderer is a wavefront path tracer: each stage of a bounce is one launch over every live path, and paths that end drop out between bounces. Intersection runs with OptiX hardware Ray Tracing (`--no-optix` flag disables OptiX and launches intersection kernels without NEE).
 
-The camera is a position, a yaw about world +Y, a pitch that stops just short of straight up or down, and a pivot distance. The orbit pivot sits on the view axis at that distance and travels with the camera. It starts at the scene's `LOOKAT`, or for a glTF camera at a point on its view axis near the middle of the scene. The default fly speed crosses the scene's bounding box diagonal in 4 seconds. A drag hides and locks the cursor, so it does not stop at the edge of the screen. Headless renders build their basis from the same pose as the window's first frame.
+![Pipeline overview](img/readme/pipeline_overview.png)
 
-### Headless rendering
-Render without a viewport
-```
-./build/bin/Release/cis565_path_tracer.exe scenes/cornell.json --headless --spp 100 --res 400x400 --out img/test/cornell.png
-```
+1. **Load**, once per scene: the scene JSON or glTF is parsed into flat vertex arrays and materials ([Meshes](#meshes-gltf-loading)), the environment map gets its sampling table ([Environment map sampling](#environment-map-sampling)), and every emitter goes into one light list weighted by power ([NEE and MIS](#nee-and-mis)). Buffers and textures are uploaded, and OptiX builds one GAS per glTF primitive and one IAS over the instances.
+2. **Camera rays**: one path per pixel, through a random point in the pixel, from a pinhole or a thin lens.
+3. **Bounce loop**, up to `DEPTH` times: an OptiX launch intersects the paths, `shadeMaterial` shades them, and the host swaps buffers and reads back how many paths are left (below).
+4. **Last shadow rays**: the shadow rays still in the queue when the loop ends, traced in one more launch.
+5. **Output**: `dev_image` holds the scene-linear sum of every sample. The viewport and the saved PNG divide it by the sample count and apply the [view transform](#view-transform); `.exr` and `.hdr` keep it linear.
 
-The scene argument is a path, or a name: `cornell` is `scenes/cornell.json`, and `veach-mis` is the research scene of that name. Names other than the scene JSONs come from `scenes/catalog.json`, which maps a short name to each glTF scene under `scenes/assets` (the 26 research scenes in their extended variant, and the two Bistro files), so the files stay where their downloads put them. `--list` prints every name and marks the ones not downloaded.
+![One bounce](img/readme/pipeline_bounce.png)
 
-| Flag | Effect |
-|---|---|
-| `--headless` | No GLFW / ImGui / OpenGL. Render, save, exit. Prints total time and ms per sample. |
-| `--list` | Print the scene names and exit |
-| `--spp N` | Override `ITERATIONS` from the scene file |
-| `--res WxH` | Override `RES` from the scene file |
-| `--depth N` | Override `DEPTH` from the scene file, the most rays a path may trace |
-| `--out path.png` | Write exactly this file. Default is the usual `img/auto_saved/<FILE>.<time>.<spp>samp.png`. An `.exr` path keeps the scene-linear average as float32, without view transform or exposure, for comparing renders by their numbers; `.hdr` does the same with 8-bit mantissas |
-| `--env FILE` | Light the scene with this lat-long `.hdr` or `.exr` instead of its own environment |
-| `--no-nee` | No next event estimation: lights count only when a path hits them |
-| `--no-env-nee` | Leave the environment out of the light list, so paths find it by BSDF sampling only |
-| `--no-env-compensation` | Build the environment's sampling table from its radiance alone, without MIS compensation |
-| `--no-rr` | Disable Russian roulette |
-| `--sort` | Sort paths by material before shading. Off by default since the 2026-10-02 profile, where its gather cost 2 to 3.5x the frame on every scene; `--no-sort` is the default, kept for scripts |
-| `--no-optix` | Intersect with the naive per-object kernel instead of the OptiX stage |
-| `--optix-validate` | OptiX validation mode: checks every launch, slow |
-| `--timing` | With `--headless`: print load, init and per-bounce stage times as CSV lines |
-| `--tonemap none\|aces\|agx\|agx-punchy` | View transform for viewport and PNG. Default `agx-punchy`. `none` is the raw clamp the base code shipped with |
-| `--exposure X` | Linear multiplier before the view transform. Default 1.0 |
+One bounce:
 
-The overrides also work in windowed mode. Output is deterministic, with same scene, spp, resolution and tonemap produce a byte-identical PNG, so `cmp` against a previous render can be used to prove correctness for things that only improves performance but shouldn't alter the image at the same sample count.
+1. One OptiX launch traces two kinds of rays. Launch indices below N trace the N live paths to their closest hit, with the [alpha test](#alpha-mask), and write `dev_intersections`. The indices past N trace the S shadow rays the previous bounce queued, and a shadow ray that reaches its light adds the sample to `dev_image` in the miss program.
+2. `shadeMaterial` runs one thread per path. It adds the emission at the hit, or the environment on a miss, weighted by MIS, picks a light and queues a shadow ray toward it ([NEE and MIS](#nee-and-mis)), runs Russian roulette, and samples the next direction from the BSDF ([Materials](#materials-gltf-metallic-roughness)).
+3. Stream compaction happens inside `shadeMaterial`: paths that go on are written straight into the spare path buffer, a warp at a time with `__ballot_sync` and one `atomicAdd` ([Compaction moved into the shade kernel](#compaction-moved-into-the-shade-kernel)). A path that ended is not written anywhere, since its light is already in the image.
+4. The host swaps both buffer pairs (paths and shadow queues), copies the survivor count N back, and starts the next bounce, until no path is left or `DEPTH` bounces have run.
 
-`tests/cmp_renders.sh` runs that check over 13 scenes (the JSON scenes, the textured and masked glTF ones, the three Khronos material tests and a research scene), both intersection paths, at 400x400 and 401x399. `golden` renders the set into `build/golden` before a change, `compare` renders it again after and cmps every PNG against its golden, and the exit code is nonzero when any of them differs.
-
-### View transform
-
-The accumulation buffer is scene-linear and never touched. Tonemapping is applied once at display and once at save, through the same function in `src/render/tonemap.h`, so the viewport and the PNG agree. Default is AgX punchy.
-
-- **AgX** by Troy Sobotka, published as an OpenColorIO config: https://github.com/sobotka/AgX. The analytic version this project uses (inset/outset matrices, log2 shaper, polynomial sigmoid) is Benjamin Wrensch's "Minimal AgX Implementation": https://iolite-engine.com/blog_posts/minimal_agx_implementation. `agx-punchy` adds the "punchy" look from the same post, an ASC CDL grade (power 1.35, saturation 1.4) between the sigmoid and the outset matrix, matching the look of that name in Blender.
-- **ACES**, two fits of the reference RRT+ODT, picked by the `ACES_FIT_HILL` macro in `tonemap.h`. Default is Krzysztof Narkowicz's single rational curve: https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/. The alternative is Stephen Hill's fit with the sRGB to AP1 round trip, from `ACES.hlsl` in MJP's BakingLab: https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl. Hill's is scaled by 1/0.6 on input, same as three.js, so the two match in brightness. On Cornell they are within a few levels of each other once that's done.
-
-Same accumulation buffer through each transform. Glass Cornell, 600x600, 1000 spp, exposure 1.0, DEPTH 8:
-
-<!-- TODO: replace these four with the final hero shot through the same four transforms. Cornell has no saturated highlights, so the hue-skew difference between ACES and AgX barely shows here. -->
-
-| ACES, Narkowicz fit | ACES, Hill fit (1/0.6) |
-|:---:|:---:|
-| ![ACES Narkowicz](img/readme/tonemap_aces_narkowicz.png) | ![ACES Hill](img/readme/tonemap_aces_hill.png) |
-| **AgX** | **AgX punchy** |
-| ![AgX](img/readme/tonemap_agx.png) | ![AgX punchy](img/readme/tonemap_agx_punchy.png) |
+The dashed box is the material sort (`--sort`), which groups the paths by material between intersection and shading. It is off by default (see [Performance optimization](#performance-optimization)).
 
 ### Meshes: glTF loading
 
-glTF files load through [tinygltf](https://github.com/syoyo/tinygltf) (v2.9.7, the last C++ header; v3 is a C rewrite). A scene object of `"TYPE":"mesh"` names the file, relative to the scene file's folder:
+glTF files load through [tinygltf](https://github.com/syoyo/tinygltf) (v2.9.7, the last C++ header; v3 is a C rewrite). A scene object of `"TYPE":"mesh"` names a `.gltf` or `.glb` by `FILE`, relative to the scene file, and places it with TRANS/ROTAT/SCALE; an optional `MATERIAL` replaces the file's own materials. The loader makes one instance per (node, primitive) pair and packs every primitive's vertices and indices into flat arrays on the `Scene`. Missing normals are generated from the triangles, and a normal-mapped primitive without `TANGENT` gets tangents from [MikkTSpace](https://github.com/mmikk/MikkTSpace) (Morten S. Mikkelsen, zlib license, vendored in `external/mikktspace/`).
 
-```json
-{
-    "TYPE":"mesh",
-    "FILE":"assets/Duck/glTF/Duck.gltf",
-    "MATERIAL":"glass",
-    "TRANS":[0.0,-0.3,0.0], "ROTAT":[0.0,-25.0,0.0], "SCALE":[3.0,3.0,3.0]
-}
-```
+The naive intersection kernel simply loops over every triangle of every mesh instance. OptiX builds one triangle GAS per primitive over the same buffers and one instance per scene object; its closest-hit program finds the triangle through a per-instance record and interpolates the vertex normal, uv and tangent from the barycentrics. Same conventions on both sides: the geometric normal decides `outside`, the shading normal is flipped to face the ray on a back-face hit, so refraction through a mesh works the same as through the built-in sphere.
 
-The loader walks the file's default scene, multiplies node transforms down the tree, and makes one instance per (node, primitive) pair: the object's TRANS/ROTAT/SCALE times the node's world matrix. The positions, normals, texture coordinates, tangents and triangle indices of every primitive go into one flat array each on the `Scene`, read through the accessor's buffer view and stride, with a per-primitive record of where its triangles start. A primitive without normals gets area-weighted vertex normals, one without `TEXCOORD_0` gets (0, 0) at every vertex. A primitive without `TANGENT` whose material has a normal map gets tangents from [MikkTSpace](https://github.com/mmikk/MikkTSpace) (Morten S. Mikkelsen, zlib license, vendored in `external/mikktspace/`), the generator glTF names and the one normal maps are baked against; every other primitive gets zero tangents. `MATERIAL` is optional: without it the file's materials are appended to the scene's material list (see [Materials](#materials-gltf-metallic-roughness)).
-
-Both intersection paths read the same arrays. The naive kernel loops over every triangle of every mesh instance in object space (two-sided Moller-Trumbore). OptiX builds one triangle GAS per primitive over the same buffers and one instance per scene object; its closest-hit program finds the triangle through a per-instance record and interpolates the vertex normal, uv and tangent from the barycentrics. Same conventions on both sides: the geometric normal decides `outside`, the shading normal is flipped to face the ray on a back-face hit, so refraction through a mesh works the same as through the built-in sphere.
-
-Each image a material uses becomes a CUDA array of `uchar4`, and each (image, sampler, color space) a texture object over it (`src/render/textures.cpp`). The shade kernel samples each of a material's textures with `tex2D` at the hit's uv and multiplies the matching factor by it. Base color and emissive are stored sRGB-encoded, and the texture object's `sRGB` flag has the texture unit decode each texel to linear before the bilinear blend, so memory keeps the 8-bit sRGB values and the shader gets linear floats. A 16-bit image is rounded to 8 bits per channel at load. There are no mipmaps: the camera jitters each pixel's ray, so the samples already average the texels a pixel covers.
-
-#### Test assets
-
-Models come from [KhronosGroup/glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets), folder `Models/<name>/glTF/`, and are expected under `scenes/assets/<name>/glTF/`. The three material tests are the `.glb` files from `Models/<name>/glTF-Binary/`, under `scenes/assets/KhronosTests/`; they are made for environment lighting and have no light of their own, so their scene files add an emitting panel. That folder is gitignored. Each model needs its `.gltf`, `.bin` and the image files next to them. An image that is missing or cannot be used (a file that is not there, an image that only a KTX2 or WebP extension names) is a warning on stderr, and a base color slot that uses it renders magenta, so the broken asset shows in the render. The other slots fall back to their factor, since magenta in them would mean a mirror (metallic-roughness), a sideways normal or a surface that glows.
-
-| model | triangles | scene file | credit |
-|---|---|---|---|
-| Box | 12 | `cornell_boxmesh.json` | Cesium, 2017, CC BY 4.0 |
-| Duck | 4,212 | `cornell_duck.json` | Sony, 2006, SCEA Shared Source License 1.0 |
-| Suzanne | 3,936 | `cornell_suzanne.json` | Norbert Nopper / UX3D, 2017, CC0 |
-| DamagedHelmet | 15,452 | `cornell_helmet.json` | theblueturtle_, 2016, CC BY-NC 4.0; glTF rebuild by ctxwing, 2018, CC BY 4.0 |
-| Sponza | 262,267 | `sponza.json` | Crytek (Frank Meinl), CryENGINE Limited License Agreement, glTF conversion from the Khronos repo |
-| Intel Sponza, main and curtains | 3,747,018 + 1,997,366 | `sponza_intel.json` | Frank Meinl and Anton Kaplanyan, Intel, 2022, CC BY 4.0; curtains add-on by the Sponza Addon Package Crew |
-| Bistro exterior | 2,829,226 | `assets/Bistro/Exterior/BistroExterior.gltf`, loaded directly | Amazon Lumberyard, July 2017, CC BY 4.0 |
-| Bistro interior | 1,043,077 | `assets/Bistro/Interior/BistroInterior.gltf`, loaded directly | Amazon Lumberyard, July 2017, CC BY 4.0 |
-| TransmissionRoughnessTest | 77,792 | `transmission_roughness.json` | Ed Mackey, Analytical Graphics, 2021, CC BY 4.0 |
-| DragonAttenuation | 134,995 | `dragon_attenuation.json` | Dragon: Stanford Computer Graphics Laboratory, 1996, converted by Morgan McGuire, 2017, Stanford Graphics Library license; cloth backdrop: Adobe, CC0 |
-| ClearCoatTest | 37,116 | `clearcoat.json` | Ed Mackey, Analytical Graphics, 2020, CC BY 4.0 |
-
-The Intel Sponza comes from the [Intel Sample Library](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-processing-research/samples.html) as one zip per package. The glTF files, their `.bin` and `textures/` folders go under `scenes/assets/IntelSponza/<package>/`, keeping the zip's folder names (`main_sponza`, `pkg_a_curtains`, `pkg_d_10k_candles`). `sponza_intel.json` loads the main scene and the curtains package together, with the main file's first camera (`PhysCamera001`) and an emitting slab above the atrium in place of the sun, which is a punctual light. Cited as: Frank Meinl and Anton Kaplanyan, 2022, Intel Sample Library. The add-on packages also credit the Sponza Addon Package Crew: Katica Putica, Cristiano Siqueira, Timothy Heath, Justin Prazen, Sebastian Herholz, Bruce Cherniak, Anton Kaplanyan.
-
-The Bistro comes from NVIDIA's Open Research Content Archive as FBX with DDS textures (`Bistro_v5_2.zip`), cited as: Amazon Lumberyard Bistro, Open Research Content Archive (ORCA). Amazon Lumberyard, July 2017. http://developer.nvidia.com/orca/amazon-lumberyard-bistro. I converted it with Blender 5.2.2: FBX import, then a glTF Separate export into `scenes/assets/Bistro/Exterior/` and `scenes/assets/Bistro/Interior/`, which writes every DDS texture out as PNG. Bistro's "Specular" texture packs occlusion, roughness and metalness into R, G and B, and the FBX importer wires it to Specular IOR Level, which exports as `KHR_materials_specular`. In the saved `.blend` files a Separate Color node sends G to Roughness and B to Metallic instead, so the export writes the same image as glTF's `metallicRoughnessTexture` (glTF reads roughness from G and metalness from B too). Every Bistro emitter has an emissive texture, and the scenes are otherwise lit by punctual lights and the sun, so both render dark until direct light sampling. Bistro's normal maps follow the DirectX convention (its README lists them as "Normal (DirectX)"), whose green channel points the opposite way from glTF's. They are loaded unchanged, so detail along the texture's v direction is lit inverted.
+Each image a material uses becomes a CUDA array of `uchar4`, and each (image, sampler, color space) a texture object over it (`src/render/textures.cpp`). The shade kernel samples each of a material's textures with `tex2D` at the hit's uv and multiplies the matching factor by it. Base color and emissive are stored sRGB-encoded, and the texture object's `sRGB` flag has the texture unit decode each texel to linear before the bilinear blend, so memory keeps the 8-bit sRGB values and the shader gets linear floats. A 16-bit image is rounded to 8 bits per channel at load. An image that is missing or cannot be used outputs warning to stderr, and a base color slot that uses it renders magenta, so the broken asset shows in the render. The other slots fall back to 1 on each channel.
 
 #### Naive loop vs OptiX by triangle count
 
@@ -374,6 +294,23 @@ A 512x256 map with a sky of 0.1 and a 4x4 texel sun of 10⁴ at 45° over the fl
 
 The 52 renders of `tests/cmp_renders.sh`, none of which has an environment, stay byte-identical.
 
+### View transform
+
+The accumulation buffer is scene-linear and never touched. Tonemapping is applied once at display and once at save, through the same function in `src/render/tonemap.h`, so the viewport and the PNG agree. Default is AgX punchy.
+
+- **AgX** by Troy Sobotka, published as an OpenColorIO config: https://github.com/sobotka/AgX. The analytic version this project uses (inset/outset matrices, log2 shaper, polynomial sigmoid) is Benjamin Wrensch's "Minimal AgX Implementation": https://iolite-engine.com/blog_posts/minimal_agx_implementation. `agx-punchy` adds the "punchy" look from the same post, an ASC CDL grade (power 1.35, saturation 1.4) between the sigmoid and the outset matrix, matching the look of that name in Blender.
+- **ACES**, two fits of the reference RRT+ODT, picked by the `ACES_FIT_HILL` macro in `tonemap.h`. Default is Krzysztof Narkowicz's single rational curve: https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/. The alternative is Stephen Hill's fit with the sRGB to AP1 round trip, from `ACES.hlsl` in MJP's BakingLab: https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl. Hill's is scaled by 1/0.6 on input, same as three.js, so the two match in brightness. On Cornell they are within a few levels of each other once that's done.
+
+Same accumulation buffer through each transform. Glass Cornell, 600x600, 1000 spp, exposure 1.0, DEPTH 8:
+
+<!-- TODO: replace these four with the final hero shot through the same four transforms. Cornell has no saturated highlights, so the hue-skew difference between ACES and AgX barely shows here. -->
+
+| ACES, Narkowicz fit | ACES, Hill fit (1/0.6) |
+|:---:|:---:|
+| ![ACES Narkowicz](img/readme/tonemap_aces_narkowicz.png) | ![ACES Hill](img/readme/tonemap_aces_hill.png) |
+| **AgX** | **AgX punchy** |
+| ![AgX](img/readme/tonemap_agx.png) | ![AgX punchy](img/readme/tonemap_agx_punchy.png) |
+
 ### Performance optimization
 
 The renderer was profiled in two passes on 2026-10-02: the first with per-stage timing, the second with Nsight Systems and Nsight Compute. The first pass changed two defaults: the material sort is off (its gather cost 2 to 3.5x the frame on every scene and saved the shade kernel at most 0.3 ms), and the per-stage error-check waits are off in Release (5 to 10% at 1024x1024). The first entry below is the earlier optimization both build on; the second came out of the Nsight pass.
@@ -438,8 +375,6 @@ Every lane has to reach the vote, so the kernel's early returns became an `alive
 Each cell is ms per sample.
 
 ![ms per sample, CUB compaction against compaction in shade](img/readme/perf_compaction_in_shade.png)
-
-The profile predicted 0.51 ms on Cornell and 0.41 on Intel Sponza. A second Nsight Systems capture of Cornell splits the saving per sample:
 
 - **Compaction kernels**: gone, 0.49 ms.
 - **`shadeMaterial`**: 0.67 to 0.54 ms. It now writes only the survivors, and at bounces 1 to 3 on Cornell 18, 30 and 50% of the paths it used to write had already ended. By bytes alone that is about 0.05 ms; I have not looked into where the rest comes from.
@@ -551,6 +486,89 @@ The fix is just actually support alpha blending: a hit counts with probability a
 #### A 0.27% bias that was the image format
 
 The first furnace renders with environment NEE came out 0.27% dark in the mean against BSDF sampling, on the sphere, on a cube and on a flat floor alike, and the shadow rays, the MIS weights and the random number stream all checked out. The renders were compared as `.hdr`, Radiance RGBE: an 8-bit mantissa per channel, truncated, not rounded. The BSDF-only image is exactly 1.0 everywhere, which RGBE stores exactly. The NEE image is 1.0 plus a little noise, and every pixel slightly under 1.0 truncates down to 255/256 while every pixel slightly over stays at 1.0, so the whole image took 15 distinct values and its mean landed 0.27% low. Two noisy images truncate alike and their ratio hides this, which is why the NEE table above was fine in `.hdr`. `--out name.exr` now writes the float32 average as it is, through tinyexr, and the furnace means came back to 1.0000.
+
+### Viewport controls
+
+The viewport navigates like the Unreal Engine 5 level editor: hold the right mouse button to look around and fly, or hold Alt for the Maya-style orbit. Any camera move restarts the accumulation.
+
+| Input | Action |
+|---|---|
+| RMB drag | Look around in place |
+| RMB + W / S | Fly forward / back |
+| RMB + A / D | Fly left / right |
+| RMB + E / Q | Fly up / down along world +Y |
+| RMB + wheel | Fly speed up / down, x1.25 per notch (shown in the ImGui panel) |
+| LMB drag | Up / down moves along the ground, left / right turns |
+| MMB drag, or LMB + RMB drag | Pan |
+| Wheel | Move forward / back in steps |
+| Alt + LMB drag | Orbit around the pivot |
+| Alt + RMB drag | Move toward / away from the pivot |
+| Alt + MMB drag | Pan |
+| F | Back to the scene file's camera |
+| Ctrl + S | Save the image |
+| Esc | Save the image and quit |
+
+The ImGui panel also switches scenes without a restart. Its combo lists the scene JSONs in `scenes/` and the catalog's names (entries whose glTF is not downloaded are grayed out), and the field under it takes anything the command line takes: a name or a path to a .json, .gltf or .glb. The new scene is read first, so a bad file leaves the current scene in place with the error in the panel. On success the device buffers are rebuilt, the window takes the new scene's resolution, the camera starts at its scene camera and the accumulation starts over; `--res`, `--spp` and `--depth` from the command line still apply. The window is busy while a large scene loads (Intel Sponza takes a few seconds).
+
+The camera is a position, a yaw about world +Y, a pitch that stops just short of straight up or down, and a pivot distance. The orbit pivot sits on the view axis at that distance and travels with the camera. It starts at the scene's `LOOKAT`, or for a glTF camera at a point on its view axis near the middle of the scene. The default fly speed crosses the scene's bounding box diagonal in 4 seconds. A drag hides and locks the cursor, so it does not stop at the edge of the screen. Headless renders build their basis from the same pose as the window's first frame.
+
+### Headless rendering
+Render without a viewport
+```
+./build/bin/Release/cis565_path_tracer.exe scenes/cornell.json --headless --spp 100 --res 400x400 --out img/test/cornell.png
+```
+
+The scene argument is a path, or a name: `cornell` is `scenes/cornell.json`, and `veach-mis` is the research scene of that name. Names other than the scene JSONs come from `scenes/catalog.json`, which maps a short name to each glTF scene under `scenes/assets` (the 26 research scenes in their extended variant, and the two Bistro files), so the files stay where their downloads put them. `--list` prints every name and marks the ones not downloaded.
+
+| Flag | Effect |
+|---|---|
+| `--headless` | No GLFW / ImGui / OpenGL. Render, save, exit. Prints total time and ms per sample. |
+| `--list` | Print the scene names and exit |
+| `--spp N` | Override `ITERATIONS` from the scene file |
+| `--res WxH` | Override `RES` from the scene file |
+| `--depth N` | Override `DEPTH` from the scene file, the most rays a path may trace |
+| `--out path.png` | Write exactly this file. Default is the usual `img/auto_saved/<FILE>.<time>.<spp>samp.png`. An `.exr` path keeps the scene-linear average as float32, without view transform or exposure, for comparing renders by their numbers; `.hdr` does the same with 8-bit mantissas |
+| `--env FILE` | Light the scene with this lat-long `.hdr` or `.exr` instead of its own environment |
+| `--no-nee` | No next event estimation: lights count only when a path hits them |
+| `--no-env-nee` | Leave the environment out of the light list, so paths find it by BSDF sampling only |
+| `--no-env-compensation` | Build the environment's sampling table from its radiance alone, without MIS compensation |
+| `--no-rr` | Disable Russian roulette |
+| `--sort` | Sort paths by material before shading. Off by default since the 2026-10-02 profile, where its gather cost 2 to 3.5x the frame on every scene; `--no-sort` is the default, kept for scripts |
+| `--no-optix` | Intersect with the naive per-object kernel instead of the OptiX stage |
+| `--optix-validate` | OptiX validation mode: checks every launch, slow |
+| `--timing` | With `--headless`: print load, init and per-bounce stage times as CSV lines |
+| `--tonemap none\|aces\|agx\|agx-punchy` | View transform for viewport and PNG. Default `agx-punchy`. `none` is the raw clamp the base code shipped with |
+| `--exposure X` | Linear multiplier before the view transform. Default 1.0 |
+
+The overrides also work in windowed mode. Output is deterministic, with same scene, spp, resolution and tonemap produce a byte-identical PNG, so `cmp` against a previous render can be used to prove correctness for things that only improves performance but shouldn't alter the image at the same sample count.
+
+`tests/cmp_renders.sh` runs that check over 13 scenes (the JSON scenes, the textured and masked glTF ones, the three Khronos material tests and a research scene), both intersection paths, at 400x400 and 401x399. `golden` renders the set into `build/golden` before a change, `compare` renders it again after and cmps every PNG against its golden, and the exit code is nonzero when any of them differs.
+
+### Test assets
+
+`scenes/assets/` is gitignored, so the models below are downloaded into it. They come from three places:
+
+- **[KhronosGroup/glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets)**: Box, Duck, Suzanne, DamagedHelmet, Sponza and the three material tests. A model's folder `Models/<name>/glTF/` goes under `scenes/assets/<name>/glTF/`, with its `.gltf`, `.bin` and image files. The material tests are the `.glb` files from `Models/<name>/glTF-Binary/`, under `scenes/assets/KhronosTests/`; they are made for environment lighting and have no light of their own, so their scene files add an emitting panel.
+- **[Intel Sample Library](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-processing-research/samples.html)**: Intel Sponza and its curtains package.
+- **[NVIDIA Open Research Content Archive](http://developer.nvidia.com/orca/amazon-lumberyard-bistro)**: Bistro exterior and interior, converted from FBX.
+
+| model | triangles | scene file | credit |
+|---|---|---|---|
+| Box | 12 | `cornell_boxmesh.json` | Cesium, 2017, CC BY 4.0 |
+| Duck | 4,212 | `cornell_duck.json` | Sony, 2006, SCEA Shared Source License 1.0 |
+| Suzanne | 3,936 | `cornell_suzanne.json` | Norbert Nopper / UX3D, 2017, CC0 |
+| DamagedHelmet | 15,452 | `cornell_helmet.json` | theblueturtle_, 2016, CC BY-NC 4.0; glTF rebuild by ctxwing, 2018, CC BY 4.0 |
+| Sponza | 262,267 | `sponza.json` | Crytek (Frank Meinl), CryENGINE Limited License Agreement, glTF conversion from the Khronos repo |
+| TransmissionRoughnessTest | 77,792 | `transmission_roughness.json` | Ed Mackey, Analytical Graphics, 2021, CC BY 4.0 |
+| DragonAttenuation | 134,995 | `dragon_attenuation.json` | Dragon: Stanford Computer Graphics Laboratory, 1996, converted by Morgan McGuire, 2017, Stanford Graphics Library license; cloth backdrop: Adobe, CC0 |
+| ClearCoatTest | 37,116 | `clearcoat.json` | Ed Mackey, Analytical Graphics, 2020, CC BY 4.0 |
+| Intel Sponza, main and curtains | 3,747,018 + 1,997,366 | `sponza_intel.json` | Frank Meinl and Anton Kaplanyan, Intel, 2022, CC BY 4.0; curtains add-on by the Sponza Addon Package Crew |
+| Bistro exterior | 2,829,226 | `assets/Bistro/Exterior/BistroExterior.gltf`, loaded directly | Amazon Lumberyard, July 2017, CC BY 4.0 |
+| Bistro interior | 1,043,077 | `assets/Bistro/Interior/BistroInterior.gltf`, loaded directly | Amazon Lumberyard, July 2017, CC BY 4.0 |
+
+The Intel Sponza comes from the [Intel Sample Library](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-processing-research/samples.html) as one zip per package. The glTF files, their `.bin` and `textures/` folders go under `scenes/assets/IntelSponza/<package>/`, keeping the zip's folder names (`main_sponza`, `pkg_a_curtains`, `pkg_d_10k_candles`). As shipped, every punctual light in the main file has intensity 0, the sun included. `sponza_intel.json` loads `NewSponza_Main_glTF_003_lit.gltf`, the main file re-exported through Blender with 22 of its point lights at 40 W of orange light (2,174 cd as the exporter writes it) and the `light_bulb` material at emissive strength 500, together with the curtains package. The courtyard is lit by `kloppenheim_05_4k.hdr` at strength 11 in place of the sun. The re-export has no cameras, so the scene file carries the pose and field of view of the main file's first camera (`PhysCamera001`). Cited as: Frank Meinl and Anton Kaplanyan, 2022, Intel Sample Library. The add-on packages also credit the Sponza Addon Package Crew: Katica Putica, Cristiano Siqueira, Timothy Heath, Justin Prazen, Sebastian Herholz, Bruce Cherniak, Anton Kaplanyan.
+
+The Bistro comes from NVIDIA's Open Research Content Archive as FBX with DDS textures (`Bistro_v5_2.zip`), cited as: Amazon Lumberyard Bistro, Open Research Content Archive (ORCA). Amazon Lumberyard, July 2017. http://developer.nvidia.com/orca/amazon-lumberyard-bistro. I converted it with Blender 5.2.2: FBX import, then a glTF Separate export into `scenes/assets/Bistro/Exterior/` and `scenes/assets/Bistro/Interior/`, which writes every DDS texture out as PNG. Bistro's "Specular" texture packs occlusion, roughness and metalness into R, G and B, and the FBX importer wires it to Specular IOR Level, which exports as `KHR_materials_specular`. In the saved `.blend` files a Separate Color node sends G to Roughness and B to Metallic instead, so the export writes the same image as glTF's `metallicRoughnessTexture` (glTF reads roughness from G and metalness from B too). Every Bistro emitter has an emissive texture, and the scenes are otherwise lit by punctual lights and the sun, so both render dark until direct light sampling. Bistro's normal maps follow the DirectX convention (its README lists them as "Normal (DirectX)"), whose green channel points the opposite way from glTF's. They are loaded unchanged, so detail along the texture's v direction is lit inverted.
 
 ### References
 
