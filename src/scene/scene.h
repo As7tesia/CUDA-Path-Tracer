@@ -139,20 +139,32 @@ public:
     // their power. Empty when the scene has no light to sample.
     std::vector<PunctualLight> punctualLights;
     std::vector<LightTriangle> lightTriangles;
-    // Running sum of the pick probabilities over lightTriangles, then
-    // punctualLights, then the environment when it is one of the lights;
-    // the last entry is 1.
+    // Light linking gives each surface its own view of the lights: the
+    // tables below have one row per distinct Geom::lightMask in the scene
+    // (lightMasks, all ones first), and a row counts only the lights its
+    // mask receives, so a surface spends its samples on lights that can
+    // reach it. Row-major: entry [m * count + i].
+    std::vector<unsigned int> lightMasks;
+    // Per mask, the running sum of the pick probabilities over
+    // lightTriangles, then punctualLights, then the environment when it is
+    // one of the lights; numLights entries per row, each row ending at 1.
     std::vector<float> lightCdf;
-    // The environment's pick probability, the last entry's share of
-    // lightCdf; 0 when the scene has no environment to sample, or
+    // Per mask and punctual light, its pick probability.
+    std::vector<float> punctualPickPdf;
+    // Per mask, the environment's pick probability, the last entry's share
+    // of its lightCdf row; 0 when the scene has no environment to sample, or
     // environmentLight is off.
-    float environmentPickPdf = 0.0f;
+    std::vector<float> environmentPickPdf;
     bool environmentLight = true;  // SceneOverrides::environmentLight
-    // Per material: the density per unit area of next event estimation
-    // landing on a point of one of its triangles, the pick probability over
-    // the area, which comes to the same value for every triangle of the
-    // material (lights.cpp). The light pdf of a ray that hits an emitter
-    // needs nothing else. 0 for a material NEE never samples.
+    // Per mask and material: the density per unit area of next event
+    // estimation landing on a point of one of the material's triangles, the
+    // pick probability over the area, which comes to the same value for
+    // every triangle of the material (lights.cpp). The light pdf of a ray
+    // that hits an emitter needs nothing else. 0 for a material NEE never
+    // samples from that mask.
     std::vector<float> emitterAreaPdf;
+    // Lights per lightCdf row: the triangles, the punctual lights, and the
+    // environment when it is sampled. 0 when there is nothing to sample.
+    int numLights = 0;
     RenderState state;
 };

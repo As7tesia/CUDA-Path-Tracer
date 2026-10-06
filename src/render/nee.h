@@ -20,14 +20,40 @@ struct LightList
 {
     const LightTriangle* triangles;
     const PunctualLight* punctual;
-    const float* cdf;             // running pick probabilities over the triangles, the punctual lights, then the environment
-    const float* emitterAreaPdf;  // per material, see Scene::emitterAreaPdf
+    // The pick tables, one row per receiver mask (Scene::lightMasks): the
+    // running pick probabilities over the triangles, the punctual lights,
+    // then the environment; per material, Scene::emitterAreaPdf; per
+    // punctual light, its pick probability; and the environment's, 0 when
+    // the scene has no environment to sample. A row counts only the lights
+    // its mask receives. Row m starts at m * numLights, m * numMaterials,
+    // m * numPunctual, and m.
+    const float* cdf;
+    const float* emitterAreaPdf;
+    const float* punctualPickPdf;
+    const float* environmentPickPdf;
+    const unsigned int* masks;    // the distinct masks, all ones first
+    int numMasks;
+    int numMaterials;
+    int numPunctual;
     int numTriangles;
     int numLights;                // triangles plus punctual lights plus the environment; 0 when there is nothing to sample
-    // The environment's pick probability, the last entry of cdf; 0 when the
-    // scene has no environment to sample (Scene::environmentPickPdf)
-    float environmentPickPdf;
 };
+
+// The row of the pick tables for a surface's mask. All ones is row 0, and
+// stands in for a mask the tables do not hold (a camera ray's, or one past
+// the table's limit): its picks of lights the surface does not receive are
+// zeros, so the estimate stays right and only samples are lost.
+__device__ __forceinline__ int lightRow(const LightList& lights, unsigned int mask)
+{
+    for (int m = 1; m < lights.numMasks; ++m)
+    {
+        if (lights.masks[m] == mask)
+        {
+            return m;
+        }
+    }
+    return 0;
+}
 
 // The power heuristic with exponent 2 (Veach 1997): the weight of a sample
 // drawn with density pThis, when the other strategy would draw the same
@@ -71,6 +97,32 @@ __device__ __forceinline__ glm::vec3 lightEmission(const Material& m, glm::vec2 
     return emission;
 }
 
+// Whether a surface with receiverMask (Geom::lightMask) receives light from
+// link group group.
+__device__ __forceinline__ bool receivesGroup(unsigned int receiverMask, int group)
+{
+    return ((receiverMask >> group) & 1u) != 0u;
+}
+
+// A spot light's falloff toward a point it sees in direction -wi (wi points
+// from the point to the light): 1 inside the inner cone, 0 outside the outer
+// one, and the smoothstep 3t^2 - 2t^3 of the cosine between, Cycles' spot
+// falloff when the exporter maps its blend to the inner angle.
+__device__ __forceinline__ float spotFalloff(const PunctualLight& light, glm::vec3 wi)
+{
+    const float cosAngle = -glm::dot(wi, light.direction);
+    if (cosAngle <= light.cosOuter)
+    {
+        return 0.0f;
+    }
+    if (cosAngle >= light.cosInner)
+    {
+        return 1.0f;
+    }
+    const float t = (cosAngle - light.cosOuter) / (light.cosInner - light.cosOuter);
+    return t * t * (3.0f - 2.0f * t);
+}
+
 // One light sample toward a point.
 struct LightSample
 {
@@ -88,7 +140,12 @@ struct LightSample
 // Picks a light with u0 and, for a triangle, a point on it uniformly by area
 // with u1 and u2, or for the environment a direction from its table.
 // Returns false when the sample brings no light: the point emits nothing
-// there (a dark texel, a cut-out), or the triangle is seen edge-on.
+// there (a dark texel, a cut-out), the triangle is seen edge-on, the point
+// lies outside a spot light's cone, or the surface at hitPoint does not
+// receive the light's link group (receiverMask, see Geom::lightMask). The
+// pick table row of receiverMask gives such a light no share, so the last
+// case only happens for a mask without a row of its own; a dropped sample
+// is a zero either way, which keeps the estimate unbiased.
 //
 // A triangle's solid-angle pdf is its area pdf, emitterAreaPdf, times
 // d^2 / |cos| of the angle at the light; emitters glow from both sides, so
@@ -96,11 +153,13 @@ struct LightSample
 // times environmentPdf. A point or distant light is a delta: the BSDF can
 // never sample its direction, so it has no pdf to weigh against.
 __device__ __forceinline__ bool sampleLight(const LightList& lights, const EnvironmentMap& env,
-    const Material* materials, const cudaTextureObject_t* textures, glm::vec3 hitPoint, float u0, float u1, float u2,
-    LightSample& sample)
+    const Material* materials, const cudaTextureObject_t* textures, glm::vec3 hitPoint, unsigned int receiverMask,
+    float u0, float u1, float u2, LightSample& sample)
 {
     // The light u0 falls on: light i with probability cdf[i] - cdf[i - 1]
-    const int index = searchCdf(lights.cdf, lights.numLights, u0);
+    // of the receiver's row
+    const int row = lightRow(lights, receiverMask);
+    const int index = searchCdf(lights.cdf + row * lights.numLights, lights.numLights, u0);
     // A shadow ray stops short of the light by a margin the size of the
     // float error at the larger of the two points, or a sliver of the
     // distance, so it does not find the light's own surface.
@@ -112,6 +171,10 @@ __device__ __forceinline__ bool sampleLight(const LightList& lights, const Envir
     if (index < lights.numTriangles)
     {
         const LightTriangle t = lights.triangles[index];
+        if (!receivesGroup(receiverMask, t.group))
+        {
+            return false;
+        }
         // (1 - sqrt(u1), sqrt(u1) u2) as the weights of corners 1 and 2
         // spreads points evenly over the triangle.
         const float s = sqrtf(u1);
@@ -136,14 +199,15 @@ __device__ __forceinline__ bool sampleLight(const LightList& lights, const Envir
         }
         sample.wi = toLight / d;
         sample.tMax = tMax;
-        sample.pdf = lights.emitterAreaPdf[t.materialId] * d2 / fabsf(cosLight);
+        sample.pdf = lights.emitterAreaPdf[row * lights.numMaterials + t.materialId] * d2 / fabsf(cosLight);
         sample.weightedLight = emission / sample.pdf;
         return true;
     }
 
     // The environment: a direction from its table, infinitely far like a
     // distant light, so the shadow ray runs to the path rays' own tmax.
-    if (lights.environmentPickPdf > 0.0f && index == lights.numLights - 1)
+    const float environmentPick = lights.environmentPickPdf[row];
+    if (environmentPick > 0.0f && index == lights.numLights - 1)
     {
         float pdf;
         if (!environmentSample(env, u1, u2, sample.wi, pdf))
@@ -151,14 +215,19 @@ __device__ __forceinline__ bool sampleLight(const LightList& lights, const Envir
             return false;
         }
         sample.tMax = 1e16f;
-        sample.pdf = lights.environmentPickPdf * pdf;
+        sample.pdf = environmentPick * pdf;
         sample.weightedLight = environmentRadiance(env, sample.wi) / sample.pdf;
         return true;
     }
 
     const PunctualLight light = lights.punctual[index - lights.numTriangles];
+    if (!receivesGroup(receiverMask, light.group))
+    {
+        return false;
+    }
+    const float pickPdf = lights.punctualPickPdf[row * lights.numPunctual + index - lights.numTriangles];
     sample.pdf = 0.0f;
-    if (light.type == LIGHT_POINT)
+    if (light.type != LIGHT_DISTANT)
     {
         const glm::vec3 toLight = light.position - hitPoint;
         const float d2 = glm::dot(toLight, toLight);
@@ -169,13 +238,22 @@ __device__ __forceinline__ bool sampleLight(const LightList& lights, const Envir
             return false;
         }
         sample.wi = toLight / d;
-        sample.weightedLight = light.intensity / (d2 * light.pickPdf);
+        sample.weightedLight = light.intensity / (d2 * pickPdf);
+        if (light.type == LIGHT_SPOT)
+        {
+            const float falloff = spotFalloff(light, sample.wi);
+            if (falloff <= 0.0f)
+            {
+                return false;
+            }
+            sample.weightedLight *= falloff;
+        }
     }
     else
     {
         sample.wi = light.position;
         sample.tMax = 1e16f;  // the path rays' own tmax
-        sample.weightedLight = light.intensity / light.pickPdf;
+        sample.weightedLight = light.intensity / pickPdf;
     }
     return true;
 }

@@ -374,6 +374,44 @@ GltfRenderHints renderHints(const tinygltf::Model& model)
     return hints;
 }
 
+// Light linking from a node's extras, as the Stardust exporter writes them
+// (scenes/blender-migration/tools/export_stardust.py): "lightMask", the bits
+// of the groups the node's meshes receive, and "lightGroup", the group the
+// node's light or emissive meshes belong to (see Geom::lightMask). A node
+// without them receives every group and emits in group 0. The exporter keeps
+// groups to 0..30 so a mask fits a JSON integer; the low 32 bits are taken
+// in case a parser read it as a negative int.
+struct LightLink
+{
+    unsigned int mask = 0xffffffffu;
+    int group = 0;
+};
+
+LightLink lightLinkFor(const tinygltf::Node& node, const std::string& path)
+{
+    LightLink link;
+    const tinygltf::Value& mask = member(node.extras, "lightMask");
+    if (mask.IsNumber())
+    {
+        link.mask = (unsigned int)(long long)mask.GetNumberAsDouble() | 1u;
+    }
+    const tinygltf::Value& group = member(node.extras, "lightGroup");
+    if (group.IsNumber())
+    {
+        const int g = (int)group.GetNumberAsDouble();
+        if (g < 0 || g > 31)
+        {
+            fprintf(stderr, "glTF %s: node \"%s\" has lightGroup %d, outside 0..31; left in group 0\n", path.c_str(),
+                node.name.c_str(), g);
+        }
+        else
+        {
+            link.group = g;
+        }
+    }
+    return link;
+}
+
 // Whether an entry of extras.pbrt.light_sources is a PBRT infinite light.
 bool isInfiniteLight(const tinygltf::Value& light)
 {
@@ -470,26 +508,20 @@ void addPbrtDistantLights(const tinygltf::Model& model, Scene& scene)
 
 // Names the lights in the file that do not reach the render, so a dark image
 // explains itself. Emissive surfaces light a scene, and so do the punctual
-// lights (KHR_lights_punctual, which tinygltf parses into model.lights)
-// except spot lights. PBRT's infinite and distant lights become the
-// environment and distant lights when the file is the whole scene
-// (sceneLightsRead). The research scenes list the PBRT lights under
-// extras.pbrt.light_sources and mark those glTF cannot express as
-// "metadata_only"; the list's area lights are in the file as emissive meshes.
+// lights (KHR_lights_punctual, which tinygltf parses into model.lights).
+// PBRT's infinite and distant lights become the environment and distant
+// lights when the file is the whole scene (sceneLightsRead). The research
+// scenes list the PBRT lights under extras.pbrt.light_sources and mark those
+// glTF cannot express as "metadata_only"; the list's area lights are in the
+// file as emissive meshes.
 void reportUnusedLights(const tinygltf::Model& model, const std::string& path, bool sceneLightsRead)
 {
-    int spot = 0;
     int dark = 0;
     int ranged = 0;
     for (const tinygltf::Light& light : model.lights)
     {
-        spot += light.type == "spot";
-        dark += light.type != "spot" && light.intensity <= 0.0;
-        ranged += light.type != "spot" && light.intensity > 0.0 && light.range > 0.0;
-    }
-    if (spot > 0)
-    {
-        fprintf(stderr, "glTF %s: %d spot lights ignored (not supported)\n", path.c_str(), spot);
+        dark += light.intensity <= 0.0;
+        ranged += light.intensity > 0.0 && light.range > 0.0;
     }
     if (dark > 0)
     {
@@ -869,14 +901,17 @@ struct Loader
         camera = c;
     }
 
-    // A KHR_lights_punctual light at a node, in world space: a point light at
-    // the node's origin, a directional light shining down the node's -Z axis.
-    // glTF gives a point light's intensity in candela and a directional
-    // light's in lux; dividing by 683 lm/W turns them back into the radiant
-    // units the emission uses, undoing the conversion Blender's exporter
-    // makes. Spot lights and lights of intensity 0 are left out
-    // (reportUnusedLights names them).
-    void lightFor(int gltfLight, const glm::mat4& world)
+    // A KHR_lights_punctual light at a node, in world space: a point or spot
+    // light at the node's origin, a spot or directional light shining down
+    // the node's -Z axis. glTF gives a point or spot light's intensity in
+    // candela and a directional light's in lux; dividing by 683 lm/W turns
+    // them back into the radiant units the emission uses, undoing the
+    // conversion Blender's exporter makes. A spot's cone is its outer and
+    // inner cone half angles (outer at most 90 degrees, inner at most the
+    // outer), with the falloff spotFalloff in nee.h describes between them.
+    // Lights of intensity 0 are left out (reportUnusedLights names them).
+    // group is the node's light linking group (lightLinkFor).
+    void lightFor(int gltfLight, const glm::mat4& world, int group)
     {
         if (gltfLight < 0 || gltfLight >= (int)model.lights.size())
         {
@@ -887,10 +922,21 @@ struct Loader
             ? glm::vec3((float)source.color[0], (float)source.color[1], (float)source.color[2]) : glm::vec3(1.0f);
         PunctualLight light{};
         light.intensity = color * (float)(source.intensity / LUMENS_PER_WATT);
+        light.group = group;
         if (source.type == "point")
         {
             light.type = LIGHT_POINT;
             light.position = glm::vec3(world[3]);
+        }
+        else if (source.type == "spot")
+        {
+            light.type = LIGHT_SPOT;
+            light.position = glm::vec3(world[3]);
+            light.direction = -glm::normalize(glm::vec3(world[2]));
+            const float outer = glm::clamp((float)source.spot.outerConeAngle, 0.0f, 0.5f * PI);
+            const float inner = glm::clamp((float)source.spot.innerConeAngle, 0.0f, outer);
+            light.cosOuter = cosf(outer);
+            light.cosInner = cosf(inner);
         }
         else if (source.type == "directional")
         {
@@ -899,6 +945,7 @@ struct Loader
         }
         else
         {
+            fprintf(stderr, "glTF %s: light of unknown type \"%s\" ignored\n", path.c_str(), source.type.c_str());
             return;
         }
         if (maxComponent(light.intensity) > 0.0f)
@@ -1197,8 +1244,9 @@ struct Loader
         }
         const tinygltf::Node& node = model.nodes[nodeIndex];
         const glm::mat4 world = parent * nodeLocalMatrix(node);
+        const LightLink link = lightLinkFor(node, path);
         cameraFor(node.camera, world);
-        lightFor(node.light, world);
+        lightFor(node.light, world, link.group);
         if (node.mesh >= 0 && node.mesh < (int)model.meshes.size())
         {
             const tinygltf::Mesh& mesh = model.meshes[node.mesh];
@@ -1217,6 +1265,8 @@ struct Loader
                 g.inverseTransform = glm::inverse(world);
                 g.invTranspose = glm::inverseTranspose(world);
                 g.tangentSign = glm::determinant(glm::mat3(world)) < 0.0f ? -1.0f : 1.0f;
+                g.lightMask = link.mask;
+                g.lightGroup = link.group;
                 scene.geoms.push_back(g);
             }
         }

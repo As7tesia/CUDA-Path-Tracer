@@ -6,9 +6,9 @@
 // pathtrace.cu produces, so shadeMaterial and the material sort cannot tell
 // the two apart: t along the normalized ray, the surface normal with the same
 // orientation convention as the naive tests, the uv, the tangent, the
-// material id, the outside flag, and the sort key. They also write the
-// geometric cosine next event estimation needs, which the naive kernel
-// leaves out. The same launch traces the queued shadow rays (see
+// material id, the outside flag, the light linking fields, and the sort key.
+// They also write the geometric cosine next event estimation needs, which
+// the naive kernel leaves out. The same launch traces the queued shadow rays (see
 // OptixIntersectParams), which stop at the first hit and add their light in
 // their miss program. There is no payload: every program knows its launch
 // index and writes straight into the buffers.
@@ -112,8 +112,8 @@ static __forceinline__ __device__ InstanceRecord instance()
 
 // geometricNormal is unit length in world space; only its cosine with the
 // ray is kept (ShadeableIntersection::cosGeometric).
-static __forceinline__ __device__ void writeHit(int materialId, glm::vec3 normal, glm::vec2 uv, glm::vec4 tangent,
-    bool outside, glm::vec3 geometricNormal)
+static __forceinline__ __device__ void writeHit(const InstanceRecord& inst, glm::vec3 normal, glm::vec2 uv,
+    glm::vec4 tangent, bool outside, glm::vec3 geometricNormal)
 {
     const unsigned int i = optixGetLaunchIndex().x;
 
@@ -122,11 +122,13 @@ static __forceinline__ __device__ void writeHit(int materialId, glm::vec3 normal
     isect.surfaceNormal = normal;
     isect.uv = uv;
     isect.tangent = tangent;
-    isect.materialId = materialId;
+    isect.materialId = inst.materialId;
     isect.outside = outside;
     isect.cosGeometric = fabsf(glm::dot(geometricNormal, toVec3(optixGetWorldRayDirection())));
+    isect.lightMask = inst.lightMask;
+    isect.lightGroup = inst.lightGroup;
     params.intersections[i] = isect;
-    params.materialIds[i] = materialId;
+    params.materialIds[i] = inst.materialId;
 }
 
 // Unit cube GAS: 12 triangles, two per face, in the order -x +x -y +y -z +z
@@ -154,7 +156,7 @@ extern "C" __global__ void __closesthit__cube()
     {
         normal = -normal;
     }
-    writeHit(instance().materialId, normal, glm::vec2(0.0f), glm::vec4(0.0f), outside, normal);
+    writeHit(instance(), normal, glm::vec2(0.0f), glm::vec4(0.0f), outside, normal);
 }
 
 // Unit sphere GAS: one custom primitive, center at the origin, radius 0.5,
@@ -228,7 +230,7 @@ extern "C" __global__ void __closesthit__sphere()
         normal = -normal;
     }
 
-    writeHit(instance().materialId, normal, glm::vec2(0.0f), glm::vec4(0.0f), outside, normal);
+    writeHit(instance(), normal, glm::vec2(0.0f), glm::vec4(0.0f), outside, normal);
 }
 
 // Mesh GAS: OptiX's built-in triangle intersection reports which triangle of
@@ -264,7 +266,7 @@ extern "C" __global__ void __closesthit__mesh()
     const glm::vec2 uv = interpolate(params.buffers.uvs, tri, bary.x, bary.y);
     const glm::vec4 tangent = meshTangent(params.buffers.tangents, tri, bary.x, bary.y, inst.tangentSign, vectorToWorld);
 
-    writeHit(inst.materialId, normal, uv, tangent, outside, glm::normalize(normalToWorld(geometricNormal)));
+    writeHit(inst, normal, uv, tangent, outside, glm::normalize(normalToWorld(geometricNormal)));
 }
 
 // Any-hit for alpha-tested instances only (the others have it disabled by

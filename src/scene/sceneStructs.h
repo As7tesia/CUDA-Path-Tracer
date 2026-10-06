@@ -79,6 +79,14 @@ struct Geom
     // MESH only: -1 when transform mirrors (negative determinant), which
     // flips the bitangent sign of the mesh's tangents; 1 otherwise
     float tangentSign;
+    // Light linking, with Cycles' semantics: every light and emitter belongs
+    // to one of 32 groups, and bit k of lightMask is set when this object
+    // receives light from group k. Group 0 holds every unlinked light, so
+    // bit 0 is always set; without linking the mask is all ones. lightGroup
+    // is the group this object's own emission belongs to when it emits. Set
+    // from a glTF node's extras (gltf_loader.cpp); a scene JSON cannot link.
+    unsigned int lightMask = 0xffffffffu;
+    int lightGroup = 0;
     glm::mat4 transform;
     glm::mat4 inverseTransform;
     glm::mat4 invTranspose;
@@ -181,6 +189,11 @@ struct PathSegment
     // emission such a ray reaches counts in full instead of through a MIS
     // weight.
     float pdf;
+    // Geom::lightMask of the surface the ray left: the emission of an
+    // emitter it hits counts only when that surface receives the emitter's
+    // group. All ones for a camera ray, since linking never hides an emitter
+    // from the camera.
+    unsigned int receiverMask;
 };
 
 // Use with a corresponding PathSegment to do:
@@ -203,6 +216,11 @@ struct ShadeableIntersection
   // samples the emitter with. Written by the OptiX hit programs only: next
   // event estimation needs OptiX, so the naive kernel leaves it unset.
   float cosGeometric;
+  // The hit Geom's light linking (Geom::lightMask, Geom::lightGroup): what
+  // the surface receives, for the light sample taken here and the path's
+  // next ray, and the group its own emission belongs to.
+  unsigned int lightMask;
+  int lightGroup;
 };
 
 // One emissive triangle in world space, a light next event estimation picks
@@ -218,23 +236,35 @@ struct LightTriangle
     glm::vec2 uv1;
     glm::vec2 uv2;
     int materialId;
+    int group;  // the Geom's lightGroup (light linking)
 };
 
 enum PunctualLightType
 {
     LIGHT_POINT,
+    LIGHT_SPOT,
     LIGHT_DISTANT
 };
 
-// A light without a surface: a KHR_lights_punctual point or directional
-// light, or a PBRT distant light. No ray can hit one, so only next event
-// estimation reaches it, and its light counts without a MIS weight.
+// A light without a surface: a KHR_lights_punctual point, spot or
+// directional light, or a PBRT distant light. No ray can hit one, so only
+// next event estimation reaches it, and its light counts without a MIS
+// weight.
 struct PunctualLight
 {
     PunctualLightType type;
-    glm::vec3 position;   // LIGHT_POINT: where it is; LIGHT_DISTANT: unit direction toward it
-    glm::vec3 intensity;  // LIGHT_POINT: radiant intensity (W/sr); LIGHT_DISTANT: irradiance facing it (W/m^2)
-    float pickPdf;        // the probability next event estimation picks it with (lights.cpp)
+    glm::vec3 position;   // LIGHT_POINT, LIGHT_SPOT: where it is; LIGHT_DISTANT: unit direction toward it
+    // LIGHT_POINT: radiant intensity (W/sr); LIGHT_SPOT: the same on its
+    // axis; LIGHT_DISTANT: irradiance facing it (W/m^2)
+    glm::vec3 intensity;
+    // LIGHT_SPOT: the unit direction it shines in and its cone, as the
+    // cosines of the half angles: full intensity inside the inner cone,
+    // nothing outside the outer one, a smoothstep in the cosine between
+    // (spotFalloff in nee.h). cosInner == cosOuter is a hard edge.
+    glm::vec3 direction;
+    float cosOuter;
+    float cosInner;
+    int group;            // light linking group, 0 for an unlinked light; its pick probability is in LightList::punctualPickPdf
 };
 
 // A shadow ray of next event estimation, queued by shadeMaterial and traced

@@ -394,9 +394,14 @@ static void uploadLights()
     dev_lights.punctual = uploadVector(hst_scene->punctualLights);
     dev_lights.cdf = uploadVector(hst_scene->lightCdf);
     dev_lights.emitterAreaPdf = uploadVector(hst_scene->emitterAreaPdf);
+    dev_lights.punctualPickPdf = uploadVector(hst_scene->punctualPickPdf);
+    dev_lights.environmentPickPdf = uploadVector(hst_scene->environmentPickPdf);
+    dev_lights.masks = uploadVector(hst_scene->lightMasks);
+    dev_lights.numMasks = (int)hst_scene->lightMasks.size();
+    dev_lights.numMaterials = (int)hst_scene->materials.size();
+    dev_lights.numPunctual = (int)hst_scene->punctualLights.size();
     dev_lights.numTriangles = (int)hst_scene->lightTriangles.size();
-    dev_lights.numLights = (int)hst_scene->lightCdf.size();
-    dev_lights.environmentPickPdf = hst_scene->environmentPickPdf;
+    dev_lights.numLights = hst_scene->numLights;
 }
 
 static void freeLights()
@@ -405,6 +410,9 @@ static void freeLights()
     cudaFree((void*)dev_lights.punctual);
     cudaFree((void*)dev_lights.cdf);
     cudaFree((void*)dev_lights.emitterAreaPdf);
+    cudaFree((void*)dev_lights.punctualPickPdf);
+    cudaFree((void*)dev_lights.environmentPickPdf);
+    cudaFree((void*)dev_lights.masks);
     dev_lights = {};
 }
 
@@ -461,6 +469,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         segment.remainingBounces = traceDepth;
         segment.medium = -1;  // the camera sits in air
         segment.pdf = 0.0f;   // a light the camera sees directly counts in full
+        segment.receiverMask = 0xffffffffu;  // linking never hides an emitter from the camera
     }
 }
 
@@ -553,6 +562,8 @@ __global__ void computeIntersections(
             intersections[pathIndex].uv = uv;
             intersections[pathIndex].tangent = tangent;
             intersections[pathIndex].outside = closestOutside;
+            intersections[pathIndex].lightMask = geoms[hitGeomIndex].lightMask;
+            intersections[pathIndex].lightGroup = geoms[hitGeomIndex].lightGroup;
         }
     }
 }
@@ -654,14 +665,16 @@ __global__ void shadeMaterial(
             // the environment is one of the lights, and a ray from a rough
             // lobe shares its light with the environment sample the
             // previous hit took, weighed against the environment's density
-            // for the same direction; a camera ray or a smooth lobe's ray
-            // keeps all of it.
+            // for the same direction (the pick share of that surface's
+            // mask); a camera ray or a smooth lobe's ray keeps all of it.
             if (environment.radiance != glm::vec3(0.0f))
             {
                 float weight = 1.0f;
-                if (nee && seg.pdf > 0.0f && lights.environmentPickPdf > 0.0f)
+                const float environmentPick = nee && seg.pdf > 0.0f && lights.numLights > 0
+                    ? lights.environmentPickPdf[lightRow(lights, seg.receiverMask)] : 0.0f;
+                if (environmentPick > 0.0f)
                 {
-                    const float lightPdf = lights.environmentPickPdf * environmentPdf(environment, seg.ray.direction);
+                    const float lightPdf = environmentPick * environmentPdf(environment, seg.ray.direction);
                     weight = powerHeuristic(seg.pdf, lightPdf);
                 }
                 image[seg.pixelIndex] += seg.color * environmentRadiance(environment, seg.ray.direction) * weight;
@@ -709,16 +722,22 @@ __global__ void shadeMaterial(
             // With next event estimation, a ray the BSDF sampled from a rough
             // lobe (pdf > 0) shares this light with the light sample the
             // previous hit took: the light's density for the same direction
-            // is its area density times t^2 / cos at the emitter, with the
-            // flat triangle's cosine, as sampleLight computes it. A camera
-            // ray, a smooth lobe's ray and an emitter NEE does not sample
-            // (area density 0) keep all of it.
-            if (emission != glm::vec3(0.0f))
+            // is its area density in that surface's pick row times
+            // t^2 / cos at the emitter, with the flat triangle's cosine, as
+            // sampleLight computes it. A camera ray, a smooth lobe's ray and
+            // an emitter NEE does not sample (area density 0) keep all of it.
+            //
+            // Light linking: the emission counts only when the surface the
+            // ray left receives the emitter's group. The light sample that
+            // hit took gave zero for the same emitter (sampleLight), so the
+            // two strategies still agree.
+            if (emission != glm::vec3(0.0f) && receivesGroup(seg.receiverMask, intersection.lightGroup))
             {
                 float weight = 1.0f;
                 if (nee && seg.pdf > 0.0f)
                 {
-                    const float areaPdf = lights.emitterAreaPdf[intersection.materialId];
+                    const float areaPdf = lights.emitterAreaPdf[lightRow(lights, seg.receiverMask) * lights.numMaterials
+                        + intersection.materialId];
                     if (areaPdf > 0.0f)
                     {
                         const float lightPdf = areaPdf * intersection.t * intersection.t / intersection.cosGeometric;
@@ -727,6 +746,9 @@ __global__ void shadeMaterial(
                 }
                 image[seg.pixelIndex] += seg.color * emission * weight;
             }
+            // From here on the path leaves this surface: what it receives
+            // decides which emitters the next ray may count.
+            seg.receiverMask = intersection.lightMask;
 
             if (lastBounce)
             {
@@ -747,7 +769,8 @@ __global__ void shadeMaterial(
                     const float u1 = u01(rng);
                     const float u2 = u01(rng);
                     LightSample light;
-                    if (sampleLight(lights, environment, materials, textures, hitPoint, u0, u1, u2, light))
+                    if (sampleLight(lights, environment, materials, textures, hitPoint, intersection.lightMask, u0, u1,
+                            u2, light))
                     {
                         const BsdfEval f = evalPbr(wo, light.wi, intersection.surfaceNormal, intersection.outside,
                             material, surface);

@@ -7,9 +7,21 @@ CUDA Path Tracer
     - [LinkedIn](https://www.linkedin.com/in/yichen-huang-970b582bb/), [personal website](https://as7tesia.com/)
 * Tested on: Windows 11, AMD Ryzen 5950X @ 4.3GHz (PBO Enabled), 64GB(3200 MT/s), RTX 3090 24GB
 
-![Intel Sponza](img/readme/cover_sponza_intel.png)
+<p align="center">
+  <img src="img/readme/cover_stardust.jpg" alt="Stardust">
+  <br>
+  <em>Stardust</em>
+</p>
 
-Intel Sponza with the curtains package, 1920x1080, 1024 spp, DEPTH 8, AgX punchy, no denoising, 12.5 s on the RTX 3090 (12.2 ms per sample).
+This is my own Blender scene (8.8 M triangles, 2.4 M emissive, light linking). 3440x1440, 2048 spp, DEPTH 12, AgX, no denoising, 33.4 s on RTX 3090 (16.3 ms/sample).
+
+<p align="center">
+  <img src="img/readme/cover_sponza_intel.png" alt="Sponza">
+  <br>
+  <em>Sponza</em>
+</p>
+
+Intel Sponza with the curtains package, 1920x1080, 1024 spp, DEPTH 8, AgX punchy, no denoising, 12.5 s on RTX 3090 (12.2 ms/sample).
 
 ### Rendering pipeline
 
@@ -163,6 +175,7 @@ At load, `src/scene/lights.cpp` builds one list of everything NEE can pick, each
 |---|---|---|
 | emissive triangle | glTF meshes, and scene JSON cubes as their 12 triangles | 2π x area x luminance(emission) |
 | point light | `KHR_lights_punctual` | 4π x luminance(intensity) |
+| spot light | `KHR_lights_punctual` | its cone's solid angle x luminance(intensity), see [below](#light-linking-and-spot-lights) |
 | distant light | `KHR_lights_punctual` directional lights, the research scenes' PBRT distant lights | π r² x luminance(irradiance), r the scene's bounding sphere |
 
 Emitters glow from both sides, hence 2π, and a triangle's emission is its material's emission factor times its emissive texture's average color (see the last subsection). Emissive spheres stay out of the list, so a BSDF-sampled ray that hits one keeps all of its emission. The environment is in the list, see [the next section](#environment-map-sampling). glTF gives a point light's intensity in candela and a directional light's in lux, and the loader divides both by 683 lm/W to get back the radiant units Blender's exporter converts from (Bistro's files come from it). A floor under a 400 W point light (21,740.6 cd as the exporter writes it) and under a sun of strength 1 (683 lux) matches Cycles within 0.4%.
@@ -226,6 +239,14 @@ Each material's emission is now weighed as its emission factor times the average
 - **Noise**: the RMSE of the displayed image against a 4096 spp render drops from 12.9 to 9.2 (of 255), 49% less variance, about what twice the samples would give. Most of the noise left in the room is indirect light, which the light picks do not touch.
 - **Mean**: unchanged, and at 4096 spp the render still matches BSDF sampling alone within 0.04%.
 - **Frame time**: 3.0 against 2.9 ms/spp.
+
+#### Light linking and spot lights
+
+Blender's light linking lets a light illuminate only the objects in a receiver collection. The renderer follows Blender Cycles' rule. Every light and emitter belongs to one of 32 link groups, every object has a 32-bit mask of the groups it receives, group 0 holds every unlinked light and bit 0 is always set. The glTF carries both as node extras, `lightGroup` on light and emissive mesh nodes and `lightMask` on mesh nodes, which the export script derives from the collections' include and exclude entries; a file without them renders as before. Each `Geom` keeps its mask and group, both intersection paths copy them into the intersection struct, and the path struct carries the mask of the surface it left.
+
+Linking enters NEE in two places. A light sample is dropped when the receiver's mask lacks the picked light's group, and the emission of an emitter a BSDF ray hits counts only when the surface the ray left receives the emitter's group. Both strategies give zero for the same pairs, so the MIS weights still add up to 1. However, sampling a light the surface cannot receive is a wasted sample, in the Stardust scene it was very obvious where there was a bright light that takes away most samples from character ([see details below](#light-linking-with-one-pick-table-speckled-the-character)). So the pick tables are built once per distinct receiver mask in the scene, each row counting only the lights its mask receives: the running sum over the lights, the area density per material, the pick probability per punctual light and the environment's share. The shade kernel finds a surface's row by its mask, and the BSDF side reads the area density from the row of the surface the ray left, the row its light sample came from. A scene without light linking has the one row and renders same as before.
+
+Spot lights are the remaining `KHR_lights_punctual` type: a point light with a direction and two cone angles, full intensity inside the inner cone, nothing outside the outer one and a smoothstep in between. A spot's pick power is its cone's solid angle times its luminance. The soft shadow radius of a Blender spot is not yet supported.
 
 ### Environment map sampling
 
@@ -477,15 +498,21 @@ The fix is just actually support alpha blending: a hit counts with probability a
 |:---:|:---:|
 | ![Decals as solid walls](img/bloopers/sponza_intel_blend_decals_opaque.png) | ![Decals as coverage](img/readme/sponza_intel_blend_decals_fixed.png) |
 
+#### Light linking with one pick table speckled the character
+
+The first version of light linking kept the one global pick table and dropped the samples whose receiver was not linked to the picked light, which is unbiased and costs nothing on a scene without linking. In the Stardust scene, there is a very bright light that is linked to not affect the character, and a spot that lights the character, so 99% of the character's light picks were discarded. The few picks of the spot each carried its full contribution divided by a tiny probability, thus the bright specles. The [per-mask pick tables](#light-linking-and-spot-lights) give that light a probability of 0 in the character's row and the spot its proper share, and the same 2048 spp render is clean.
+
+Character crop at 1x, 2048 spp:
+
+| One global pick table | One table per receiver mask |
+|:---:|:---:|
+| ![Speckled character](img/readme/stardust_linking_global_picks_crop.png) | ![Clean character](img/readme/stardust_linking_mask_rows_crop.png) |
+
 #### Smaller base code fixes
 
 - **Every camera move freed and reallocated all device buffers.** A drag re-ran the full init per mouse event, about 2.8 ms at 800x800, more than a frame now costs. Buffers are allocated once; a camera change clears the image and resets the sample count.
 - **The accumulation buffer was copied to the host every iteration** so the S key could save at any time. The copy now happens inside save.
 - **A CUDA error waited on `getchar()` before exiting** on Windows, which hangs a headless run. Removed; the message goes to stderr either way.
-
-#### A 0.27% bias that was the image format
-
-The first furnace renders with environment NEE came out 0.27% dark in the mean against BSDF sampling, on the sphere, on a cube and on a flat floor alike, and the shadow rays, the MIS weights and the random number stream all checked out. The renders were compared as `.hdr`, Radiance RGBE: an 8-bit mantissa per channel, truncated, not rounded. The BSDF-only image is exactly 1.0 everywhere, which RGBE stores exactly. The NEE image is 1.0 plus a little noise, and every pixel slightly under 1.0 truncates down to 255/256 while every pixel slightly over stays at 1.0, so the whole image took 15 distinct values and its mean landed 0.27% low. Two noisy images truncate alike and their ratio hides this, which is why the NEE table above was fine in `.hdr`. `--out name.exr` now writes the float32 average as it is, through tinyexr, and the furnace means came back to 1.0000.
 
 ### Viewport controls
 

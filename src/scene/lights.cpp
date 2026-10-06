@@ -6,12 +6,22 @@
 //
 //   emissive triangle   2 pi * area * luminance(emission), emitting from both sides
 //   point light         4 pi * luminance(intensity)
+//   spot light          its cone's solid angle * luminance(intensity)
 //   distant light       pi * r^2 * luminance(irradiance), r the scene's bounding sphere
 //   environment         pi * r^2 * integral of its luminance over all directions
 //
 // The last two are the flux through a disk as large as the scene, which for
 // the environment is pi r^2 per direction, integrated. A one-color
-// environment of luminance L comes to 4 pi^2 r^2 L.
+// environment of luminance L comes to 4 pi^2 r^2 L. A spot's cone, with the
+// smoothstep falloff between its inner and outer angles (nee.h), has the
+// solid angle 2 pi (1 - (cosInner + cosOuter) / 2): the smoothstep
+// integrates to half over the band between the two.
+//
+// Light linking (Geom::lightMask): the shares are computed once per
+// distinct receiver mask in the scene, counting only the lights that mask
+// receives, so a surface never spends a sample on a light that cannot reach
+// it. The tables are row-major by mask (Scene::lightMasks); the shade
+// kernel finds a surface's row from its mask (lightRow in nee.h).
 //
 // A triangle's emission is its material's emission factor times the average
 // color of the material's emissive texture over the whole image, as PBRT-v4
@@ -29,6 +39,7 @@
 
 #include "utilities.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <unordered_map>
 #include <utility>
@@ -151,6 +162,7 @@ void Scene::buildLights()
         t.uv1 = uv1;
         t.uv2 = uv2;
         t.materialId = g.materialId;
+        t.group = g.lightGroup;
         const double area = 0.5 * (double)glm::length(glm::cross(t.e1, t.e2));
         if (area > 0.0)  // a degenerate triangle has nothing to pick
         {
@@ -193,12 +205,19 @@ void Scene::buildLights()
     bounds(0, geoms.size(), lo, hi);
     const double radius = lo.x <= hi.x ? 0.5 * (double)glm::length(hi - lo) : 1.0;
     int pointLights = 0;
+    int spotLights = 0;
     for (const PunctualLight& light : punctualLights)
     {
         if (light.type == LIGHT_POINT)
         {
             ++pointLights;
             power.push_back(4.0 * PI * luminance(light.intensity));
+        }
+        else if (light.type == LIGHT_SPOT)
+        {
+            ++spotLights;
+            const double solidAngle = 2.0 * PI * (1.0 - 0.5 * ((double)light.cosInner + light.cosOuter));
+            power.push_back(solidAngle * luminance(light.intensity));
         }
         else
         {
@@ -219,9 +238,12 @@ void Scene::buildLights()
     {
         total += p;
     }
+    lightMasks.clear();
     lightCdf.clear();
-    emitterAreaPdf.assign(materials.size(), 0.0f);
-    environmentPickPdf = 0.0f;
+    punctualPickPdf.clear();
+    environmentPickPdf.clear();
+    emitterAreaPdf.clear();
+    numLights = 0;
     if (total <= 0.0)
     {
         lightTriangles.clear();
@@ -229,35 +251,112 @@ void Scene::buildLights()
         return;
     }
 
-    // Summed in double: in a scene with millions of emissive triangles each
-    // one's share is near float's resolution next to 1.
-    lightCdf.resize(power.size());
-    double running = 0.0;
-    for (size_t i = 0; i < power.size(); ++i)
+    // The distinct receiver masks, all ones first, each with its own row of
+    // the tables. A scene without linking has the one row. Past the limit
+    // the remaining masks share row 0 (lightRow in nee.h), which only
+    // wastes picks.
+    const size_t MAX_LIGHT_MASKS = 64;
+    lightMasks.push_back(0xffffffffu);
+    size_t unlistedMasks = 0;
+    for (const Geom& g : geoms)
     {
-        running += power[i];
-        lightCdf[i] = (float)(running / total);
+        if (std::find(lightMasks.begin(), lightMasks.end(), g.lightMask) != lightMasks.end())
+        {
+            continue;
+        }
+        if (lightMasks.size() < MAX_LIGHT_MASKS)
+        {
+            lightMasks.push_back(g.lightMask);
+        }
+        else
+        {
+            ++unlistedMasks;
+        }
     }
-    lightCdf.back() = 1.0f;
+    if (unlistedMasks > 0)
+    {
+        fprintf(stderr, "Light linking: %zu receiver masks past the limit of %zu sample every light\n",
+            unlistedMasks, MAX_LIGHT_MASKS);
+    }
 
-    for (const LightTriangle& t : lightTriangles)
+    const size_t numMasks = lightMasks.size();
+    const size_t numPunctual = punctualLights.size();
+    numLights = (int)power.size();
+    lightCdf.assign(numMasks * numLights, 1.0f);
+    emitterAreaPdf.assign(numMasks * materials.size(), 0.0f);
+    punctualPickPdf.assign(numMasks * numPunctual, 0.0f);
+    environmentPickPdf.assign(numMasks, 0.0f);
+    const auto receives = [](unsigned int mask, int group) { return ((mask >> group) & 1u) != 0u; };
+    for (size_t m = 0; m < numMasks; ++m)
     {
-        emitterAreaPdf[t.materialId] = (float)(2.0 * PI * luminance(emission[t.materialId]) / total);
-    }
-    for (size_t i = 0; i < punctualLights.size(); ++i)
-    {
-        punctualLights[i].pickPdf = (float)(power[lightTriangles.size() + i] / total);
-    }
-    if (hasEnvironment)
-    {
-        environmentPickPdf = (float)(power.back() / total);
+        const unsigned int mask = lightMasks[m];
+        // A light this mask does not receive gets no share of its row; the
+        // environment is never linked.
+        const auto share = [&](size_t i) {
+            if (i < lightTriangles.size())
+            {
+                return receives(mask, lightTriangles[i].group) ? power[i] : 0.0;
+            }
+            if (i < lightTriangles.size() + numPunctual)
+            {
+                return receives(mask, punctualLights[i - lightTriangles.size()].group) ? power[i] : 0.0;
+            }
+            return power[i];
+        };
+        double maskTotal = 0.0;
+        for (size_t i = 0; i < power.size(); ++i)
+        {
+            maskTotal += share(i);
+        }
+        if (maskTotal <= 0.0)
+        {
+            // Nothing reaches this mask: its row picks light 0 every time,
+            // and sampleLight rejects it as not received.
+            continue;
+        }
+
+        // Summed in double: in a scene with millions of emissive triangles
+        // each one's share is near float's resolution next to 1.
+        float* cdf = lightCdf.data() + m * numLights;
+        double running = 0.0;
+        for (size_t i = 0; i < power.size(); ++i)
+        {
+            running += share(i);
+            cdf[i] = (float)(running / maskTotal);
+        }
+        cdf[numLights - 1] = 1.0f;
+
+        for (const LightTriangle& t : lightTriangles)
+        {
+            if (receives(mask, t.group))
+            {
+                emitterAreaPdf[m * materials.size() + t.materialId] =
+                    (float)(2.0 * PI * luminance(emission[t.materialId]) / maskTotal);
+            }
+        }
+        for (size_t i = 0; i < numPunctual; ++i)
+        {
+            if (receives(mask, punctualLights[i].group))
+            {
+                punctualPickPdf[m * numPunctual + i] = (float)(power[lightTriangles.size() + i] / maskTotal);
+            }
+        }
+        if (hasEnvironment)
+        {
+            environmentPickPdf[m] = (float)(power.back() / maskTotal);
+        }
     }
 
-    printf("Lights for next event estimation: %zu emissive triangles, %d point, %zu distant%s\n",
-        lightTriangles.size(), pointLights, punctualLights.size() - pointLights,
+    printf("Lights for next event estimation: %zu emissive triangles, %d point, %d spot, %zu distant%s",
+        lightTriangles.size(), pointLights, spotLights, punctualLights.size() - pointLights - spotLights,
         hasEnvironment ? ", the environment" : "");
+    if (numMasks > 1)
+    {
+        printf("; %zu receiver masks (light linking)", numMasks);
+    }
+    printf("\n");
     if (hasEnvironment)
     {
-        printf("  the environment gets %.1f%% of the light picks\n", 100.0 * environmentPickPdf);
+        printf("  the environment gets %.1f%% of the light picks\n", 100.0 * environmentPickPdf[0]);
     }
 }

@@ -571,3 +571,6 @@ profiling/results/logs/
 profiling/results/nsys/
 profiling/results/ncu/
 profiling/results/*.log
+
+# Blender scene migration (working .blend, exported glTF, textures, reference renders); large, stays local
+scenes/blender-migration/

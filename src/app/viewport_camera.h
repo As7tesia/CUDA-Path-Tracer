@@ -11,28 +11,31 @@
 
 // Yaw turns about world +Y: 0 looks down -Z, positive turns right, toward +X.
 // Pitch tilts up from the horizon and stops just short of straight up or
-// down, where a basis built against world +Y would not exist. The orbit pivot
+// down, where a basis built against world +Y would not exist. Roll then turns
+// the camera about its view axis, positive tipping its right side up. It
+// comes from the scene's camera and no control changes it. The orbit pivot
 // sits on the view axis, pivotDistance ahead, and travels with the camera.
 struct ViewportPose
 {
     glm::vec3 position;
     float yaw;
     float pitch;
+    float roll;
     float pivotDistance;
 };
 
 glm::vec3 viewDirection(const ViewportPose& pose);
 glm::vec3 pivotOf(const ViewportPose& pose);
 
-// The pose that sees what cam sees: the same eye and view direction, with
-// cam.lookAt as the pivot. A camera looking straight up or down (a glTF
-// camera can) is tilted a hair off the pole.
+// The pose that sees what cam sees: the same eye, view direction and roll,
+// with cam.lookAt as the pivot. A camera looking straight up or down (a glTF
+// camera can) is tilted a hair off the pole. Exactly on the pole, which way
+// its image is turned is not kept.
 ViewportPose poseFromCamera(const Camera& cam);
 
 // Writes pose into cam: the position, the basis generateRayFromCamera reads,
-// and the pivot as lookAt. The basis is built against world +Y, so the scene's
-// UP only matters to the loader's basis, which this replaces before the first
-// pathtrace.
+// and the pivot as lookAt. The basis is built against world +Y, then turned
+// about the view by the roll.
 void applyPose(const ViewportPose& pose, Camera& cam);
 
 // Mouse navigation, for a motion of (dx, dy) pixels. mirrored is

@@ -561,18 +561,6 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
             ahead = radius;
         }
         pose.lookAt = c.position + ahead * c.view;
-
-        // The viewport camera (applyPose in main.cpp) keeps world +Y up, so
-        // its right is always level: perpendicular to view and +Y, or +X
-        // when it looks straight up or down. A glTF camera whose right
-        // points elsewhere is rolled about its view axis, and the roll is
-        // lost.
-        glm::vec3 level = glm::cross(c.view, glm::vec3(0.0f, 1.0f, 0.0f));
-        level = glm::length(level) < 1e-3f ? glm::vec3(1.0f, 0.0f, 0.0f) : glm::normalize(level);
-        if (glm::dot(glm::normalize(glm::cross(c.view, c.up)), level) < 0.9999f)
-        {
-            cerr << "The camera in " << gltfName << " is rolled about its view axis; the roll is not kept" << endl;
-        }
     }
     else
     {

@@ -32,6 +32,11 @@ ViewportPose poseFromCamera(const Camera& cam)
     p.position = cam.position;
     p.yaw = std::atan2(cam.view.x, -cam.view.z);
     p.pitch = glm::clamp(std::asin(glm::clamp(cam.view.y, -1.0f, 1.0f)), -PITCH_LIMIT, PITCH_LIMIT);
+    // A level right has no y, so turning the level basis by roll gives
+    // right.y = sin(roll) cos(pitch) and up.y = cos(roll) cos(pitch). A scene
+    // UP of world +Y leaves right.y exactly 0, and the roll with it. right is
+    // read before the mirror flip, which applyPose makes after turning.
+    p.roll = std::atan2(cam.mirrored ? -cam.right.y : cam.right.y, cam.up.y);
     p.pivotDistance = glm::length(cam.lookAt - cam.position);
     return p;
 }
@@ -42,8 +47,17 @@ void applyPose(const ViewportPose& pose, Camera& cam)
     cam.view = viewDirection(pose);
     // Both normalized: cross(view, +Y) has length cos(pitch), and the pixel
     // offsets in generateRayFromCamera scale by right and up directly.
-    const glm::vec3 right = glm::normalize(glm::cross(cam.view, glm::vec3(0.0f, 1.0f, 0.0f)));
-    cam.up = glm::normalize(glm::cross(right, cam.view));
+    glm::vec3 right = glm::normalize(glm::cross(cam.view, glm::vec3(0.0f, 1.0f, 0.0f)));
+    glm::vec3 up = glm::normalize(glm::cross(right, cam.view));
+    if (pose.roll != 0.0f)
+    {
+        const float c = std::cos(pose.roll);
+        const float s = std::sin(pose.roll);
+        const glm::vec3 level = right;
+        right = c * level + s * up;
+        up = c * up - s * level;
+    }
+    cam.up = up;
     cam.right = cam.mirrored ? -right : right;
     cam.lookAt = pose.position + pose.pivotDistance * cam.view;
 }
