@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="520" viewBox="0 0 1000 520" font-family="'Segoe UI', Arial, sans-serif">
+<defs><marker id="head8a8882" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#8a8882"/></marker></defs>
+<rect width="1000" height="520" fill="#1a1a19"/>
+<rect x="16" y="20" width="968" height="120" rx="12" fill="#212120" stroke="#212120" stroke-width="1.5"/>
+<text x="32" y="70.0" font-size="15" font-weight="600" fill="#f2f1ec" text-anchor="start" dominant-baseline="middle">Load</text>
+<text x="32" y="90.0" font-size="13" font-weight="400" fill="#a3a19a" text-anchor="start" dominant-baseline="middle">once per scene</text>
+<rect x="16" y="164" width="968" height="176" rx="12" fill="#212120" stroke="#212120" stroke-width="1.5"/>
+<text x="32" y="242.0" font-size="15" font-weight="600" fill="#f2f1ec" text-anchor="start" dominant-baseline="middle">Each sample</text>
+<text x="32" y="262.0" font-size="13" font-weight="400" fill="#a3a19a" text-anchor="start" dominant-baseline="middle">every iteration</text>
+<rect x="16" y="360" width="968" height="100" rx="12" fill="#212120" stroke="#212120" stroke-width="1.5"/>
+<text x="32" y="400.0" font-size="15" font-weight="600" fill="#f2f1ec" text-anchor="start" dominant-baseline="middle">Output</text>
+<text x="32" y="420.0" font-size="13" font-weight="400" fill="#a3a19a" text-anchor="start" dominant-baseline="middle">viewport and files</text>
+<rect x="176" y="40" width="140" height="80" rx="8" fill="#24363c" stroke="#4fb3d9" stroke-width="1.5"/>
+<text x="246.0" y="62.0" font-size="15" font-weight="600" fill="#d6eff8" text-anchor="middle" dominant-baseline="middle">Parse scene</text>
+<text x="246.0" y="81.5" font-size="13" font-weight="400" fill="#93d1e9" text-anchor="middle" dominant-baseline="middle">JSON or glTF to</text>
+<text x="246.0" y="99.5" font-size="13" font-weight="400" fill="#93d1e9" text-anchor="middle" dominant-baseline="middle">flat vertex arrays</text>
+<rect x="340" y="40" width="140" height="80" rx="8" fill="#24363c" stroke="#4fb3d9" stroke-width="1.5"/>
+<text x="410.0" y="62.0" font-size="15" font-weight="600" fill="#d6eff8" text-anchor="middle" dominant-baseline="middle">Environment</text>
+<text x="410.0" y="81.5" font-size="13" font-weight="400" fill="#93d1e9" text-anchor="middle" dominant-baseline="middle">sampling table,</text>
+<text x="410.0" y="99.5" font-size="13" font-weight="400" fill="#93d1e9" text-anchor="middle" dominant-baseline="middle">MIS compensated</text>
+<path d="M316 80 L340 80" fill="none" stroke="#8a8882" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#head8a8882)"/>
+<rect x="504" y="40" width="140" height="80" rx="8" fill="#24363c" stroke="#4fb3d9" stroke-width="1.5"/>
+<text x="574.0" y="62.0" font-size="15" font-weight="600" fill="#d6eff8" text-anchor="middle" dominant-baseline="middle">Light list</text>
+<text x="574.0" y="81.5" font-size="13" font-weight="400" fill="#93d1e9" text-anchor="middle" dominant-baseline="middle">emitters, lights, env,</text>
+<text x="574.0" y="99.5" font-size="13" font-weight="400" fill="#93d1e9" text-anchor="middle" dominant-baseline="middle">picked by power</text>
+<path d="M480 80 L504 80" fill="none" stroke="#8a8882" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#head8a8882)"/>
+<rect x="668" y="40" width="140" height="80" rx="8" fill="#24363c" stroke="#4fb3d9" stroke-width="1.5"/>
+<text x="738.0" y="62.0" font-size="15" font-weight="600" fill="#d6eff8" text-anchor="middle" dominant-baseline="middle">Upload</text>
+<text x="738.0" y="81.5" font-size="13" font-weight="400" fill="#93d1e9" text-anchor="middle" dominant-baseline="middle">buffers, materials,</text>
+<text x="738.0" y="99.5" font-size="13" font-weight="400" fill="#93d1e9" text-anchor="middle" dominant-baseline="middle">CUDA textures</text>
+<path d="M644 80 L668 80" fill="none" stroke="#8a8882" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#head8a8882)"/>
+<rect x="832" y="40" width="140" height="80" rx="8" fill="#2c2528" stroke="#f2a7c3" stroke-width="1.5"/>
+<text x="902.0" y="62.0" font-size="15" font-weight="600" fill="#f8e3eb" text-anchor="middle" dominant-baseline="middle">OptiX build</text>
+<text x="902.0" y="81.5" font-size="13" font-weight="400" fill="#e9aec4" text-anchor="middle" dominant-baseline="middle">GAS per primitive,</text>
+<text x="902.0" y="99.5" font-size="13" font-weight="400" fill="#e9aec4" text-anchor="middle" dominant-baseline="middle">IAS over instances</text>
+<path d="M808 80 L832 80" fill="none" stroke="#8a8882" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#head8a8882)"/>
+<path d="M902 120 L902 152 L246 152 L246 208" fill="none" stroke="#8a8882" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#head8a8882)"/>
+<rect x="176" y="208" width="140" height="70" rx="8" fill="#3c242c" stroke="#d55181" stroke-width="1.5"/>
+<text x="246.0" y="225.0" font-size="15" font-weight="600" fill="#f6dbe5" text-anchor="middle" dominant-baseline="middle">Camera rays</text>
+<text x="246.0" y="244.5" font-size="13" font-weight="400" fill="#e8a0ba" text-anchor="middle" dominant-baseline="middle">one path per pixel,</text>
+<text x="246.0" y="262.5" font-size="13" font-weight="400" fill="#e8a0ba" text-anchor="middle" dominant-baseline="middle">pinhole or thin lens</text>
+<rect x="336" y="178" width="328" height="150" rx="10" fill="none" stroke="#55534e" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="350" y="194" font-size="13" font-weight="400" fill="#a3a19a" text-anchor="start" dominant-baseline="middle">bounce loop, up to DEPTH times</text>
+<rect x="352" y="208" width="136" height="70" rx="8" fill="#2c2528" stroke="#f2a7c3" stroke-width="1.5"/>
+<text x="420.0" y="225.0" font-size="15" font-weight="600" fill="#f8e3eb" text-anchor="middle" dominant-baseline="middle">OptiX launch</text>
+<text x="420.0" y="244.5" font-size="13" font-weight="400" fill="#e9aec4" text-anchor="middle" dominant-baseline="middle">path rays, and the</text>
+<text x="420.0" y="262.5" font-size="13" font-weight="400" fill="#e9aec4" text-anchor="middle" dominant-baseline="middle">queued shadow rays</text>
+<rect x="512" y="208" width="136" height="70" rx="8" fill="#3c242c" stroke="#d55181" stroke-width="1.5"/>
+<text x="580.0" y="225.0" font-size="15" font-weight="600" fill="#f6dbe5" text-anchor="middle" dominant-baseline="middle">shadeMaterial</text>
+<text x="580.0" y="244.5" font-size="13" font-weight="400" fill="#e8a0ba" text-anchor="middle" dominant-baseline="middle">light, NEE, scatter,</text>
+<text x="580.0" y="262.5" font-size="13" font-weight="400" fill="#e8a0ba" text-anchor="middle" dominant-baseline="middle">stream compaction</text>
+<rect x="444" y="291" width="112" height="26" rx="8" fill="#24363c" stroke="#4fb3d9" stroke-width="1.5"/>
+<text x="500.0" y="304.0" font-size="15" font-weight="600" fill="#d6eff8" text-anchor="middle" dominant-baseline="middle"></text>
+<text x="500" y="304" font-size="12" font-weight="400" fill="#93d1e9" text-anchor="middle" dominant-baseline="middle">swap, read count</text>
+<path d="M316 243 L352 243" fill="none" stroke="#8a8882" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#head8a8882)"/>
+<path d="M488 243 L512 243" fill="none" stroke="#8a8882" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#head8a8882)"/>
+<path d="M580 278 L580 304 L556 304" fill="none" stroke="#8a8882" stroke-width="1.6" stroke-linejoin="round"/>
+<path d="M444 304 L420 304 L420 278" fill="none" stroke="#8a8882" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#head8a8882)"/>
+<rect x="684" y="208" width="136" height="70" rx="8" fill="#2c2528" stroke="#f2a7c3" stroke-width="1.5"/>
+<text x="752.0" y="225.0" font-size="15" font-weight="600" fill="#f8e3eb" text-anchor="middle" dominant-baseline="middle">Shadow rays</text>
+<text x="752.0" y="244.5" font-size="13" font-weight="400" fill="#e9aec4" text-anchor="middle" dominant-baseline="middle">the last bounce's</text>
+<text x="752.0" y="262.5" font-size="13" font-weight="400" fill="#e9aec4" text-anchor="middle" dominant-baseline="middle">queue</text>
+<rect x="840" y="208" width="132" height="70" rx="8" fill="#333230" stroke="#a8a29a" stroke-width="1.5"/>
+<text x="906.0" y="225.0" font-size="15" font-weight="600" fill="#ece9e4" text-anchor="middle" dominant-baseline="middle">dev_image</text>
+<text x="906.0" y="244.5" font-size="13" font-weight="400" fill="#c4c0b8" text-anchor="middle" dominant-baseline="middle">running sum,</text>
+<text x="906.0" y="262.5" font-size="13" font-weight="400" fill="#c4c0b8" text-anchor="middle" dominant-baseline="middle">scene-linear</text>
+<path d="M648 243 L684 243" fill="none" stroke="#8a8882" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#head8a8882)"/>
+<path d="M820 243 L840 243" fill="none" stroke="#8a8882" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#head8a8882)"/>
+<rect x="520" y="376" width="220" height="70" rx="8" fill="#3c242c" stroke="#d55181" stroke-width="1.5"/>
+<text x="630.0" y="393.0" font-size="15" font-weight="600" fill="#f6dbe5" text-anchor="middle" dominant-baseline="middle">Viewport</text>
+<text x="630.0" y="412.5" font-size="13" font-weight="400" fill="#e8a0ba" text-anchor="middle" dominant-baseline="middle">sendImageToPBO:</text>
+<text x="630.0" y="430.5" font-size="13" font-weight="400" fill="#e8a0ba" text-anchor="middle" dominant-baseline="middle">÷ spp, view transform</text>
+<rect x="760" y="376" width="212" height="70" rx="8" fill="#24363c" stroke="#4fb3d9" stroke-width="1.5"/>
+<text x="866.0" y="393.0" font-size="15" font-weight="600" fill="#d6eff8" text-anchor="middle" dominant-baseline="middle">Save</text>
+<text x="866.0" y="412.5" font-size="13" font-weight="400" fill="#93d1e9" text-anchor="middle" dominant-baseline="middle">PNG: ÷ spp, view transform</text>
+<text x="866.0" y="430.5" font-size="13" font-weight="400" fill="#93d1e9" text-anchor="middle" dominant-baseline="middle">EXR and HDR: linear</text>
+<path d="M906 278 L906 376" fill="none" stroke="#8a8882" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#head8a8882)"/>
+<path d="M906 350 L630 350 L630 376" fill="none" stroke="#8a8882" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#head8a8882)"/>
+<rect x="32" y="484" width="16" height="16" rx="3" fill="#3c242c" stroke="#d55181" stroke-width="1.5"/>
+<text x="56" y="492" font-size="13" font-weight="400" fill="#a3a19a" text-anchor="start" dominant-baseline="middle">CUDA kernel</text>
+<rect x="165.0" y="484" width="16" height="16" rx="3" fill="#2c2528" stroke="#f2a7c3" stroke-width="1.5"/>
+<text x="189.0" y="492" font-size="13" font-weight="400" fill="#a3a19a" text-anchor="start" dominant-baseline="middle">OptiX</text>
+<rect x="258.0" y="484" width="16" height="16" rx="3" fill="#24363c" stroke="#4fb3d9" stroke-width="1.5"/>
+<text x="282.0" y="492" font-size="13" font-weight="400" fill="#a3a19a" text-anchor="start" dominant-baseline="middle">host code</text>
+<rect x="376.0" y="484" width="16" height="16" rx="3" fill="#333230" stroke="#a8a29a" stroke-width="1.5"/>
+<text x="400.0" y="492" font-size="13" font-weight="400" fill="#a3a19a" text-anchor="start" dominant-baseline="middle">buffer</text>
+</svg>
