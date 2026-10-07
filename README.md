@@ -15,6 +15,8 @@ CUDA Path Tracer
 
 This is my own Blender scene (8.8 M triangles, 2.4 M emissive, light linking). 3440x1440, 2048 spp, DEPTH 12, AgX, no denoising, 33.4 s on RTX 3090 (16.3 ms/sample).
 
+
+
 <p align="center">
   <img src="img/readme/cover_sponza_intel.png" alt="Sponza">
   <br>
@@ -25,26 +27,26 @@ Intel Sponza with the curtains package, 1920x1080, 1024 spp, DEPTH 8, AgX punchy
 
 ### Rendering pipeline
 
-The renderer is a wavefront path tracer: each stage of a bounce is one launch over every live path, and paths that end drop out between bounces. Intersection runs with OptiX hardware Ray Tracing (`--no-optix` flag disables OptiX and launches intersection kernels without NEE).
+The renderer is a wavefront path tracer: each stage of a bounce is one launch over every live path, and paths that ended gets compacted. Intersection runs with OptiX hardware Ray Tracing.
 
 ![Pipeline overview](img/readme/pipeline_overview.png)
 
-1. **Load**, once per scene: the scene JSON or glTF is parsed into flat vertex arrays and materials ([Meshes](#meshes-gltf-loading)), the environment map gets its sampling table ([Environment map sampling](#environment-map-sampling)), and every emitter goes into one light list weighted by power ([NEE and MIS](#nee-and-mis)). Buffers and textures are uploaded, and OptiX builds one GAS per glTF primitive and one IAS over the instances.
-2. **Camera rays**: one path per pixel, through a random point in the pixel, from a pinhole or a thin lens.
-3. **Bounce loop**, up to `DEPTH` times: an OptiX launch intersects the paths, `shadeMaterial` shades them, and the host swaps buffers and reads back how many paths are left (below).
+1. **Load**: a scene JSON or glTF is parsed into flat vertex arrays and materials ([Meshes](#meshes-gltf-loading)), the environment map gets its sampling table ([Environment map sampling](#environment-map-sampling)), and every emitter goes into one light list weighted by power ([NEE and MIS](#nee-and-mis)). Buffers and textures are uploaded, and OptiX builds one GAS per glTF primitive and one IAS over the instances.
+2. **Camera rays**: one path per pixel, through a random jittered point within pixel, from a pinhole or a thin lens. (Physically Based Camera under work)
+3. **Bounce loop**, up to `DEPTH` times: an OptiX launch intersects the paths, `shadeMaterial` shades them, and the host swaps buffers and reads back how many paths are left.
 4. **Last shadow rays**: the shadow rays still in the queue when the loop ends, traced in one more launch.
-5. **Output**: `dev_image` holds the scene-linear sum of every sample. The viewport and the saved PNG divide it by the sample count and apply the [view transform](#view-transform); `.exr` and `.hdr` keep it linear.
+5. **Output**: `dev_image` holds the scene-linear sum of every sample. The viewport and the saved PNG divide it by the sample count and apply the [view transform](#view-transform), with `.exr` and `.hdr` options that outputs in linear.
 
 ![One bounce](img/readme/pipeline_bounce.png)
 
 One bounce:
 
-1. One OptiX launch traces two kinds of rays. Launch indices below N trace the N live paths to their closest hit, with the [alpha test](#alpha-mask), and write `dev_intersections`. The indices past N trace the S shadow rays the previous bounce queued, and a shadow ray that reaches its light adds the sample to `dev_image` in the miss program.
-2. `shadeMaterial` runs one thread per path. It adds the emission at the hit, or the environment on a miss, weighted by MIS, picks a light and queues a shadow ray toward it ([NEE and MIS](#nee-and-mis)), runs Russian roulette, and samples the next direction from the BSDF ([Materials](#materials-gltf-metallic-roughness)).
-3. Stream compaction happens inside `shadeMaterial`: paths that go on are written straight into the spare path buffer, a warp at a time with `__ballot_sync` and one `atomicAdd` ([Compaction moved into the shade kernel](#compaction-moved-into-the-shade-kernel)). A path that ended is not written anywhere, since its light is already in the image.
+1. One OptiX launch traces two kinds of rays. Launch indices below N trace the N live paths to their closest hit, with the [alpha test](#alpha-mask), and writes `dev_intersections`. The indices past N trace the S shadow rays the previous bounce queued, and a shadow ray that reaches its light adds the sample to `dev_image` in the miss program. The alternative to have a separate shadow ray launch after shadeMaterial kernel, which would cause 1 extra OptiX launch overhead.
+2. `shadeMaterial` runs one thread per path. It adds the emission at the hit, or the environment on a miss, weighted by MIS, picks a light and queues a shadow ray towards it on the next bounce ([NEE and MIS](#nee-and-mis)), runs Russian roulette, and samples the next direction from the BSDF.
+3. Stream compaction happens inside `shadeMaterial`: paths that go on are written straight into the spare path buffer, through warp aggregated atomics ([Details at # Compaction moved into the shade kernel](#compaction-moved-into-the-shade-kernel)). A path that ended is not written anywhere, since its light is already in the image.
 4. The host swaps both buffer pairs (paths and shadow queues), copies the survivor count N back, and starts the next bounce, until no path is left or `DEPTH` bounces have run.
 
-The dashed box is the material sort (`--sort`), which groups the paths by material between intersection and shading. It is off by default (see [Performance optimization](#performance-optimization)).
+The dashed box is the material sort (`--sort`), which groups the paths by material between intersection and shading. It is off by default due to performance degrade on most scenes (see [Performance optimization](#performance-optimization)).
 
 ### Meshes: glTF loading
 
@@ -205,10 +207,6 @@ Veach MIS, 1024x1024, 64 spp, AgX, OptiX.
 | ![Veach MIS, BSDF sampling only](img/readme/nee_veach_bsdf_only.png) | ![Veach MIS, NEE and MIS](img/readme/nee_veach_nee_mis.png) |
 
 - **Veach MIS**: four lights of very different sizes over plates of increasing roughness, the case MIS was made for. The RMSE of the displayed image against a 4096 spp render drops from 62.8 to 9.1 (of 255), 48x less variance, at 2.34 against 1.46 ms/spp.
-
-#### Checking it
-
-Both strategies estimate the same light, so with enough samples NEE + MIS and BSDF sampling alone have to converge to the same image. `--out name.hdr` saves the scene-linear average without the view transform, which these numbers come from. PNGs are not a fair test here: BSDF sampling's fireflies clip at 255, which made NEE look 2% brighter on Veach MIS.
 
 | scene, 320x320, 4096 spp | mean, NEE + MIS / BSDF only |
 |---|---|
