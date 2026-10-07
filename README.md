@@ -125,11 +125,9 @@ A emissive triangle's pick weight is its emission factor times its emissive text
 - **Noise**: RMSE against 4096 spp drops from 12.9 to 9.2 (of 255), about what twice the samples would give.
 - **Frame time**: 3.0 against 2.9 ms/spp.
 
-#### Light linking and spot lights
+#### Light linking
 
-Blender's light linking lets a light illuminate only the objects in a receiver collection, and Stardust depends on it. The export script writes each light's link group and each object's receiver mask into the glTF as node extras, following Cycles' rule. A light sample is dropped when the receiver is not linked to the picked light, and so is the emission a BSDF ray finds on an emitter its surface is not linked to, so the MIS weights still add up to 1. The light picks use one table per distinct receiver mask in the scene, so a surface only picks lights that can reach it ([why](#light-linking-with-one-pick-table-speckled-the-character)).
-
-Spot lights are the remaining `KHR_lights_punctual` type, with Cycles' cone blend mapped onto glTF's inner and outer angles. The soft shadow radius of a Blender spot is not supported yet.
+Light linking allows a light to illuminate only the objects in a receiver collection. Stardust is the scene that relies on it. A light sample is dropped when the receiver is not linked to the picked light, and so is the emission a BSDF ray finds on an emitter its surface is not linked to, so the MIS weights still add up to 1. The light picks use one table per distinct receiver mask in the scene, so a surface only picks lights that can reach it ([why](#light-linking-with-one-pick-table-speckled-the-character)).
 
 ### Environment map sampling
 
