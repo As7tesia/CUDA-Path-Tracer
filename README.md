@@ -212,7 +212,7 @@ At first this renderer used `thrust::stable_partition` for compaction and `thrus
 
 This is due to every thrust call under `thrust::device` allocates scratch memory with `cudaMalloc` and frees it with `cudaFree`, which waits for all outstanding GPU work, and `sort_by_key` over a zip iterator copied every path through four radix passes. A caching allocator alone removed 60 to 70% of both stages. The CUB version removes the rest of the overhead by allocating its workspace once, drops ended paths instead of partitioning them to the back, and sorts (material key, path index) pairs over only the bits the material count needs before one gather.
 
-![Iteration before and after](img/readme/pathtrace_iteration_before_after.png)
+![Material sort and compaction, thrust against CUB](img/readme/thrust_vs_cub.png)
 
 Buffer ownership over three bounces. Each bar is a whole buffer, filled to the share of paths alive.
 
@@ -296,7 +296,15 @@ The sort makes every scene 1.2x (Sponza) to 1.9x (Cornell) slower, all of it in 
 
 #### Why is my sort so slow???
 
-Nsight Systems on Cornell: CUB's histogram, scan and single onesweep pass take 34 µs for the first bounce's million paths, `fillIndices` 7 µs, and the gather that moves each path's 116 bytes into sorted order 2.2 ms, a 243 MB move that `cudaMemcpy` does in 0.3 ms. `cuobjdump --dump-sass` showed why: nvcc had turned `pathsOut[i] = pathsIn[src]` into 29 scalar loads, each followed by the store that depends on it. The base code's glm 0.9.6 writes the vectors' `operator=` by hand, which makes every struct holding a `glm::vec3` not trivially copyable, so the copy is 29 member-wise statements rather than one memcpy, and with two plain pointers that might alias the compiler may not move a load above an earlier store. That leaves one memory request in flight per warp. Nsight Compute measured 6,000 to 9,000 cycles per issued instruction, an L1 hit rate of 9 to 41% and 5.6x the useful DRAM traffic, because the sector fetched for one word was gone from the caches by the time the next word asked for it. A standalone copy of the kernel with plain structs could not reproduce it; the same kernel with the glm types did.
+With Nsight Compute, looking into `gatherByIndex` kernel of the with glm 0.9.6 build, the SASS shows that compiler turns every with warp stall sampling: every `pathsOut[i] = pathsIn[src]` into 3 pairs of load and stores that depends on the load.
+
+![gatherByIndex SASS, load and store interleaved](img/readme/ncu_gather_sass_interleaved.png)
+
+This is because the base code's glm 0.9.6 writes the vectors' `operator=` by hand, which makes every struct holding a `glm::vec3` not trivially copyable, and the compiler cannot reorder the load and stores because it doesn't know if the two `PathSegment*` pointers are overlapping or not, thus it needs to keep the original order.
+
+Data from Nsight Compute, `gatherByIndex` kernel, before and after the glm upgrade.
+
+![gatherByIndex Nsight Compute metrics before and after the glm upgrade](img/readme/perf_gather_ncu_before_after.png)
 
 Upgrading glm to 1.0.3, whose `operator=` is `= default`, makes the structs trivially copyable again and the gather compiles to 29 loads followed by 29 stores (`__restrict__` on the pointers gives the same code with the old glm). A `static_assert` next to the kernel keeps it that way.
 
@@ -318,15 +326,32 @@ Unless materials evaluations gets very complicated (like complex shading graphs 
 
 ## Issues/Bloopers along the way
 
-### The OptiX cube kept the outward normal on exit hits
+### Light linking with one pick table speckled the character
 
-The OptiX cube hit program returned the face's outward normal on exit hits, where the naive `boxIntersectionTest` returns the normal facing the ray. Nothing in Cornell starts a ray inside a cube, so it only showed once a glass cube came out dark under OptiX. One sign flip on the inside branch fixed it.
+The first version of light linking kept the one global pick table and dropped the samples whose receiver was not linked to the picked light. In Stardust a very bright light is linked away from the character, while a much dimmer spot lights it, so 99% of the character's light picks were discarded. The few picks of the spot each carried its full contribution divided by a tiny probability, hence the bright specks. The [per-mask pick tables](#light-linking-and-spot-lights) give the bright light a probability of 0 in the character's table, and the same 2048 spp render is clean.
 
-600x600, 1000 spp, DEPTH 8, AgX, OptiX:
+Character crop at 1x, 2048 spp:
 
-| Outward normal on exit | Normal facing the ray |
+| One global pick table | One table per receiver mask |
 |:---:|:---:|
-| ![Dark glass cube](img/bloopers/cornell_boxcube_optix_dark_glass_cube.png) | ![Fixed glass cube](img/readme/cornell_boxcube_optix_fixed.png) |
+| ![Speckled character](img/readme/stardust_linking_global_picks_crop.png) | ![Clean character](img/readme/stardust_linking_mask_rows_crop.png) |
+
+### Sponza's dirt decals rendered as solid walls
+
+Intel Sponza's walls carry a `dirt_decal` material with `alphaMode: BLEND`, which the loader treated as opaque, so the dark grime texture covered the walls. A BLEND hit now counts with probability alpha, from a hash of the pixel, iteration, depth and triangle, so both intersection paths make the same decision.
+
+
+| BLEND as opaque | BLEND as coverage |
+|:---:|:---:|
+| ![Decals as solid walls](img/bloopers/sponza_intel_blend_decals_opaque.png) | ![Decals as coverage](img/readme/sponza_intel_blend_decals_fixed.png) |
+
+### glm 1.0 compiled to garbage on the device
+
+The first build with glm 1.0.3 ([why it was upgraded](#why-is-my-sort-so-slow)) rendered every scene black, with every path ending on the first bounce on both intersection paths. glm 1.0 routes vector arithmetic through `std::plus`, `std::multiplies` and friends, constexpr host functions, and nvcc 13.3 will not call those from device code unless `--expt-relaxed-constexpr` is set. Instead of an error it prints warning #20013 per instantiation and compiles the call to nothing: on the GPU, `glm::vec3(1, 2, 3) * 2.f` came back as `(1, 2, 0)` and `glm::dot` as NaN, so every camera ray missed. The flag is now on every nvcc command, including the OptiX IR one. Renders after the upgrade differ from the old ones by float drift only: single pixels off by one count, and a few fireflies that moved because a branch flipped on the last bit.
+
+| glm 1.0.3 without the flag | with `--expt-relaxed-constexpr` |
+|:---:|:---:|
+| ![Black Cornell](img/bloopers/cornell_optix_glm_1_0_3_black.png) | ![Cornell after the upgrade](img/readme/cornell_optix_glm_1_0_3_fixed.png) |
 
 ### Schlick used the wrong cosine on exit
 
@@ -344,32 +369,15 @@ Pixel difference, amplified 8x:
 
 The fixed image is slightly darker at the rim: that light now stays inside for more bounces, and at depth 8 some of those paths hit the cap. Interestingly raising DEPTH to 32 brightens the sphere up by a decent amount, far more than the bug's influence, so glass just needs a much higher depth than diffuse.
 
-### Sponza's dirt decals rendered as solid walls
+### The OptiX cube kept the outward normal on exit hits
 
-Intel Sponza's walls carry a `dirt_decal` material with `alphaMode: BLEND`, which the loader treated as opaque, so the dark grime texture covered the walls. A BLEND hit now counts with probability alpha, from a hash of the pixel, iteration, depth and triangle, so both intersection paths make the same decision.
+The OptiX cube hit program returned the face's outward normal on exit hits, where the naive `boxIntersectionTest` returns the normal facing the ray. Nothing in Cornell starts a ray inside a cube, so it only showed once a glass cube came out dark under OptiX. One sign flip on the inside branch fixed it.
 
+600x600, 1000 spp, DEPTH 8, AgX, OptiX:
 
-| BLEND as opaque | BLEND as coverage |
+| Outward normal on exit | Normal facing the ray |
 |:---:|:---:|
-| ![Decals as solid walls](img/bloopers/sponza_intel_blend_decals_opaque.png) | ![Decals as coverage](img/readme/sponza_intel_blend_decals_fixed.png) |
-
-### Light linking with one pick table speckled the character
-
-The first version of light linking kept the one global pick table and dropped the samples whose receiver was not linked to the picked light. In Stardust a very bright light is linked away from the character, while a much dimmer spot lights it, so 99% of the character's light picks were discarded. The few picks of the spot each carried its full contribution divided by a tiny probability, hence the bright specks. The [per-mask pick tables](#light-linking-and-spot-lights) give the bright light a probability of 0 in the character's table, and the same 2048 spp render is clean.
-
-Character crop at 1x, 2048 spp:
-
-| One global pick table | One table per receiver mask |
-|:---:|:---:|
-| ![Speckled character](img/readme/stardust_linking_global_picks_crop.png) | ![Clean character](img/readme/stardust_linking_mask_rows_crop.png) |
-
-### glm 1.0 compiled to garbage on the device
-
-The first build with glm 1.0.3 ([why it was upgraded](#why-is-my-sort-so-slow)) rendered every scene black, with every path ending on the first bounce on both intersection paths. glm 1.0 routes vector arithmetic through `std::plus`, `std::multiplies` and friends, constexpr host functions, and nvcc 13.3 will not call those from device code unless `--expt-relaxed-constexpr` is set. Instead of an error it prints warning #20013 per instantiation and compiles the call to nothing: on the GPU, `glm::vec3(1, 2, 3) * 2.f` came back as `(1, 2, 0)` and `glm::dot` as NaN, so every camera ray missed. The flag is now on every nvcc command, including the OptiX IR one. Renders after the upgrade differ from the old ones by float drift only: single pixels off by one count, and a few fireflies that moved because a branch flipped on the last bit.
-
-| glm 1.0.3 without the flag | with `--expt-relaxed-constexpr` |
-|:---:|:---:|
-| ![Black Cornell](img/bloopers/cornell_optix_glm_1_0_3_black.png) | ![Cornell after the upgrade](img/readme/cornell_optix_glm_1_0_3_fixed.png) |
+| ![Dark glass cube](img/bloopers/cornell_boxcube_optix_dark_glass_cube.png) | ![Fixed glass cube](img/readme/cornell_boxcube_optix_fixed.png) |
 
 ### Smaller base code fixes
 
