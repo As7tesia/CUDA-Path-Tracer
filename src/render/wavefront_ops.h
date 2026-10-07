@@ -12,7 +12,8 @@
 // Both are out of place and ping-pong: shadeMaterial and the sort write into a
 // spare buffer from the workspace below, which then trades places with the
 // caller's pointer, so the caller's paths (and, for the sort, intersections)
-// point at a different allocation after every call. The spare buffers and
+// point at a different allocation after every call (except shading without
+// compaction, which updates the paths in place). The spare buffers and
 // CUB's temporary storage are shared, so all calls must go to the same stream.
 
 // Threads per block of the 1D kernels over the path array: the naive
@@ -43,6 +44,10 @@ struct SurvivorBuffer
     int* nextCount;
 };
 SurvivorBuffer wavefrontSurvivors();
+// The same counters with paths itself as the buffer, for shading without
+// compaction (--no-compact): shadeMaterial writes each path it shades back to
+// its own slot and leaves the ended ones alone, so nothing is swapped.
+SurvivorBuffer wavefrontSurvivorsInPlace(PathSegment* paths);
 
 // Where shadeMaterial queues the shadow rays of next event estimation, one
 // per path at most, for the next OptiX launch to trace (see ShadowRay). Like
@@ -68,6 +73,9 @@ ShadowQueue wavefrontSwapShadowQueue();
 // light to the image), and everything past the returned count is stale.
 // Reading the count back to the host synchronizes.
 int wavefrontSwapPaths(PathSegment*& paths, cudaStream_t stream = 0);
+// After a shade launch into wavefrontSurvivorsInPlace: moves the counters on
+// and returns how many paths go on, without swapping. Synchronizes the same way.
+int wavefrontCountSurvivors(cudaStream_t stream = 0);
 
 // Sorts the first numPaths paths and their intersections by materialIds (one
 // int key per path, written by the intersection stage: materialId on hit,

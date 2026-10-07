@@ -23,7 +23,7 @@ This is my own Blender scene (8.8 M triangles, 2.4 M emissive, light linking). 3
 
 Intel Sponza with the curtains package, 1920x1080, 1024 spp, DEPTH 8, AgX punchy, no denoising, 12.5 s on RTX 3090 (12.2 ms/sample).
 
-### Features
+## Features
 
 **Rendering**
 - [Wavefront path tracer](#rendering-pipeline) on OptiX hardware ray tracing
@@ -38,15 +38,15 @@ Intel Sponza with the curtains package, 1920x1080, 1024 spp, DEPTH 8, AgX punchy
 
 **Performance**
 - [Stream compaction inside the shade kernel](#compaction-moved-into-the-shade-kernel) with warp-aggregated atomics
-- [Material sorting](#compaction-and-sort-thrust-to-cub-with-device-lto) with a CUB radix sort (optional)
+- [Material sorting](#material-sort) with a CUB radix sort (optional)
 - [Russian roulette](#russian-roulette)
-- [Device link-time optimization](#separable-compilation-left-the-intersection-tests-as-real-function-calls)
+- [Device link-time optimization](#device-link-time-optimization)
 
-**Tools**
+**Other**
 - [Unreal-style viewport camera](#viewport-controls) and scene switching in ImGui
 - [Headless rendering](#headless-rendering) from the command line
 
-### Rendering pipeline
+## Rendering pipeline
 
 The renderer is a wavefront path tracer: each stage of a bounce is one launch over every live path, and paths that end are compacted away. Intersection runs on OptiX hardware ray tracing.
 
@@ -55,6 +55,8 @@ The renderer is a wavefront path tracer: each stage of a bounce is one launch ov
 ![One bounce](img/readme/pipeline_bounce.png)
 
 Each bounce is one OptiX launch and one CUDA kernel. The launch traces the live paths to their closest hit and, in the same launch, the shadow rays the previous bounce queued, which saves a launch per bounce. `shadeMaterial` then adds emitted light weighted by MIS, queues a shadow ray toward a picked light, runs Russian roulette, samples the next direction, and writes the surviving paths straight into the next bounce's buffer with warp-aggregated atomics ([stream compaction](#compaction-moved-into-the-shade-kernel)). The dashed box is the material sort (`--sort`), off by default since it slows most scenes down.
+
+## Rendering features
 
 ### Meshes: glTF loading
 
@@ -81,7 +83,7 @@ The naive kernel's time grows linearly with the triangle count, about 20 ms per 
 
 ### Materials: glTF metallic-roughness
 
-Materials in this renderer take glTF 2.0's metallic-roughness parameters and is shaded with the reference BRDF from Appendix B of the spec, extended to a BSDF by KHR_materials_transmission, volume, ior, specular, clearcoat and emissive_strength. Normal maps, alpha masks and alpha blending (as stochastic coverage) are supported. I chose to treat transmission as a solid boundary rather than glTF's thin-walled default, since better fits Blender's export without 
+Materials in this renderer take glTF 2.0's metallic-roughness parameters and is shaded with the reference BRDF from Appendix B of the spec, extended to a BSDF by KHR_materials_transmission, volume, ior, specular, clearcoat and emissive_strength. Normal maps, alpha masks and alpha blending (as stochastic coverage) are supported. I chose to treat transmission as a solid boundary rather than glTF's thin-walled default, since better fits Blender's export without the `KHR_materials_volume` extension
 
 The three Khronos material tests ship without lights, so I added a light panel to the scene files. Rendered at 1024 spp, AgX.
 
@@ -190,33 +192,45 @@ Glass Cornell, 600x600, 1000 spp, exposure 1.0, DEPTH 8:
 | **AgX** | **AgX punchy** |
 | ![AgX](img/readme/tonemap_agx.png) | ![AgX punchy](img/readme/tonemap_agx_punchy.png) |
 
-### Performance optimization
+## Performance
 
-The renderer was profiled on 2026-10-02 with per-stage CUDA event timing, then Nsight Systems and Nsight Compute. That pass turned the material sort off by default: its gather cost 2 to 3.5x the frame on every scene and saved the shade kernel at most 0.3 ms.
+### Device link-time optimization
 
-#### Compaction and sort: thrust to CUB with device LTO
+The base code builds with `CUDA_SEPARABLE_COMPILATION ON`, and without device link-time optimization a `__device__` function from another file cannot be inlined. `cuobjdump --dump-sass` showed `boxIntersectionTest`, `sphereIntersectionTest` and `scatterRay` as real calls inside the kernels, with their arguments going through local memory.
 
-The first version used `thrust::stable_partition` for compaction and `thrust::sort_by_key` for the material sort, and spent most of the frame inside thrust's per-call allocations ([details](#the-sort-and-compaction-were-spending-the-frame-in-cudamalloc)). The CUB version allocates its workspace once, drops ended paths instead of partitioning them to the back, and sorts (material key, path index) pairs over only the bits the material count needs before one gather. Device LTO lets the intersection and scatter functions inline across files ([details](#separable-compilation-left-the-intersection-tests-as-real-function-calls)).
+![Device LTO before and after](img/readme/device_lto_inlining_before_after.png)
 
-| Before and after, one sample | Buffer ownership through one bounce |
-|:---:|:---:|
-| ![Iteration before and after](img/readme/pathtrace_iteration_before_after.png) | ![Ping pong buffers](img/readme/path_buffer_ping_pong_one_bounce.png) |
+Release builds now add `-dlto` to the CUDA compile and device link options. The frame got 25 to 40% faster depending on resolution, but costs about 4 s of extra device link time per build.
 
-The buffer diagram shows this version; compaction has since moved into shading (next entry).
+### Compaction and sort: thrust to CUB with device LTO
 
-Cornell, headless, median of 5 runs, ms per sample. Every build renders a byte-identical image.
+At first this renderer used `thrust::stable_partition` for compaction and `thrust::sort_by_key` for the material sort. With the sort on, a 400x400 sample took 13 ms, and timing each stage showed majority of the frame time going to sorting.
+
+| stage | generate | intersect | sort | shade | compact | gather |
+|---|---|---|---|---|---|---|
+| ms | 0.08 | 0.36 | 8.9 | 0.21 | 4.0 | 0.03 |
+
+This is due to every thrust call under `thrust::device` allocates scratch memory with `cudaMalloc` and frees it with `cudaFree`, which waits for all outstanding GPU work, and `sort_by_key` over a zip iterator copied every path through four radix passes. A caching allocator alone removed 60 to 70% of both stages. The CUB version removes the rest of the overhead by allocating its workspace once, drops ended paths instead of partitioning them to the back, and sorts (material key, path index) pairs over only the bits the material count needs before one gather.
+
+![Iteration before and after](img/readme/pathtrace_iteration_before_after.png)
+
+Buffer ownership over three bounces. Each bar is a whole buffer, filled to the share of paths alive.
+
+![Path buffer ping-pong over three bounces](img/readme/path_buffer_ping_pong.png)
+
+Cornell, median of 5 runs, ms per sample.
 
 ![ms per sample by build](img/readme/perf_ms_per_spp_1024x1024.png)
 
 At 1024x1024 the frame went from 22.90 to 2.07 ms per sample, 11x. Device LTO is 1.6x of that on its own.
 
-#### Compaction moved into the shade kernel
+### Compaction moved into the shade kernel
 
-**What the profile showed.** In Nsight Systems on Cornell at 1024x1024, the CUB compaction took 0.49 ms of a 2.59 ms sample (19%; 6% on Intel Sponza). It reads every path `shadeMaterial` has just written, writes the live ones a second time, and adds two launches per bounce.
+**Motivation:** In a Nsight Systems profile on Cornell at 1024x1024, the CUB compaction took 0.49 ms of a 2.59 ms sample (19%; 6% on Intel Sponza). It reads every path `shadeMaterial` has just written, writes the live ones a second time, and adds two launches per bounce.
 
-**How it works now.** `shadeMaterial` writes the surviving paths straight into the spare buffer. The warp votes with `__ballot_sync`, lane 0 reserves room for the warp's survivors with one `atomicAdd`, and each survivor writes to that base plus its rank among the survivors (`__popc`), so the stores stay coalesced. The order of the paths now depends on which warp's atomic lands first, but nothing is seeded by a path's position in the buffer, so the image stays byte-identical.
+**How it works** is a warp-aggregated atomics. `shadeMaterial` writes the surviving paths straight into the spare buffer. The warp votes with `__ballot_sync`, lane 0 reserves room for the warp's survivors with one `atomicAdd`, and each survivor writes to that base plus its rank among the survivors (`__popc`), so the stores stay coalesced.
 
-Headless, 1024x1024, 100 spp, median of 5 runs, ms per sample.
+1024x1024, 100 spp, median of 5 runs, ms per sample.
 
 ![ms per sample, CUB compaction against compaction in shade](img/readme/perf_compaction_in_shade.png)
 
@@ -226,7 +240,40 @@ Headless, 1024x1024, 100 spp, median of 5 runs, ms per sample.
 
 Keeping the survivor count on the GPU instead of reading it back each bounce gained only 0.07 ms on Cornell and 0.1 to 0.2 ms on Intel Sponza, at the cost of queuing whole samples ahead of the GPU and losing per-bounce error checks, so I left it out.
 
-#### Russian roulette
+### Paths alive per bounce
+
+Three scenes with the same DamagedHelmet, from open to closed, at 1024x1024 and DEPTH 8: the helmet on a plane under an HDRI (`helmet_plane.json`), the stock Cornell box with its front open (`cornell_helmet.json`), and a closed box with a sixth wall behind the camera (`cornell_closed.json`), where a path ends only on the light, by Russian roulette or at DEPTH.
+
+| Helmet on plane | Cornell box, front open | Closed Cornell box |
+|:---:|:---:|:---:|
+| ![Helmet on plane](img/readme/scene_helmet_plane.png) | ![Cornell box with the helmet](img/readme/scene_cornell_helmet.png) | ![Closed Cornell box](img/readme/scene_cornell_closed.png) |
+
+Paths alive entering each bounce, from `--timing`:
+
+![Paths alive per bounce](img/readme/perf_paths_alive_per_bounce.png)
+
+- **Helmet on plane**: 44.6% of the paths see the sky at the first bounce, and most rays off the plane go up to the sky too, so only 6.1% are left by bounce 3 and Russian roulette has almost nothing to kill.
+- **Cornell box, front open**: without Russian roulette about a fifth of the paths end per bounce, out of the open front or on the light. With it, 58% of the rest end at bounce 3 and about 40% per bounce after.
+- **Closed Cornell box**: only 1 to 2% end per bounce, and without Russian roulette 88% are still alive at bounce 8.
+
+### Open and closed scenes
+
+`--no-compact` turns compaction off: every bounce launches over all 1,048,576 paths, and the kernels return early on a path that ended. Both modes render the same image.
+
+Headless, 1024x1024, 100 spp, median of 5 alternated runs, ms per sample:
+
+![Compaction against no compaction, open and closed scenes](img/readme/perf_compaction_open_closed.png)
+
+Time per bounce with Russian roulette, median of 5 `--timing` runs:
+
+![ms per bounce with and without compaction](img/readme/perf_compaction_per_bounce.png)
+
+- **Open scenes**: compaction saves 28% on the helmet plane and 26% in the open Cornell box. Once most paths are gone, a compacted bounce costs about 0.08 ms (the launches and the count readback), against about 0.18 ms for a full-width launch whose threads load their path and return.
+- **Closed box**: compaction saves 15%, only as much as Russian roulette removes. Without the roulette it is 2% slower, since it drops almost nothing and still pays for the warp vote and the atomic.
+- **Russian roulette**: saves 34% in the closed box and 3% on the helmet plane, where few paths live long enough to roll.
+- **Bounce 2 costs more than bounce 1** in the closed box with nearly every path alive: camera rays leave in neighboring directions and diffuse bounce rays do not, so their traversal is less coherent.
+
+### Russian roulette
 
 From the third bounce, a path survives with a probability equal to its throughput's luminance (at most 0.95), and a survivor's throughput is divided by that probability, which keeps the estimate unbiased. `--no-rr` turns it off.
 
@@ -237,9 +284,18 @@ Headless, median of 3 interleaved runs, ms per sample.
 - **Paths ended at the third bounce**: 96% in Intel Sponza with RR, against 17% without it. Two bounces off its dark stone leave a path a few percent of its throughput, so most paths lose the roll.
 - **Noise**: at 512x512 and 256 spp, the RMSE against an 8192 spp render without RR is 11.12 against 10.81 (of 255) in Intel Sponza, and 4.94 against 4.23 in Cornell. Per unit of time that makes RR about 1.6x as efficient in Intel Sponza, but only about 0.85x in Cornell. My guess is that Cornell's white walls leave the paths RR ends with much of their throughput, so the variance it adds outweighs the 16% it saves.
 
-### Issues along the way
+### Material sort
+(Did not realize my material sort was this bad until profiling, working on figure it out...)
 
-#### The OptiX cube kept the outward normal on exit hits
+`--sort` radix-sorts the paths by the material they hit and gathers them into that order before shading, so the threads of a `shadeMaterial` warp read the same material. It is off by default.
+
+![Material sort, stage times per sample](img/readme/perf_material_sort.png)
+
+The sort makes every scene 2.2x (Intel Sponza) to 4.3x (Cornell) slower, almost all of it in the sort and gather. `shadeMaterial` itself changes by at most 0.21 ms, and only Intel Sponza and Stardust get faster. This is clearly not what its supposed to be. Need to profile in Nsight to figure out why.
+
+## Issues along the way
+
+### The OptiX cube kept the outward normal on exit hits
 
 The OptiX cube hit program returned the face's outward normal on exit hits, where the naive `boxIntersectionTest` returns the normal facing the ray. Nothing in Cornell starts a ray inside a cube, so it only showed once a glass cube came out dark under OptiX. One sign flip on the inside branch fixed it.
 
@@ -249,7 +305,7 @@ The OptiX cube hit program returned the face's outward normal on exit hits, wher
 |:---:|:---:|
 | ![Dark glass cube](img/bloopers/cornell_boxcube_optix_dark_glass_cube.png) | ![Fixed glass cube](img/readme/cornell_boxcube_optix_fixed.png) |
 
-#### Schlick used the wrong cosine on exit
+### Schlick used the wrong cosine on exit
 
 Schlick's approximation needs the cosine on the air side of the interface, which for a ray leaving glass is the transmitted angle. The base code used the incident one, so reflectance did not reach 100% until 90° instead of the critical angle (about 42° for IOR 1.5), and exit rays just below critical leaked out instead of reflecting back inside. The fix uses the transmitted cosine and treats `k < 0` as total internal reflection.
 
@@ -263,39 +319,9 @@ Pixel difference, amplified 8x:
 
 ![Schlick diff](img/readme/schlick_diff_x8.png)
 
-The fixed image is slightly *darker* at the rim: that light now stays inside for more bounces, and at DEPTH 8 some of those paths hit the cap. Raising DEPTH to 32 brightens the sphere by about 14%, far more than the fix moved it, so glass needs a much higher DEPTH than diffuse scenes.
+The fixed image is slightly darker at the rim: that light now stays inside for more bounces, and at depth 8 some of those paths hit the cap. Interestingly raising DEPTH to 32 brightens the sphere up by a decent amount, far more than the bug's influence, so glass just needs a much higher depth than diffuse.
 
-#### The sort and compaction were spending the frame in cudaMalloc
-
-With the thrust version, a 400x400 sample took 13 ms with the sort on. Timing each stage with CUDA events (Cornell, one sample) showed the kernels were not the problem:
-
-| stage | generate | intersect | sort | shade | compact | gather |
-|---|---|---|---|---|---|---|
-| ms | 0.08 | 0.36 | 8.9 | 0.21 | 4.0 | 0.03 |
-
-Every thrust call under `thrust::device` allocates scratch memory with `cudaMalloc` and frees it with `cudaFree`, which waits for all outstanding GPU work, and `sort_by_key` over a zip iterator copied every path through four radix passes. A caching allocator alone removed 60 to 70% of both stages; the CUB rewrite above removed the rest.
-
-#### Separable compilation left the intersection tests as real function calls
-
-The base code builds with `CUDA_SEPARABLE_COMPILATION ON`, and without device link-time optimization a `__device__` function from another file cannot be inlined. `cuobjdump --dump-sass` showed `boxIntersectionTest`, `sphereIntersectionTest` and `scatterRay` as real calls inside the kernels, with their arguments going through local memory.
-
-![Device LTO before and after](img/readme/device_lto_inlining_before_after.png)
-
-The fix is `-dlto` on the CUDA compile and device link options, Release only. Byte-identical image, and the frame got 25 to 40% faster depending on resolution, at about 4 s of extra device link time per build.
-
-#### The orbit camera mirrored any EYE off the z axis
-
-The base code turned EYE into orbit angles with `acos`, which drops the sign, so an eye at x = -4 was placed at x = +4. The basis was also not normalized, which zoomed any pitched view in by 1/cos(pitch). The angles now come from `atan2` and the basis is normalized. Cornell's camera sits on the one spot where the old math was right.
-
-400x400, 200 spp, AgX:
-
-| EYE (-4, 5, 10.5) before | after | EYE (3, 8, 9) before | after |
-|:---:|:---:|:---:|:---:|
-| ![left before](img/readme/camera_left_before.png) | ![left after](img/readme/camera_left_after.png) | ![high before](img/readme/camera_high_before.png) | ![high after](img/readme/camera_high_after.png) |
-
-`FOVY` was also read as a half angle, so 45 in a scene file meant a 90 degree field. The scene files now say 90.
-
-#### Intel Sponza's dirt decals rendered as solid walls
+### Intel Sponza's dirt decals rendered as solid walls
 
 Intel Sponza's walls carry a `dirt_decal` material with `alphaMode: BLEND`, which the loader treated as opaque, so the dark grime texture covered the walls. A BLEND hit now counts with probability alpha, from a hash of the pixel, iteration, depth and triangle, so both intersection paths make the same decision.
 
@@ -305,7 +331,7 @@ Intel Sponza's walls carry a `dirt_decal` material with `alphaMode: BLEND`, whic
 |:---:|:---:|
 | ![Decals as solid walls](img/bloopers/sponza_intel_blend_decals_opaque.png) | ![Decals as coverage](img/readme/sponza_intel_blend_decals_fixed.png) |
 
-#### Light linking with one pick table speckled the character
+### Light linking with one pick table speckled the character
 
 The first version of light linking kept the one global pick table and dropped the samples whose receiver was not linked to the picked light. In Stardust a very bright light is linked away from the character, while a much dimmer spot lights it, so 99% of the character's light picks were discarded. The few picks of the spot each carried its full contribution divided by a tiny probability, hence the bright specks. The [per-mask pick tables](#light-linking-and-spot-lights) give the bright light a probability of 0 in the character's table, and the same 2048 spp render is clean.
 
@@ -315,11 +341,13 @@ Character crop at 1x, 2048 spp:
 |:---:|:---:|
 | ![Speckled character](img/readme/stardust_linking_global_picks_crop.png) | ![Clean character](img/readme/stardust_linking_mask_rows_crop.png) |
 
-#### Smaller base code fixes
+### Smaller base code fixes
 
 - **Every camera move freed and reallocated all device buffers.** Buffers are now allocated once; a camera change clears the image.
 - **The accumulation buffer was copied to the host every iteration** so the S key could save at any time. The copy now happens inside save.
 - **A CUDA error waited on `getchar()` before exiting**, which hangs a headless run. Removed.
+
+## Usage
 
 ### Viewport controls
 
@@ -350,7 +378,32 @@ The ImGui panel also switches scenes without a restart.
 ./build/bin/Release/cis565_path_tracer.exe scenes/cornell.json --headless --spp 100 --res 400x400 --out img/test/cornell.png
 ```
 
-`--spp`, `--res`, `--depth` and `--out` override the scene file, and also work in windowed mode. The comparisons above use `--no-nee`, `--no-optix`, `--sort`, `--no-rr`, `--no-aa`, `--lens`, `--aperture`, `--focus` and `--tonemap none|aces|agx|agx-punchy`; `--list` prints the scene names. An `.exr` output keeps the scene-linear average as float32.
+`--spp`, `--res`, `--depth` and `--out` override the scene file, and also work in windowed mode. The comparisons above use `--no-nee`, `--no-optix`, `--sort`, `--no-compact`, `--no-rr`, `--no-aa`, `--lens`, `--aperture`, `--focus` and `--tonemap none|aces|agx|agx-punchy`; `--list` prints the scene names. An `.exr` output keeps the scene-linear average as float32.
+
+### Building
+
+Built and tested with Windows 11, Visual Studio 2022 (MSVC), CUDA 13.3, CMake 4.4 and NVIDIA driver 617.14.
+
+```
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+```
+
+The OptiX 9.1.0 headers are vendored in `external/include/optix` and the implementation ships with the driver, so no OptiX SDK install is needed. OptiX needs a Turing or newer GPU (the programs are compiled for `sm_75`); without it the renderer falls back to the naive kernel, without NEE.
+
+#### CMakeLists.txt changes
+
+Besides the source lists:
+
+- **C language enabled** in `project()`, for MikkTSpace's `mikktspace.c`.
+- **`/Zc:preprocessor`** on MSVC builds: CUDA 13's Thrust and CUB headers do not compile with MSVC's traditional preprocessor.
+- **OptiX include path** `external/include/optix`. Nothing is linked, since the implementation is in the driver.
+- **OptiX programs as embedded IR**: a custom command compiles `src/optix/optix_programs.cu` with `nvcc -optix-ir`, and `cmake/EmbedFile.cmake` (new) embeds the IR in the executable.
+- **Device LTO**: Release builds add `-dlto` to the CUDA compile and device link options ([why](#device-link-time-optimization)).
+- **`src/` split by role** into `app/`, `scene/`, `render/` and `optix/`, with `src/` as the include root.
+- **Two test executables**, `bsdf_test` and `lens_test`, left out of the default build.
+
+## Credits
 
 ### Test assets
 
@@ -370,14 +423,23 @@ The ImGui panel also switches scenes without a restart.
 | Bistro exterior | 2,829,226 | `assets/Bistro/Exterior/BistroExterior.gltf`, loaded directly | Amazon Lumberyard, July 2017, CC BY 4.0 |
 | Bistro interior | 1,043,077 | `assets/Bistro/Interior/BistroInterior.gltf`, loaded directly | Amazon Lumberyard, July 2017, CC BY 4.0 |
 
-Intel Sponza is cited as: Frank Meinl and Anton Kaplanyan, 2022, Intel Sample Library. The add-on packages also credit the Sponza Addon Package Crew: Katica Putica, Cristiano Siqueira, Timothy Heath, Justin Prazen, Sebastian Herholz, Bruce Cherniak, Anton Kaplanyan. `sponza_intel.json` loads the main file re-exported through Blender with its lights turned on (they ship at intensity 0), lit by `kloppenheim_05_4k.hdr` in place of the sun.
+### Third-party code
 
-Bistro is cited as: Amazon Lumberyard Bistro, Open Research Content Archive (ORCA). Amazon Lumberyard, July 2017. http://developer.nvidia.com/orca/amazon-lumberyard-bistro. I converted it from FBX to glTF with Blender 5.2.2.
+| library | version | license | used for |
+|---|---|---|---|
+| [tinygltf](https://github.com/syoyo/tinygltf) | 2.9.7 | MIT | glTF and glb loading |
+| [MikkTSpace](https://github.com/mmikk/MikkTSpace) | no releases | zlib | tangents for normal-mapped meshes without them |
+| [tinyexr](https://github.com/syoyo/tinyexr) | 1.0.13 | BSD-3-Clause | EXR environment maps and `.exr` output |
+| [OptiX](https://developer.nvidia.com/rtx/ray-tracing/optix) | 9.1.0 | NVIDIA OptiX SDK license | hardware ray tracing |
+| [stb_image](https://github.com/nothings/stb) | 2.30, updated from the base code's 2.06 | public domain / MIT | texture and HDR loading |
+| Thrust and CUB | CUDA 13.3 | Apache 2.0 with LLVM exception | random numbers (Thrust), material sort (CUB) |
+
+GLFW, GLEW, GLM, nlohmann/json, Dear ImGui and stb_image_write included in base code.
 
 ### References
 
-- Veach 1997: Eric Veach, *Robust Monte Carlo Methods for Light Transport Simulation*, PhD thesis, Stanford University, 1997. The power heuristic for multiple importance sampling.
+- Veach 1997: Eric Veach, *Robust Monte Carlo Methods for Light Transport Simulation*, PhD thesis, Stanford University, 1997. 
 - Walter et al. 2007: Bruce Walter, Stephen R. Marschner, Hongsong Li, Kenneth E. Torrance, "Microfacet Models for Refraction through Rough Surfaces", Eurographics Symposium on Rendering 2007. The generalized half vector and its Jacobian for rough refraction.
-- Dupuy and Benyoub 2023: Jonathan Dupuy, Anis Benyoub, "Sampling Visible GGX Normals with Spherical Caps", High-Performance Graphics 2023. The visible-normal sampling `scatterPbr` uses.
-- Karlík et al. 2019: Ondřej Karlík, Martin Šik, Petr Vévoda, Tomáš Skřivan, Jaroslav Křivánek, "MIS Compensation: Optimizing Sampling Techniques in Multiple Importance Sampling", ACM Transactions on Graphics 38(6), SIGGRAPH Asia 2019. The average subtracted from the environment's sampling table.
-- PBRT-v4: Matt Pharr, Wenzel Jakob, Greg Humphreys, *Physically Based Rendering: From Theory to Implementation*, 4th edition, MIT Press 2023, https://pbr-book.org. The power light sampler, the image-light power estimate and the compensated distribution follow its `PowerLightSampler` and `ImageInfiniteLight`.
+- Dupuy and Benyoub 2023: Jonathan Dupuy, Anis Benyoub, "Sampling Visible GGX Normals with Spherical Caps", High-Performance Graphics 2023.
+- Karlík et al. 2019: Ondřej Karlík, Martin Šik, Petr Vévoda, Tomáš Skřivan, Jaroslav Křivánek, "MIS Compensation: Optimizing Sampling Techniques in Multiple Importance Sampling", ACM Transactions on Graphics 38(6), SIGGRAPH Asia 2019.
+- PBRT-v4: Matt Pharr, Wenzel Jakob, Greg Humphreys, *Physically Based Rendering: From Theory to Implementation*, 4th edition, MIT Press 2023, https://pbr-book.org.

@@ -131,6 +131,9 @@ void setAntialiasing(bool enabled) { useAntialiasing = enabled; }
 static bool useMaterialSort = true;
 void setMaterialSort(bool enabled) { useMaterialSort = enabled; }
 
+static bool useCompaction = true;
+void setCompaction(bool enabled) { useCompaction = enabled; }
+
 static bool useNee = true;
 void setNextEventEstimation(bool enabled) { useNee = enabled; }
 
@@ -505,6 +508,12 @@ __global__ void computeIntersections(
     if (pathIndex < numPaths)
     {
         PathSegment pathSegment = pathSegments[pathIndex];
+        // An ended path, left in place when compaction is off, tests
+        // nothing; the shade kernel skips it too.
+        if (pathSegment.remainingBounces <= 0)
+        {
+            return;
+        }
         const unsigned int alphaSeed = alphaPathSeed(iter, pathSegment.pixelIndex, pathSegment.remainingBounces);
 
         float t;
@@ -612,7 +621,10 @@ static_assert(PATH_BLOCK_SIZE % 32 == 0, "shadeMaterial's blocks must be whole w
 
 // Shades paths[0, numPaths) and appends the paths that go on to
 // survivors.paths, compacted: the compaction is fused into shading, so no
-// separate pass reads the paths again to drop the ones that ended.
+// separate pass reads the paths again to drop the ones that ended. Without
+// compact, survivors.paths is pathSegments itself: each path shaded here goes
+// back to its own slot, an ended one is not touched, and survivors.count
+// still counts the ones that go on.
 //
 // With nee (next event estimation, which needs OptiX and a light in lights),
 // every hit that is not the path's last also samples a light and appends a
@@ -629,6 +641,7 @@ __global__ void shadeMaterial(
     int depth,
     bool russianRoulette,
     bool nee,
+    bool compact,
     ShadeableIntersection* shadeableIntersections,
     const PathSegment* pathSegments,
     SurvivorBuffer survivors,
@@ -655,6 +668,7 @@ __global__ void shadeMaterial(
         seg = pathSegments[idx];
         alive = seg.remainingBounces > 0;
     }
+    const bool shaded = alive;
     // This hit's light sample, appended to the shadow queue at the end like
     // the survivors.
     ShadowRay shadow;
@@ -859,7 +873,16 @@ __global__ void shadeMaterial(
         base = atomicAdd(survivors.count, __popc(warpSurvivors));
     }
     base = __shfl_sync(0xffffffffu, base, 0);
-    if (alive)
+    if (!compact)
+    {
+        // In place: only a path shaded here changed. Every lane reaches the
+        // ballot above, so the ones that ended earlier skip just the store.
+        if (shaded)
+        {
+            survivors.paths[idx] = seg;
+        }
+    }
+    else if (alive)
     {
         const unsigned int lanesBelow = (1u << lane) - 1u;
         survivors.paths[base + __popc(warpSurvivors & lanesBelow)] = seg;
@@ -935,7 +958,11 @@ void pathtrace(uchar4* pbo, int iter)
     }
 
     int depth = 0;
+    // numPaths is how many paths the launches cover, numAlive how many of
+    // them go on. They differ only without compaction, where the launches
+    // keep covering every pixel.
     int numPaths = pixelcount;
+    int numAlive = pixelcount;
 
     // Next event estimation's shadow rays are traced one bounce late, by the
     // next bounce's intersection launch: the queue the last shade launch
@@ -954,7 +981,7 @@ void pathtrace(uchar4* pbo, int iter)
         // paths write every entry, with t = -1 on a miss.
         if (timing)
         {
-            stageTiming.alive[depth] += numPaths;
+            stageTiming.alive[depth] += numAlive;
         }
 
         // tracing
@@ -990,9 +1017,10 @@ void pathtrace(uchar4* pbo, int iter)
             depth + 1,
             useRussianRoulette,
             nee,
+            useCompaction,
             dev_intersections,
             dev_paths,
-            wavefrontSurvivors(),
+            useCompaction ? wavefrontSurvivors() : wavefrontSurvivorsInPlace(dev_paths),
             wavefrontShadowQueue(),
             dev_materials,
             dev_textures,
@@ -1013,14 +1041,23 @@ void pathtrace(uchar4* pbo, int iter)
             shadowBound = depth + 1 < traceDepth ? numPaths : 0;
         }
         // Swaps dev_paths for the survivors and reads their count back.
-        numPaths = wavefrontSwapPaths(dev_paths);
+        // Without compaction the paths were updated in place: only the count.
+        if (useCompaction)
+        {
+            numAlive = wavefrontSwapPaths(dev_paths);
+            numPaths = numAlive;
+        }
+        else
+        {
+            numAlive = wavefrontCountSurvivors();
+        }
         if (timing)
         {
             CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.eventIndex(depth, STAGE_COMPACT)]));
         }
         depth++;
 
-        iterationComplete = numPaths == 0 || depth >= traceDepth;
+        iterationComplete = numAlive == 0 || depth >= traceDepth;
 
         if (guiData != NULL)
         {
@@ -1039,7 +1076,7 @@ void pathtrace(uchar4* pbo, int iter)
     if (timing)
     {
         CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.tailIndex()]));
-        stageTiming.alive[depth] += numPaths;  // survivors of the last bounce run
+        stageTiming.alive[depth] += numAlive;  // survivors of the last bounce run
         stageTimingAccumulate(depth);
     }
 

@@ -51,6 +51,12 @@ extern "C" __global__ void __raygen__paths()
     const unsigned int i = optixGetLaunchIndex().x;
     if (i < (unsigned int)params.numPaths)
     {
+        // An ended path, left in place when compaction is off, traces
+        // nothing; the shade kernel skips it too.
+        if (params.paths[i].remainingBounces <= 0)
+        {
+            return;
+        }
         const Ray ray = params.paths[i].ray;
         optixTrace(params.handle,
             toFloat3(ray.origin),

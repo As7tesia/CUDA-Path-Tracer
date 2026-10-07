@@ -672,6 +672,7 @@ int main(int argc, char** argv)
     setRussianRoulette(options.russianRoulette);
     setAntialiasing(options.antialiasing);
     setMaterialSort(options.materialSort);
+    setCompaction(options.compaction);
     setNextEventEstimation(options.nee);
     setOptix(options.optix);
     setOptixValidation(options.optixValidation);

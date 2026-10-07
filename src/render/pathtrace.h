@@ -37,6 +37,11 @@ void setRussianRoulette(bool enabled);
 // point in the pixel, for comparisons. The random numbers are still drawn.
 void setAntialiasing(bool enabled);
 void setMaterialSort(bool enabled);
+// Off, the shade kernel updates the paths in place instead of compacting the
+// ones that go on, so every bounce launches over every pixel and the stages
+// skip the paths that ended. The image is the same; this is the baseline that
+// shows what the compaction saves.
+void setCompaction(bool enabled);
 // Next event estimation with MIS: a light sample and a shadow ray at every
 // hit. Off, lights are found only by BSDF sampling (the paths have to hit
 // them). Takes effect only where pathtraceNeeAvailable says it can.

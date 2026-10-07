@@ -10,7 +10,7 @@ namespace
 {
 const char* const USAGE =
     "Usage: %s SCENE [--headless] [--spp N] [--res WxH] [--depth N] [--out PATH.png] [--env FILE]\n"
-    "                     [--no-rr] [--no-aa] [--sort] [--no-nee] [--no-env-nee] [--no-env-compensation]\n"
+    "                     [--no-rr] [--no-aa] [--sort] [--no-compact] [--no-nee] [--no-env-nee] [--no-env-compensation]\n"
     "                     [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
     "                     [--lens pinhole|thin|FILE] [--aperture R] [--focus D]\n"
     "                     [--no-optix] [--optix-validate] [--timing]\n"
@@ -34,6 +34,7 @@ const char* const USAGE =
     "  --no-aa          no antialiasing: every camera ray goes through its pixel's center\n"
     "  --sort           sort paths by material before shading (off by default: it costs 2 to 3.5x, see the README)\n"
     "  --no-sort        the default, kept for scripts\n"
+    "  --no-compact     keep ended paths in place instead of compacting them away, for comparisons\n"
     "  --no-nee         no next event estimation: lights count only when a path hits them\n"
     "  --no-env-nee     leave the environment out of the light list: paths find it by BSDF sampling only\n"
     "  --no-env-compensation  sample the environment map by its radiance alone, without MIS compensation\n"
@@ -139,6 +140,10 @@ Options parseArguments(int argc, char** argv)
         else if (a == "--no-sort")
         {
             options.materialSort = false;
+        }
+        else if (a == "--no-compact")
+        {
+            options.compaction = false;
         }
         else if (a == "--no-nee")
         {

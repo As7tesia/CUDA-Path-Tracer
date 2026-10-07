@@ -21,6 +21,7 @@ struct Options
     // 2 to 3.5x the frame on every scene and saves the shade kernel almost
     // nothing (README, Performance). --sort turns it on.
     bool materialSort = false;
+    bool compaction = true;      // --no-compact: ended paths stay in the buffer, for comparisons
     bool nee = true;             // next event estimation with MIS; --no-nee for BSDF sampling only
     bool optix = true;
     bool optixValidation = false;

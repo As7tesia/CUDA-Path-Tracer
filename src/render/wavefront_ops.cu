@@ -122,6 +122,11 @@ SurvivorBuffer wavefrontSurvivors()
     return { dev_sparePaths, dev_survivorCounts + survivorSlot, dev_survivorCounts + (survivorSlot + 1) % 3 };
 }
 
+SurvivorBuffer wavefrontSurvivorsInPlace(PathSegment* paths)
+{
+    return { paths, dev_survivorCounts + survivorSlot, dev_survivorCounts + (survivorSlot + 1) % 3 };
+}
+
 ShadowQueue wavefrontShadowQueue()
 {
     return { dev_shadowRays, dev_shadowCounts + shadowSlot, dev_shadowCounts + (shadowSlot ^ 1) };
@@ -134,7 +139,7 @@ ShadowQueue wavefrontSwapShadowQueue()
     return filled;
 }
 
-int wavefrontSwapPaths(PathSegment*& paths, cudaStream_t stream)
+int wavefrontCountSurvivors(cudaStream_t stream)
 {
     // The host loop needs the count to size the next launches, so this is the
     // one synchronization per bounce.
@@ -143,8 +148,14 @@ int wavefrontSwapPaths(PathSegment*& paths, cudaStream_t stream)
         cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    std::swap(paths, dev_sparePaths);
     survivorSlot = (survivorSlot + 1) % 3;
+    return numAlive;
+}
+
+int wavefrontSwapPaths(PathSegment*& paths, cudaStream_t stream)
+{
+    const int numAlive = wavefrontCountSurvivors(stream);
+    std::swap(paths, dev_sparePaths);
     return numAlive;
 }
 
