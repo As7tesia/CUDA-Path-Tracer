@@ -125,6 +125,9 @@ void setGuiData(GuiDataContainer* data)
 static bool useRussianRoulette = true;
 void setRussianRoulette(bool enabled) { useRussianRoulette = enabled; }
 
+static bool useAntialiasing = true;
+void setAntialiasing(bool enabled) { useAntialiasing = enabled; }
+
 static bool useMaterialSort = true;
 void setMaterialSort(bool enabled) { useMaterialSort = enabled; }
 
@@ -421,8 +424,10 @@ static void freeLights()
 // The pinhole sends it from the eye; the thin lens from a random point on
 // the aperture, aimed so that rays through one pixel meet on the plane in
 // focus. The pinhole draws its two random numbers first and nothing else, so
-// its image does not change when the other cameras draw more.
-__global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, PathSegment* pathSegments)
+// its image does not change when the other cameras draw more. Without
+// antialias every ray goes through the pixel's center; the two numbers are
+// still drawn, so the rest of the stream stays the same.
+__global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, bool antialias, PathSegment* pathSegments)
 {
     int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -438,6 +443,11 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         thrust::uniform_real_distribution<float> u01(0, 1);
         float jx = u01(rng);   // in [0, 1)
         float jy = u01(rng);
+        if (!antialias)
+        {
+            jx = 0.5f;
+            jy = 0.5f;
+        }
         // The direction through the pixel, 1 along view, so that position +
         // d * t lies on the plane t ahead of the camera. Pixel (0, 0) is the
         // top left of the image, as the PNG and the viewport texture store
@@ -917,7 +927,7 @@ void pathtrace(uchar4* pbo, int iter)
     {
         CUDA_CHECK(cudaEventRecord(stageTiming.events[0]));
     }
-    generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(cam, iter, traceDepth, dev_paths);
+    generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(cam, iter, traceDepth, useAntialiasing, dev_paths);
     checkCUDAError("generate camera ray");
     if (timing)
     {

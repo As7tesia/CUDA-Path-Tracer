@@ -670,6 +670,7 @@ int main(int argc, char** argv)
     options = parseArguments(argc, argv);
     setTiming(options.timing);
     setRussianRoulette(options.russianRoulette);
+    setAntialiasing(options.antialiasing);
     setMaterialSort(options.materialSort);
     setNextEventEstimation(options.nee);
     setOptix(options.optix);

@@ -16,6 +16,7 @@ struct Options
     ToneMapMode toneMap = TONEMAP_AGX_PUNCHY;
     float exposure = 1.0f;
     bool russianRoulette = true;
+    bool antialiasing = true;    // --no-aa: camera rays through the pixel centers
     // Off by default since the 2026-10-02 profile: the sort's gather costs
     // 2 to 3.5x the frame on every scene and saves the shade kernel almost
     // nothing (README, Performance). --sort turns it on.

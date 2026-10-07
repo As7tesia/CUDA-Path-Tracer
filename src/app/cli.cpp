@@ -10,7 +10,7 @@ namespace
 {
 const char* const USAGE =
     "Usage: %s SCENE [--headless] [--spp N] [--res WxH] [--depth N] [--out PATH.png] [--env FILE]\n"
-    "                     [--no-rr] [--sort] [--no-nee] [--no-env-nee] [--no-env-compensation]\n"
+    "                     [--no-rr] [--no-aa] [--sort] [--no-nee] [--no-env-nee] [--no-env-compensation]\n"
     "                     [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
     "                     [--lens pinhole|thin|FILE] [--aperture R] [--focus D]\n"
     "                     [--no-optix] [--optix-validate] [--timing]\n"
@@ -31,6 +31,7 @@ const char* const USAGE =
     "  --aperture R     the thin lens's aperture radius, scene units (0 is a pinhole)\n"
     "  --focus D        the thin lens's focus distance, scene units (default: the distance to LOOKAT)\n"
     "  --no-rr          disable Russian roulette path termination\n"
+    "  --no-aa          no antialiasing: every camera ray goes through its pixel's center\n"
     "  --sort           sort paths by material before shading (off by default: it costs 2 to 3.5x, see the README)\n"
     "  --no-sort        the default, kept for scripts\n"
     "  --no-nee         no next event estimation: lights count only when a path hits them\n"
@@ -126,6 +127,10 @@ Options parseArguments(int argc, char** argv)
         else if (a == "--no-rr")
         {
             options.russianRoulette = false;
+        }
+        else if (a == "--no-aa")
+        {
+            options.antialiasing = false;
         }
         else if (a == "--sort")
         {

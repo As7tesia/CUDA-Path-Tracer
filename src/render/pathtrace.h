@@ -33,6 +33,9 @@ void pathtrace(uchar4 *pbo, int iteration);
 
 // Feature toggles (default on). Safe to flip between iterations.
 void setRussianRoulette(bool enabled);
+// Off, every camera ray goes through its pixel's center instead of a random
+// point in the pixel, for comparisons. The random numbers are still drawn.
+void setAntialiasing(bool enabled);
 void setMaterialSort(bool enabled);
 // Next event estimation with MIS: a light sample and a shadow ray at every
 // hit. Off, lights are found only by BSDF sampling (the paths have to hit
