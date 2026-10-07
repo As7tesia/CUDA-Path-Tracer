@@ -29,6 +29,17 @@ if(MSVC)
         "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>")
 endif()
 
+# glm 1.0 leaves a default-constructed vector uninitialized; the 0.9.6 the
+# starter code shipped zeroed it, and the code was written against that. The
+# OptiX programs' nvcc command below passes the same define.
+add_compile_definitions(GLM_FORCE_CTOR_INIT)
+# glm 1.0's vector arithmetic goes through std::plus, std::multiplies and the
+# like, constexpr host functions. Without this flag nvcc only warns (#20013)
+# that device code may not call them, and then compiles every vec * scalar on
+# the GPU into garbage: glm::vec3(1, 2, 3) * 2.f came back as (1, 2, 0) and
+# every render was black. The OptiX nvcc command passes the same flag.
+add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>")
+
 find_package(OpenGL REQUIRED)
 
 if(UNIX)
@@ -187,7 +198,7 @@ set(optix_ir_cpp "${CMAKE_BINARY_DIR}/optix_programs_ir.cpp")
 add_custom_command(
     OUTPUT ${optix_ir}
     COMMAND ${CMAKE_CUDA_COMPILER} -optix-ir -arch=sm_75 -rdc=true -std=c++17 -m64 -lineinfo
-            -ccbin "${CMAKE_CXX_COMPILER}"
+            -ccbin "${CMAKE_CXX_COMPILER}" -DGLM_FORCE_CTOR_INIT --expt-relaxed-constexpr
             "-I${OPTIX_INCLUDE_DIR}" "-I${GLM_INCLUDE_DIRS}" "-I${CMAKE_SOURCE_DIR}/src"
             -MD -MF ${optix_ir}.d -MT ${optix_ir}
             -o ${optix_ir} ${optix_programs}

@@ -243,6 +243,8 @@ void pathtraceTimingReport()
     printf("TIMING,size.PathSegment_bytes,%zu\n", sizeof(PathSegment));
     printf("TIMING,size.ShadeableIntersection_bytes,%zu\n", sizeof(ShadeableIntersection));
     printf("TIMING,size.ShadowRay_bytes,%zu\n", sizeof(ShadowRay));
+    // The material sort's key range: how many groups the sort can make
+    printf("TIMING,scene.materials,%d\n", (int)hst_scene->materials.size());
     printf("TIMING,render.generate,%.4f\n", st.generateMs / st.iterations);
     printf("TIMING,render.shadow_tail,%.4f\n", st.shadowTailMs / st.iterations);
     printf("BOUNCE,depth,alive_in,alive_out");

@@ -32,7 +32,7 @@ const char* const USAGE =
     "  --focus D        the thin lens's focus distance, scene units (default: the distance to LOOKAT)\n"
     "  --no-rr          disable Russian roulette path termination\n"
     "  --no-aa          no antialiasing: every camera ray goes through its pixel's center\n"
-    "  --sort           sort paths by material before shading (off by default: it costs 2 to 3.5x, see the README)\n"
+    "  --sort           sort paths by material before shading (off by default: it costs 1.3 to 2x, see the README)\n"
     "  --no-sort        the default, kept for scripts\n"
     "  --no-compact     keep ended paths in place instead of compacting them away, for comparisons\n"
     "  --no-nee         no next event estimation: lights count only when a path hits them\n"

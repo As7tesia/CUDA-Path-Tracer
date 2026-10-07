@@ -281,19 +281,42 @@ Headless, median of 3 interleaved runs, ms per sample.
 
 ![ms per sample, RR against no RR](img/readme/perf_russian_roulette.png)
 
-- **Paths ended at the third bounce**: 96% in Intel Sponza with RR, against 17% without it. Two bounces off its dark stone leave a path a few percent of its throughput, so most paths lose the roll.
-- **Noise**: at 512x512 and 256 spp, the RMSE against an 8192 spp render without RR is 11.12 against 10.81 (of 255) in Intel Sponza, and 4.94 against 4.23 in Cornell. Per unit of time that makes RR about 1.6x as efficient in Intel Sponza, but only about 0.85x in Cornell. My guess is that Cornell's white walls leave the paths RR ends with much of their throughput, so the variance it adds outweighs the 16% it saves.
+- **Paths ended at the third bounce**: 96% in Sponza with RR, against 17% without it. Two bounces off its dark stone leave a path a few percent of its throughput, so most paths lose the roll.
+- **Noise**: at 512x512 and 256 spp, the RMSE against an 8192 spp render without RR is 11.12 against 10.81 (of 255) in Sponza, and 4.94 against 4.23 in Cornell. Per unit of time that makes RR about 1.6x as efficient in Sponza, but only about 0.85x in Cornell. My guess is that Cornell's white walls leave the paths RR ends with much of their throughput, so the variance it adds outweighs the 16% it saves.
 
 ### Material sort
-(Did not realize my material sort was this bad until profiling, working on figure it out...)
 
-`--sort` radix-sorts the paths by the material they hit and gathers them into that order before shading, so the threads of a `shadeMaterial` warp read the same material. It is off by default.
+`--sort` radix-sorts the paths by the material they hit and gathers them into that order before shading, so the threads of a `shadeMaterial` warp read the same material. It is off by default due to having worse performance. 
+
+Headless, 1024x1024 (Stardust 1720x720), 100 spp, ms per sample by stage from one `--timing` run per bar:
 
 ![Material sort, stage times per sample](img/readme/perf_material_sort.png)
 
-The sort makes every scene 2.2x (Intel Sponza) to 4.3x (Cornell) slower, almost all of it in the sort and gather. `shadeMaterial` itself changes by at most 0.21 ms, and only Intel Sponza and Stardust get faster. This is clearly not what its supposed to be. Need to profile in Nsight to figure out why.
+The sort makes every scene 1.2x (Sponza) to 1.9x (Cornell) slower, all of it in the sort stage. `shadeMaterial` itself changes by at most 0.45 ms, and only Sponza, with 48 materials, gets faster; the scenes with a handful of materials get slightly slower. Every material goes through the same `scatterPbr`, and the lobe a path samples is a random choice per path, sorted or not, so there is little divergence for the sort to remove, however many materials there are. My guess is that Sponza gains its bit because sorted warps fetch the same textures; I have not profiled it.
 
-## Issues along the way
+#### Why is my sort so slow???
+
+Nsight Systems on Cornell: CUB's histogram, scan and single onesweep pass take 34 µs for the first bounce's million paths, `fillIndices` 7 µs, and the gather that moves each path's 116 bytes into sorted order 2.2 ms, a 243 MB move that `cudaMemcpy` does in 0.3 ms. `cuobjdump --dump-sass` showed why: nvcc had turned `pathsOut[i] = pathsIn[src]` into 29 scalar loads, each followed by the store that depends on it. The base code's glm 0.9.6 writes the vectors' `operator=` by hand, which makes every struct holding a `glm::vec3` not trivially copyable, so the copy is 29 member-wise statements rather than one memcpy, and with two plain pointers that might alias the compiler may not move a load above an earlier store. That leaves one memory request in flight per warp. Nsight Compute measured 6,000 to 9,000 cycles per issued instruction, an L1 hit rate of 9 to 41% and 5.6x the useful DRAM traffic, because the sector fetched for one word was gone from the caches by the time the next word asked for it. A standalone copy of the kernel with plain structs could not reproduce it; the same kernel with the glm types did.
+
+Upgrading glm to 1.0.3, whose `operator=` is `= default`, makes the structs trivially copyable again and the gather compiles to 29 loads followed by 29 stores (`__restrict__` on the pointers gives the same code with the old glm). A `static_assert` next to the kernel keeps it that way.
+
+Headless, 1024x1024 (Stardust 1720x720), 100 spp, the sort stage per sample from one `--timing` run per bar:
+
+![Sort stage before and after the glm upgrade](img/readme/perf_gather_glm_upgrade.png)
+
+What is left is the move itself: after the sort, a warp's 32 lanes read 32 structs at least 56 bytes apart, so every load touches 32 sectors for 128 useful bytes, about three times the cost of a contiguous copy. That is more than the shade kernel gains, so the sort stays off.
+
+#### Why sorting cannot win here
+
+Two things cap what the sort can give back.
+1. All the sort can do is remove divergence from the shade stage, but sorting literally costs more than shading itself. Even removing every bit of divergence would not cover.
+2. `materialID` is not what the warps diverge on. `shadeMaterial` branches on miss or hit, but miss gets removed a stage later by compaction anyways. Then inside `scatterPbr`, warps diverges on which lobe to sample: clearcoat, metal, glass, etc. Every one of those picks compares a random number against a material parameter. Even for materials no mixing like roughness 0, metallic 1, the `specularFactor` still introduces divergence to mix between clearcoat and diffuse base by Fresnel fraction. 
+
+ What `materialID` sorting does win is texture sampling, which is presumably why on texture heavy scenes like Sponza and Stardust it gets back a tiny bit performance in shading.
+
+Unless materials evaluations gets very complicated (like complex shading graphs in Blender), I don't think material sorting will ever be worth it in this pathtracer.
+
+## Issues/Bloopers along the way
 
 ### The OptiX cube kept the outward normal on exit hits
 
@@ -321,11 +344,10 @@ Pixel difference, amplified 8x:
 
 The fixed image is slightly darker at the rim: that light now stays inside for more bounces, and at depth 8 some of those paths hit the cap. Interestingly raising DEPTH to 32 brightens the sphere up by a decent amount, far more than the bug's influence, so glass just needs a much higher depth than diffuse.
 
-### Intel Sponza's dirt decals rendered as solid walls
+### Sponza's dirt decals rendered as solid walls
 
 Intel Sponza's walls carry a `dirt_decal` material with `alphaMode: BLEND`, which the loader treated as opaque, so the dark grime texture covered the walls. A BLEND hit now counts with probability alpha, from a hash of the pixel, iteration, depth and triangle, so both intersection paths make the same decision.
 
-1280x720, 256 spp, DEPTH 8, AgX, OptiX:
 
 | BLEND as opaque | BLEND as coverage |
 |:---:|:---:|
@@ -340,6 +362,14 @@ Character crop at 1x, 2048 spp:
 | One global pick table | One table per receiver mask |
 |:---:|:---:|
 | ![Speckled character](img/readme/stardust_linking_global_picks_crop.png) | ![Clean character](img/readme/stardust_linking_mask_rows_crop.png) |
+
+### glm 1.0 compiled to garbage on the device
+
+The first build with glm 1.0.3 ([why it was upgraded](#why-is-my-sort-so-slow)) rendered every scene black, with every path ending on the first bounce on both intersection paths. glm 1.0 routes vector arithmetic through `std::plus`, `std::multiplies` and friends, constexpr host functions, and nvcc 13.3 will not call those from device code unless `--expt-relaxed-constexpr` is set. Instead of an error it prints warning #20013 per instantiation and compiles the call to nothing: on the GPU, `glm::vec3(1, 2, 3) * 2.f` came back as `(1, 2, 0)` and `glm::dot` as NaN, so every camera ray missed. The flag is now on every nvcc command, including the OptiX IR one. Renders after the upgrade differ from the old ones by float drift only: single pixels off by one count, and a few fireflies that moved because a branch flipped on the last bit.
+
+| glm 1.0.3 without the flag | with `--expt-relaxed-constexpr` |
+|:---:|:---:|
+| ![Black Cornell](img/bloopers/cornell_optix_glm_1_0_3_black.png) | ![Cornell after the upgrade](img/readme/cornell_optix_glm_1_0_3_fixed.png) |
 
 ### Smaller base code fixes
 
@@ -400,6 +430,8 @@ Besides the source lists:
 - **OptiX include path** `external/include/optix`. Nothing is linked, since the implementation is in the driver.
 - **OptiX programs as embedded IR**: a custom command compiles `src/optix/optix_programs.cu` with `nvcc -optix-ir`, and `cmake/EmbedFile.cmake` (new) embeds the IR in the executable.
 - **Device LTO**: Release builds add `-dlto` to the CUDA compile and device link options ([why](#device-link-time-optimization)).
+- **`GLM_FORCE_CTOR_INIT`** for every language, so glm 1.0 keeps zeroing default-constructed vectors the way the base code's 0.9.6 did.
+- **`--expt-relaxed-constexpr`** on every nvcc command, the OptiX IR one included: without it glm 1.0's device arithmetic silently compiles to garbage ([why](#glm-10-compiled-to-garbage-on-the-device)).
 - **`src/` split by role** into `app/`, `scene/`, `render/` and `optix/`, with `src/` as the include root.
 - **Two test executables**, `bsdf_test` and `lens_test`, left out of the default build.
 
@@ -433,8 +465,9 @@ Besides the source lists:
 | [OptiX](https://developer.nvidia.com/rtx/ray-tracing/optix) | 9.1.0 | NVIDIA OptiX SDK license | hardware ray tracing |
 | [stb_image](https://github.com/nothings/stb) | 2.30, updated from the base code's 2.06 | public domain / MIT | texture and HDR loading |
 | Thrust and CUB | CUDA 13.3 | Apache 2.0 with LLVM exception | random numbers (Thrust), material sort (CUB) |
+| [glm](https://github.com/g-truc/glm) | 1.0.3, updated from the base code's 0.9.6.3 ([why](#why-is-my-sort-so-slow)) | MIT | vectors and matrices everywhere |
 
-GLFW, GLEW, GLM, nlohmann/json, Dear ImGui and stb_image_write included in base code.
+GLFW, GLEW, nlohmann/json, Dear ImGui and stb_image_write included in base code.
 
 ### References
 

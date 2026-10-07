@@ -4,6 +4,7 @@
 
 #include <cub/device/device_radix_sort.cuh>
 
+#include <type_traits>
 #include <utility>
 
 namespace
@@ -53,6 +54,16 @@ __global__ void fillIndices(int n, int* indices)
 }
 
 // Position i of the outputs receives element sortedIndices[i] of the inputs.
+// The struct copies below have to be memcpys, which the compiler turns into
+// all loads first, then all stores. glm 0.9.6 defined the vectors' operator=
+// by hand, which made the structs non-trivially-copyable: the copies became
+// member-wise statements the compiler could not reorder (the pointers might
+// alias), one memory round trip per word, and this kernel ran 3 to 4x slower
+// than the same bytes moved as a block.
+static_assert(std::is_trivially_copyable<PathSegment>::value,
+    "PathSegment must be trivially copyable so the gather copies it as a block");
+static_assert(std::is_trivially_copyable<ShadeableIntersection>::value,
+    "ShadeableIntersection must be trivially copyable so the gather copies it as a block");
 __global__ void gatherByIndex(int n, const int* sortedIndices,
     const PathSegment* pathsIn, const ShadeableIntersection* intersectionsIn,
     PathSegment* pathsOut, ShadeableIntersection* intersectionsOut)

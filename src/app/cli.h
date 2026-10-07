@@ -18,7 +18,7 @@ struct Options
     bool russianRoulette = true;
     bool antialiasing = true;    // --no-aa: camera rays through the pixel centers
     // Off by default since the 2026-10-02 profile: the sort's gather costs
-    // 2 to 3.5x the frame on every scene and saves the shade kernel almost
+    // 0.3 to 0.9x the frame on every scene and saves the shade kernel almost
     // nothing (README, Performance). --sort turns it on.
     bool materialSort = false;
     bool compaction = true;      // --no-compact: ended paths stay in the buffer, for comparisons
