@@ -139,8 +139,8 @@ enum CameraType
 {
     CAMERA_PINHOLE,
     CAMERA_THIN_LENS,
-    // A lens prescription (Scene::lens), traced surface by surface. Until
-    // that trace exists the kernel renders it as the pinhole.
+    // A lens prescription (Scene::lens), traced surface by surface from the
+    // film out (render/lens_trace.h)
     CAMERA_REAL_LENS,
 };
 
@@ -162,6 +162,9 @@ struct Camera
     // focus. Both in scene units.
     float apertureRadius;
     float focusDistance;
+    // Scene units per meter, which sizes the real lens (in millimeters)
+    // against the scene. 1 unless the scene says otherwise.
+    float unitsPerMeter;
 };
 
 struct RenderState

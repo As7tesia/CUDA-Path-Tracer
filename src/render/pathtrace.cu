@@ -14,6 +14,7 @@
 #include "render/mesh_hit.h"
 #include "render/bsdf.h"
 #include "render/environment.h"
+#include "render/lens_trace.h"
 #include "render/nee.h"
 #include "render/pbr_surface.h"
 #include "render/sampling.h"
@@ -96,12 +97,19 @@ static EnvironmentMap dev_environment = {};
 // the scene has nothing it can sample. uploadLights fills it from hst_scene.
 static LightList dev_lights = {};
 // The real lens's surfaces and their aspheric coefficients (Scene::lens),
-// null when the scene has none. Uploaded here so the table is runtime data;
-// nothing reads it until the lens trace is built.
+// null when the scene has none. Uploaded here so the table is runtime data.
+// dev_lensDevice is what the generate kernel reads; dev_lensBlocked counts the
+// camera rays the lens blocked since the last reset, over lensRays camera
+// rays, for the blocked-ray fraction (the aspheric terms are not read yet).
 static LensSurface* dev_lens = NULL;
 static float* dev_lensAspheric = NULL;
+static LensDevice dev_lensDevice = {};
+static int* dev_lensBlocked = NULL;
+static double lensRays = 0.0;
 static void uploadLights();
 static void freeLights();
+static void uploadLens();
+static void freeLens();
 
 // Device copy of a host vector, or null when it is empty.
 template <typename T>
@@ -246,6 +254,10 @@ void pathtraceTimingReport()
     // The material sort's key range: how many groups the sort can make
     printf("TIMING,scene.materials,%d\n", (int)hst_scene->materials.size());
     printf("TIMING,render.generate,%.4f\n", st.generateMs / st.iterations);
+    if (dev_lensBlocked != nullptr && lensRays > 0.0)
+    {
+        printf("TIMING,lens.blocked_fraction,%.4f\n", pathtraceLensBlockedFraction());
+    }
     printf("TIMING,render.shadow_tail,%.4f\n", st.shadowTailMs / st.iterations);
     printf("BOUNCE,depth,alive_in,alive_out");
     for (int stage = 0; stage < NUM_STAGES; ++stage)
@@ -284,8 +296,7 @@ void pathtraceInit(Scene* scene)
 
     dev_geoms = uploadVector(scene->geoms);
     dev_materials = uploadVector(scene->materials);
-    dev_lens = uploadVector(scene->lens.surfaces);
-    dev_lensAspheric = uploadVector(scene->lens.aspheric);
+    uploadLens();
 
     uploadLights();
 
@@ -343,10 +354,7 @@ void pathtraceFree()
     cudaFree(dev_paths);
     cudaFree(dev_geoms);
     cudaFree(dev_materials);
-    cudaFree(dev_lens);
-    dev_lens = NULL;
-    cudaFree(dev_lensAspheric);
-    dev_lensAspheric = NULL;
+    freeLens();
     freeLights();
     cudaFree(dev_intersections);
     cudaFree(dev_materialIds);
@@ -375,6 +383,53 @@ void pathtraceFree()
     checkCUDAError("pathtraceFree");
 }
 
+// The lens from hst_scene, for pathtraceInit and a lens swap: the table,
+// what the generate kernel reads of it, and the blocked-ray counter.
+static void uploadLens()
+{
+    const Scene& scene = *hst_scene;
+    const Camera& cam = scene.state.camera;
+    dev_lens = uploadVector(scene.lens.surfaces);
+    dev_lensAspheric = uploadVector(scene.lens.aspheric);
+    dev_lensDevice = {};
+    if (dev_lens != nullptr)
+    {
+        const LensSystem& lens = scene.lens;
+        const LensSystem::Paraxial& p = lens.paraxial;
+        dev_lensDevice.surfaces = dev_lens;
+        dev_lensDevice.count = (int)lens.surfaces.size();
+        dev_lensDevice.filmDistance = p.filmDistance;
+        dev_lensDevice.entrancePupilZ = p.entrancePupilZ;
+        dev_lensDevice.rearZ = p.filmDistance - lens.surfaces.back().thickness;
+        dev_lensDevice.rearRadius = lens.surfaces.back().apertureRadius;
+        // The film's height is the sensor's; its width follows the image
+        dev_lensDevice.pixelMm = lens.sensorMm.y / (float)cam.resolution.y;
+        dev_lensDevice.mmToScene = 0.001f * cam.unitsPerMeter;
+        CUDA_CHECK(cudaMalloc(&dev_lensBlocked, sizeof(int)));
+        CUDA_CHECK(cudaMemset(dev_lensBlocked, 0, sizeof(int)));
+        lensRays = 0.0;
+    }
+}
+
+static void freeLens()
+{
+    cudaFree(dev_lens);
+    dev_lens = NULL;
+    cudaFree(dev_lensAspheric);
+    dev_lensAspheric = NULL;
+    cudaFree(dev_lensBlocked);
+    dev_lensBlocked = NULL;
+    dev_lensDevice = {};
+}
+
+void pathtraceSetLens()
+{
+    // The last iteration's generate kernel may still read the old table
+    CUDA_CHECK(cudaDeviceSynchronize());
+    freeLens();
+    uploadLens();
+}
+
 void pathtraceSetEnvironment(const Environment& env)
 {
     // The last iteration's kernels may still read the old texture.
@@ -393,6 +448,22 @@ void pathtraceReset()
     const Camera& cam = hst_scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
     CUDA_CHECK(cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3)));
+    if (dev_lensBlocked != nullptr)
+    {
+        CUDA_CHECK(cudaMemset(dev_lensBlocked, 0, sizeof(int)));
+        lensRays = 0.0;
+    }
+}
+
+float pathtraceLensBlockedFraction()
+{
+    if (dev_lensBlocked == nullptr || lensRays == 0.0)
+    {
+        return 0.0f;
+    }
+    int blocked = 0;
+    CUDA_CHECK(cudaMemcpy(&blocked, dev_lensBlocked, sizeof(int), cudaMemcpyDeviceToHost));
+    return (float)(blocked / lensRays);
 }
 
 // The light list from hst_scene, for pathtraceInit and an environment swap.
@@ -428,14 +499,23 @@ static void freeLights()
 // in the pixel (antialiasing), white throughput and traceDepth bounces left.
 // The pinhole sends it from the eye; the thin lens from a random point on
 // the aperture, aimed so that rays through one pixel meet on the plane in
-// focus. The pinhole draws its two random numbers first and nothing else, so
-// its image does not change when the other cameras draw more. Without
-// antialias every ray goes through the pixel's center; the two numbers are
-// still drawn, so the rest of the stream stays the same.
-__global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, bool antialias, PathSegment* pathSegments)
+// focus; the real lens from the pixel's point on the film, through a random
+// point of the rear element and out through every surface of the lens
+// (lens_trace.h). The pinhole draws its two random numbers first and nothing
+// else, so its image does not change when the other cameras draw more.
+// Without antialias every ray goes through the pixel's center; the two
+// numbers are still drawn, so the rest of the stream stays the same.
+//
+// A ray the lens blocks (vignetted at a rim or the stop, or reflected back by
+// total internal reflection) carries nothing: black and with no bounces
+// left, so the intersection stage skips it and the shade kernel drops it.
+// Their count, one atomic per warp, is the lens's blocked-ray fraction.
+__global__ void generateRayFromCamera(Camera cam, LensDevice lens, int iter, int traceDepth, bool antialias,
+    PathSegment* pathSegments)
 {
     int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+    bool blocked = false;
 
     if (x < cam.resolution.x && y < cam.resolution.y) {
         int index = x + (y * cam.resolution.x);
@@ -473,18 +553,67 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, bool
             segment.ray.origin = cam.position + cam.right * (r * cosf(phi)) + cam.up * (r * sinf(phi));
             segment.ray.direction = glm::normalize(focus - segment.ray.origin);
         }
+        else if (cam.type == CAMERA_REAL_LENS && lens.surfaces != nullptr)
+        {
+            // The pixel's point on the film, in lens space (mm, z toward the
+            // film). The lens turns the image over, so the pixel right of
+            // center sits left of center on the film and the pixel below
+            // center sits above it; cam.right already carries a mirrored
+            // camera's flip.
+            const glm::vec3 film(
+                -(float(x + jx) - (float)cam.resolution.x * 0.5f) * lens.pixelMm,
+                ((float)(y + jy) - (float)cam.resolution.y * 0.5f) * lens.pixelMm,
+                lens.filmDistance);
+            // A uniform point of the rear element's disk to aim at. Most of
+            // the disk is wasted away from the center (the exit pupil is
+            // smaller and off to one side); those rays come back blocked.
+            const float r = lens.rearRadius * sqrtf(u01(rng));
+            const float phi = TWO_PI * u01(rng);
+            const glm::vec3 rear(r * cosf(phi), r * sinf(phi), lens.rearZ);
+            glm::vec3 o = film;
+            glm::vec3 dir = glm::normalize(rear - film);
+            const bool out = traceLens(lens.surfaces, lens.count - 1, 0, lens.rearZ, o, dir)
+                && isfinite(o.x + o.y + o.z + dir.x + dir.y + dir.z);
+            if (out)
+            {
+                // Lens space to the world: x along right, y along up, z
+                // against view, with the entrance pupil at cam.position so
+                // the framing matches the other camera types
+                segment.ray.origin = cam.position
+                    + (cam.right * o.x + cam.up * o.y + cam.view * (lens.entrancePupilZ - o.z)) * lens.mmToScene;
+                segment.ray.direction = glm::normalize(cam.right * dir.x + cam.up * dir.y - cam.view * dir.z);
+            }
+            else
+            {
+                blocked = true;
+                segment.color = glm::vec3(0.0f);
+                segment.ray.origin = cam.position;
+                segment.ray.direction = cam.view;
+            }
+        }
         else
         {
-            // The pinhole, and the real lens until its trace is built
             segment.ray.origin = cam.position;
             segment.ray.direction = glm::normalize(d);
         }
 
         segment.pixelIndex = index;
-        segment.remainingBounces = traceDepth;
+        segment.remainingBounces = blocked ? 0 : traceDepth;
         segment.medium = -1;  // the camera sits in air
         segment.pdf = 0.0f;   // a light the camera sees directly counts in full
         segment.receiverMask = 0xffffffffu;  // linking never hides an emitter from the camera
+    }
+
+    if (lens.blocked != nullptr)
+    {
+        // The 8x8 block is two whole warps and nothing above returns early,
+        // so every lane votes
+        const unsigned int votes = __ballot_sync(0xffffffffu, blocked);
+        const int lane = (threadIdx.y * blockDim.x + threadIdx.x) & 31;
+        if (lane == 0 && votes != 0u)
+        {
+            atomicAdd(lens.blocked, __popc(votes));
+        }
     }
 }
 
@@ -952,7 +1081,14 @@ void pathtrace(uchar4* pbo, int iter)
     {
         CUDA_CHECK(cudaEventRecord(stageTiming.events[0]));
     }
-    generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(cam, iter, traceDepth, useAntialiasing, dev_paths);
+    // The blocked-ray count runs only while the real lens renders
+    LensDevice lens = dev_lensDevice;
+    lens.blocked = cam.type == CAMERA_REAL_LENS && dev_lens != nullptr ? dev_lensBlocked : nullptr;
+    if (lens.blocked != nullptr)
+    {
+        lensRays += pixelcount;
+    }
+    generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(cam, lens, iter, traceDepth, useAntialiasing, dev_paths);
     checkCUDAError("generate camera ray");
     if (timing)
     {

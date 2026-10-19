@@ -21,6 +21,7 @@
     "pontiac-gto": "assets/gltf-research-scenes/scenes/pontiac-gto/gltf/pontiac_gto_extended.gltf",
     "spaceship": "assets/gltf-research-scenes/scenes/spaceship/gltf/spaceship_extended.gltf",
     "staircase": "assets/gltf-research-scenes/scenes/staircase/gltf/staircase_extended.gltf",
+    "stardust": "blender-migration/stardust.json",
     "teapot": "assets/gltf-research-scenes/scenes/teapot/gltf/teapot_extended.gltf",
     "teapot-full": "assets/gltf-research-scenes/scenes/teapot-full/gltf/teapot_full_extended.gltf",
     "veach-ajar": "assets/gltf-research-scenes/scenes/veach-ajar/gltf/veach_ajar_extended.gltf",

@@ -96,6 +96,7 @@ set(headers
     src/render/bsdf.h
     src/render/environment.h
     src/render/intersections.h
+    src/render/lens_trace.h
     src/render/mesh_hit.h
     src/render/nee.h
     src/render/pathtrace.h

@@ -54,6 +54,7 @@ struct CameraPose
     std::string lensFile;           // the real lens's prescription, when type is CAMERA_REAL_LENS
     float apertureRadius = 0.0f;    // the thin lens's, scene units
     float focusDistance = 0.0f;     // scene units; 0 = the distance to lookAt
+    float unitsPerMeter = 1.0f;     // see Camera::unitsPerMeter
 };
 
 // The scene file a command-line argument names: the argument itself when it

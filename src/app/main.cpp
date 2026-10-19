@@ -84,6 +84,14 @@ static bool environmentRequested = false;
 static std::string requestedEnvironment;  // a map file; empty: the scene file's own
 static std::string environmentError;     // why the last load failed, until the next one
 
+// The panel's lens picker: the files in LENS_DIR, listed once at startup. A
+// lens loads at once (a table of a few dozen rows) and replaces the scene's,
+// with the real lens selected; later scene switches keep it, as --lens does.
+static std::vector<std::string> lensList;
+static int selectedLens = -1;
+static char lensPath[1024] = "";
+static std::string lensError;  // why the last load failed, until the next one
+
 static int width;
 static int height;
 
@@ -103,6 +111,9 @@ static void keyCallback(GLFWwindow *window, int key, int scancode, int action, i
 static void framebufferSizeCallback(GLFWwindow* window, int fbWidth, int fbHeight);
 static void switchScene(const std::string& argument);
 static void switchEnvironment(const std::string& file);
+static void switchLens(const std::string& file);
+static void selectLensInList();
+static std::string defaultLensFile();
 static void mousePositionCallback(GLFWwindow* window, double xpos, double ypos);
 static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
 static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset);
@@ -435,9 +446,10 @@ static void renderImGui()
     }
 
     // The camera: pinhole, thin lens or the real lens. The real lens needs a
-    // prescription, which only the scene file or --lens loads. The thin
-    // lens's two numbers drag in steps scaled to the scene, since a radius
-    // that blurs a room is a wall for a figurine.
+    // prescription: the one the scene has, else the default lens file, loaded
+    // when the entry is picked (the picker below swaps it). The thin lens's
+    // two numbers drag in steps scaled to the scene, since a radius that
+    // blurs a room is a wall for a figurine.
     ImGui::Separator();
     Camera& cam = renderState->camera;
     const char* cameraNames[] = {"Pinhole", "Thin lens", "Real lens"};
@@ -446,12 +458,19 @@ static void renderImGui()
     {
         for (int i = 0; i < 3; ++i)
         {
-            const bool allowed = i != CAMERA_REAL_LENS || scene->hasLens();
+            const bool allowed = i != CAMERA_REAL_LENS || scene->hasLens() || !lensList.empty();
             if (ImGui::Selectable(cameraNames[i], i == (int)cam.type, allowed ? 0 : ImGuiSelectableFlags_Disabled)
                 && i != (int)cam.type)
             {
-                cam.type = (CameraType)i;
-                camchanged = true;
+                if (i == CAMERA_REAL_LENS && !scene->hasLens())
+                {
+                    switchLens(defaultLensFile());  // selects the real lens itself when the file loads
+                }
+                else
+                {
+                    cam.type = (CameraType)i;
+                    camchanged = true;
+                }
             }
         }
         ImGui::EndCombo();
@@ -470,12 +489,50 @@ static void renderImGui()
             camchanged = true;
         }
     }
+    // The lens picker, like the environment's: a lens file from the list or
+    // a typed path, loaded at once
+    ImGui::Text("Lens: %s", scene->hasLens() ? scene->lens.name.c_str() : "none");
+    ImGui::SetNextItemWidth(240);
+    const std::string lensPreview = selectedLens >= 0
+        ? std::filesystem::path(lensList[selectedLens]).filename().string()
+        : lensList.empty() ? "no lens files in " + LENS_DIR : "pick a lens";
+    if (ImGui::BeginCombo("##lens", lensPreview.c_str()))
+    {
+        for (int i = 0; i < (int)lensList.size(); ++i)
+        {
+            const std::string name = std::filesystem::path(lensList[i]).filename().string();
+            if (ImGui::Selectable(name.c_str(), i == selectedLens))
+            {
+                selectedLens = i;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load##lens") && selectedLens >= 0)
+    {
+        switchLens(lensList[selectedLens]);
+    }
+    ImGui::SetNextItemWidth(240);
+    if (ImGui::InputTextWithHint("##lensPath", "or a .json path, Enter loads", lensPath, sizeof lensPath,
+            ImGuiInputTextFlags_EnterReturnsTrue) && lensPath[0] != '\0')
+    {
+        switchLens(lensPath);
+    }
+    if (!lensError.empty())
+    {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+        ImGui::TextColored(ImVec4(0.8f, 0.1f, 0.1f, 1.0f), "%s", lensError.c_str());
+        ImGui::PopTextWrapPos();
+    }
     if (scene->hasLens())
     {
-        ImGui::TextDisabled("%s, %d surfaces", scene->lens.name.c_str(), (int)scene->lens.surfaces.size());
+        const LensSystem::Paraxial& p = scene->lens.paraxial;
+        ImGui::TextDisabled("%d surfaces, f = %.1f mm, f/%.2f", (int)scene->lens.surfaces.size(), p.focalLength,
+            p.fNumber);
         if (cam.type == CAMERA_REAL_LENS)
         {
-            ImGui::TextDisabled("not traced yet, renders as the pinhole");
+            ImGui::TextDisabled("blocked %.1f%% of camera rays", 100.0f * pathtraceLensBlockedFraction());
         }
     }
     ImGui::End();
@@ -637,6 +694,55 @@ static void selectEnvironmentInList()
 // The environment texture and the light list are remade, not the scene. A
 // map that does not load leaves the current one, with the error in the
 // panel.
+// The lens the Camera combo loads when none is loaded yet: the double Gauss
+// when it is in the list, else the first file there
+static std::string defaultLensFile()
+{
+    for (const std::string& file : lensList)
+    {
+        if (std::filesystem::path(file).filename() == "dgauss.50mm.json")
+        {
+            return file;
+        }
+    }
+    return lensList.empty() ? std::string() : lensList.front();
+}
+
+// The combo follows the lens the scene has, when it is in the list
+static void selectLensInList()
+{
+    selectedLens = -1;
+    for (int i = 0; i < (int)lensList.size(); ++i)
+    {
+        if (scene->hasLens() && lensList[i] == std::filesystem::path(scene->lens.file).generic_string())
+        {
+            selectedLens = i;
+        }
+    }
+}
+
+// Loads a lens file into the scene and the device, and renders through it.
+// A bad file leaves the current lens in place with the error in the panel.
+static void switchLens(const std::string& file)
+{
+    try
+    {
+        scene->lens = loadLens(file);
+    }
+    catch (const std::exception& e)
+    {
+        lensError = e.what();
+        fprintf(stderr, "error: %s\n", lensError.c_str());
+        return;
+    }
+    lensError.clear();
+    options.overrides.lens = file;  // later scene switches keep it
+    selectLensInList();
+    pathtraceSetLens();
+    renderState->camera.type = CAMERA_REAL_LENS;
+    camchanged = true;  // the image starts over
+}
+
 static void switchEnvironment(const std::string& file)
 {
     try
@@ -655,6 +761,7 @@ static void switchEnvironment(const std::string& file)
     environmentError.clear();
     options.overrides.environmentFile = file;  // later scene switches keep it
     selectEnvironmentInList();
+    selectLensInList();
     pathtraceSetEnvironment(scene->environment);
     camchanged = true;  // the image starts over
 }
@@ -694,6 +801,7 @@ int main(int argc, char** argv)
         {
             sceneList = sceneNames();
             environmentList = environmentMapFiles();
+            lensList = lensFiles();
         }
     }
     catch (const std::exception& e)
@@ -717,6 +825,7 @@ int main(int argc, char** argv)
         }
     }
     selectEnvironmentInList();
+    selectLensInList();
 
     // Initialize CUDA and GL components
     if (!init())

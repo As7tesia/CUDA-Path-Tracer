@@ -23,9 +23,15 @@ void pathtraceReset();
 // environment picker, and rebuilds the light list, whose shares depend on
 // the environment's power. The caller restarts the image.
 void pathtraceSetEnvironment(const Environment& env);
+// Replaces the lens pathtraceInit uploaded with the scene's current one
+// (Scene::lens), for the window's lens picker. The caller restarts the image.
+void pathtraceSetLens();
 // Copies the accumulation buffer into scene->state.image. Only saveImage needs
 // the host copy, so it is done on demand rather than every iteration.
 void pathtraceDownloadImage();
+// The share of camera rays the real lens blocked since the last reset (a
+// device read); 0 when no lens is rendering.
+float pathtraceLensBlockedFraction();
 // One sample per pixel, added to the accumulation buffer. With a pixel
 // buffer (the viewport; null when headless) it also writes the tone-mapped
 // average of iterations 1 to iteration into it.

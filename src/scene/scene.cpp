@@ -469,6 +469,13 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
     }
     pose.apertureRadius = cameraData.value("APERTURE", 0.0f);
     pose.focusDistance = cameraData.value("FOCUS", 0.0f);
+    // How big the scene's unit is, for the real lens: 1 reads the scene in
+    // meters, 100 in centimeters
+    pose.unitsPerMeter = data.value("UNITS_PER_METER", 1.0f);
+    if (!(pose.unitsPerMeter > 0.0f))
+    {
+        sceneError("UNITS_PER_METER must be positive");
+    }
 
     initRenderState(withOverrides(settings, ov), withOverrides(pose, ov));
 }
@@ -594,12 +601,24 @@ void Scene::initRenderState(const RenderSettings& settings, const CameraPose& po
     camera.type = pose.type;
     camera.apertureRadius = pose.apertureRadius;
     camera.focusDistance = pose.focusDistance > 0.0f ? pose.focusDistance : glm::length(pose.lookAt - pose.eye);
+    camera.unitsPerMeter = pose.unitsPerMeter;
     if (camera.type == CAMERA_REAL_LENS)
     {
         lens = loadLens(pose.lensFile);  // throws with the file's name
-        printf("lens %s: %d surfaces, stop at surface %d, %.1f mm long\n", lens.name.c_str(),
-            (int)lens.surfaces.size(), lens.stopIndex + 1, lensLength(lens));
-        fprintf(stderr, "the real-lens trace is not built yet; rendering with the pinhole\n");
+        const LensSystem::Paraxial& p = lens.paraxial;
+        printf("lens %s: %d surfaces, stop at surface %d; traced f = %.2f mm, f/%.2f, film %.3f mm behind the "
+            "front vertex, entrance pupil %.2f mm behind it with radius %.2f mm\n",
+            lens.name.c_str(), (int)lens.surfaces.size(), lens.stopIndex + 1, p.focalLength, p.fNumber,
+            p.filmDistance, p.entrancePupilZ, p.entrancePupilRadius);
+        int aspheric = 0;
+        for (const LensSurface& s : lens.surfaces)
+        {
+            aspheric += s.asphericCount > 0 || s.conic != 0.0f;
+        }
+        if (aspheric > 0)
+        {
+            fprintf(stderr, "%d aspheric surfaces are traced as spheres of their paraxial radius for now\n", aspheric);
+        }
     }
 
     // fovy is the full vertical field of view in degrees, so the half angle

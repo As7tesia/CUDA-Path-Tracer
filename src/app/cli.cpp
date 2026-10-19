@@ -27,7 +27,7 @@ const char* const USAGE =
     "                   exposure; .exr is exact float32, .hdr truncates to 8-bit mantissas\n"
     "  --env FILE       light the scene with this lat-long .hdr or .exr instead of its own environment\n"
     "  --lens TYPE      the camera: pinhole (the scene's default), thin (a thin lens), or a lens file\n"
-    "                   in scenes/lenses/ (a .json or PBRT .dat prescription) for the real lens\n"
+    "                   in scenes/lenses/ (a .json prescription) for the real lens\n"
     "  --aperture R     the thin lens's aperture radius, scene units (0 is a pinhole)\n"
     "  --focus D        the thin lens's focus distance, scene units (default: the distance to LOOKAT)\n"
     "  --no-rr          disable Russian roulette path termination\n"

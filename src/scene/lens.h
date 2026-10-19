@@ -1,7 +1,7 @@
 #pragma once
 
-// A lens prescription: the table of surfaces a patent or PBRT lens file
-// lists, loaded for the real-lens camera. The table is runtime data, read
+// A lens prescription: the table of surfaces a patent lists, loaded for the
+// real-lens camera. The table is runtime data, read
 // from scenes/lenses/ and uploaded by pathtraceInit; nothing in it is a
 // compile-time constant.
 
@@ -18,7 +18,7 @@ struct LensSurface
 {
     float radius;          // curvature radius; positive bulges toward the scene; 0 = flat (the stop, a plano face)
     float thickness;       // along the axis to the next surface; on the last surface, to the film at infinity focus (0 = not known yet)
-    float ior;             // n_d of what fills the gap behind the surface; 1 = air
+    float ior;             // n_d of what fills the gap behind the 1@surface; 1 = air
     float abbe;            // V_d of that glass; 0 = not known, the glass then has one index for every wavelength
     float apertureRadius;  // half the clear diameter; a ray farther from the axis is blocked
     float conic;           // k in the (1 + k) sag form: 0 is a sphere, -1 a paraboloid
@@ -34,6 +34,7 @@ struct LensSurface
 struct LensSystem
 {
     std::string name;
+    std::string file;            // the path loadLens read it from
     std::string source;          // where the numbers came from
     std::string apertureSource;  // where the clear apertures came from; patents rarely print them
     std::vector<LensSurface> surfaces;  // scene side first
@@ -51,25 +52,49 @@ struct LensSystem
     int focusSurface = -1;
     glm::vec2 focusGap = glm::vec2(0.0f);
     float closeFocusMagnification = 0.0f;  // at the closest focus; 0 = not stated
+
+    // What a trace of the table says about the lens (analyzeLens, run by
+    // loadLens), all in mm. Checked against the stated numbers in the host
+    // test; the renderer reads filmDistance and the entrance pupil.
+    struct Paraxial
+    {
+        float focalLength;          // effective focal length, from a ray close to the axis
+        float backFocus;            // last surface to the paraxial focus of a distant object
+        float filmDistance;         // front vertex to the film: the table's gaps summed
+        float entrancePupilZ;       // the stop's center as seen from the scene, behind the front vertex
+        float entrancePupilRadius;  // the widest ray parallel to the axis that gets through
+        float fNumber;              // focalLength / (2 entrancePupilRadius), wide open
+    } paraxial = {};
 };
 
+// Fills lens.paraxial from a trace of the surfaces (render/lens_trace.h),
+// and when the last gap is 0 (the film distance not known) sets it so a
+// distant object is in focus. Throws a std::runtime_error when a ray along
+// the axis cannot get through the lens.
+void analyzeLens(LensSystem& lens);
+
+// Where the lens files live, "scenes/lenses/"
+extern const std::string LENS_DIR;
+
 // The lens file an argument names: the argument itself when it is an existing
-// file, else scenes/lenses/<argument>, with .json and then .dat tried when
-// the name has no extension. Throws a std::runtime_error naming what was
-// tried when nothing matches.
+// file, else LENS_DIR/<argument>, with .json added when the name has no
+// extension. Throws a std::runtime_error naming what was tried when nothing
+// matches.
 std::string findLensFile(const std::string& argument);
 
-// Reads a lens file, found with findLensFile. A .json file is this project's
-// own format (scenes/lenses/README.md); a .dat file is PBRT-v3's lens
-// format: one surface per line as radius, thickness, index and clear
-// diameter, # starting a comment. Throws a std::runtime_error, starting with
-// the file's name, when the file cannot be read or is not a lens.
+// The .json files in LENS_DIR, sorted, for the window's lens list. Empty
+// when there is no such folder.
+std::vector<std::string> lensFiles();
+
+// Reads a lens file, found with findLensFile, and analyzes it. The file is
+// this project's .json format (scenes/lenses/README.md). Throws a
+// std::runtime_error, starting with the file's name, when the file cannot be
+// read or is not a lens.
 LensSystem loadLens(const std::string& argument);
 
-// The two parsers behind loadLens, on the file's text, for the host test.
-// name is used in error messages.
+// The parser behind loadLens, on the file's text, for the host test. name is
+// used in error messages.
 LensSystem parseLensJson(const std::string& text, const std::string& name);
-LensSystem parseLensDat(const std::string& text, const std::string& name);
 
 // Front vertex to film along the axis: the sum of the thicknesses. Without
 // a known last gap this is the length of the glass alone.
