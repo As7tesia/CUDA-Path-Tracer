@@ -94,6 +94,7 @@ set(headers
     src/optix/optix_intersect.h
     src/optix/optix_params.h
     src/render/bsdf.h
+    src/render/exit_pupil.h
     src/render/environment.h
     src/render/intersections.h
     src/render/lens_trace.h
@@ -122,6 +123,7 @@ set(sources
     src/app/viewport_camera.cpp
     src/optix/optix_intersect.cpp
     src/render/bsdf.cu
+    src/render/exit_pupil.cu
     src/render/intersections.cu
     src/render/pathtrace.cu
     src/render/textures.cpp
@@ -235,7 +237,7 @@ endif()
 # Host-side check of the lens loaders (tests/lens_test.cu), built the same way:
 #   cmake --build build --config Release --target lens_test
 #   build/bin/Release/lens_test.exe        (from the repository root, it reads scenes/lenses/)
-add_executable(lens_test EXCLUDE_FROM_ALL tests/lens_test.cu src/scene/lens.cpp)
+add_executable(lens_test EXCLUDE_FROM_ALL tests/lens_test.cu src/scene/lens.cpp src/render/exit_pupil.cu src/utilities.cpp)
 target_include_directories(lens_test PRIVATE src)
 set_target_properties(lens_test PROPERTIES CUDA_ARCHITECTURES native)
 if(MSVC)

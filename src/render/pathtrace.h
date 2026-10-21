@@ -23,6 +23,8 @@ void pathtraceSetLens();
 void pathtraceDownloadImage();
 // Share of camera rays the real lens blocked since the last reset; 0 without a lens.
 float pathtraceLensBlockedFraction();
+int pathtraceExitPupilBins();
+float pathtraceExitPupilBuildMs();
 // One sample per pixel into the accumulation buffer; with a pixel buffer, also the tone-mapped average.
 void pathtrace(uchar4 *pbo, int iteration);
 
@@ -33,6 +35,10 @@ void setAntialiasing(bool enabled);
 void setMaterialSort(bool enabled);
 // Off, shading updates paths in place; same image, every bounce launches over every pixel.
 void setCompaction(bool enabled);
+// Off, real-lens rays aim at the whole rear element instead of the exit pupil box; same mean, more blocked rays.
+void setExitPupil(bool enabled);
+// Camera weight normalized by the film-to-rear distance (irradiance on the film) instead of the center pixel.
+void setPhysicalCameraWeight(bool enabled);
 // Takes effect only where pathtraceNeeAvailable says it can.
 void setNextEventEstimation(bool enabled);
 // NEE needs OptiX and a light the scene can sample.

@@ -18,9 +18,15 @@ struct LensDevice
     float filmDistance;     // front vertex to film, mm
     float entrancePupilZ;   // mm behind the front vertex; Camera::position sits here
     float rearZ;            // rear vertex, mm behind the front vertex
-    float rearRadius;       // camera rays are aimed at a point of this disk
+    float aimRadius;        // camera rays are aimed within this disk on the rear vertex's plane (lensAimRadius)
     float pixelMm;          // film millimeters per pixel
     float mmToScene;        // 0.001 * UNITS_PER_METER
+    // Exit pupil table (exit_pupil.h): pupilBins boxes over film radii 0 to halfDiagonal.
+    const glm::vec4* pupil;
+    int pupilBins;
+    float halfDiagonal;
+    int useExitPupil;       // 0: aim at the whole rear element
+    float weightNorm;       // divides the camera weight: the center pixel's pupil area, or film-to-rear distance squared
     int* blocked;           // count of blocked camera rays; null = do not count
 };
 

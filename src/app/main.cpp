@@ -491,6 +491,17 @@ static void renderImGui()
             p.fNumber);
         if (cam.type == CAMERA_REAL_LENS)
         {
+            if (ImGui::Checkbox("Exit pupil sampling", &options.exitPupil))
+            {
+                setExitPupil(options.exitPupil);
+                camchanged = true;
+            }
+            if (ImGui::Checkbox("Physical camera weight", &options.physicalCameraWeight))
+            {
+                setPhysicalCameraWeight(options.physicalCameraWeight);
+                camchanged = true;
+            }
+            ImGui::TextDisabled("exit pupil: %d bins built in %.2f ms", pathtraceExitPupilBins(), pathtraceExitPupilBuildMs());
             ImGui::TextDisabled("blocked %.1f%% of camera rays", 100.0f * pathtraceLensBlockedFraction());
         }
     }
@@ -711,6 +722,8 @@ int main(int argc, char** argv)
     setAntialiasing(options.antialiasing);
     setMaterialSort(options.materialSort);
     setCompaction(options.compaction);
+    setExitPupil(options.exitPupil);
+    setPhysicalCameraWeight(options.physicalCameraWeight);
     setNextEventEstimation(options.nee);
     setOptix(options.optix);
     setOptixValidation(options.optixValidation);

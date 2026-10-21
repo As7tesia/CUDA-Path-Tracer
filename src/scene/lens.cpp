@@ -293,3 +293,12 @@ float lensLength(const LensSystem& lens)
     }
     return z;
 }
+
+float lensAimRadius(const LensSystem& lens, float halfDiagonal)
+{
+    const LensSurface& rear = lens.surfaces.back();
+    const float a = rear.apertureRadius;
+    const float R = std::fabs(rear.radius);
+    const float sag = R == 0.0f ? 0.0f : R - std::sqrt(std::max(R * R - a * a, 0.0f));
+    return a + sag * (halfDiagonal + a) / rear.thickness;
+}

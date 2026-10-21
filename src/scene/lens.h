@@ -69,3 +69,7 @@ LensSystem loadLens(const std::string& argument);
 LensSystem parseLensJson(const std::string& text, const std::string& name);
 
 float lensLength(const LensSystem& lens);
+
+// Radius on the rear vertex's plane that camera rays are aimed within: the rear clear aperture plus the
+// radial shift between that plane and the curved surface for the steepest ray from the film's corner.
+float lensAimRadius(const LensSystem& lens, float halfDiagonal);

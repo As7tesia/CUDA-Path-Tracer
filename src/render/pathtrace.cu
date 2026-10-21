@@ -15,6 +15,7 @@
 #include "render/bsdf.h"
 #include "render/environment.h"
 #include "render/lens_trace.h"
+#include "render/exit_pupil.h"
 #include "render/nee.h"
 #include "render/pbr_surface.h"
 #include "render/sampling.h"
@@ -81,6 +82,9 @@ static LightList dev_lights = {};
 static LensSurface* dev_lens = NULL;
 static float* dev_lensAspheric = NULL;  // not read yet
 static LensDevice dev_lensDevice = {};
+static glm::vec4* dev_lensPupil = NULL;
+static float lensPupilMs = 0.0f;        // last exit pupil build
+static float lensPupil0Area = 0.0f;     // the center pixel's pupil, mm^2: the simple weight's unit
 static int* dev_lensBlocked = NULL;     // camera rays the lens blocked since the last reset
 static double lensRays = 0.0;           // camera rays since the last reset
 static void uploadLights();
@@ -117,6 +121,12 @@ void setMaterialSort(bool enabled) { useMaterialSort = enabled; }
 
 static bool useCompaction = true;
 void setCompaction(bool enabled) { useCompaction = enabled; }
+
+static bool useExitPupil = true;
+void setExitPupil(bool enabled) { useExitPupil = enabled; }
+
+static bool usePhysicalCameraWeight = false;
+void setPhysicalCameraWeight(bool enabled) { usePhysicalCameraWeight = enabled; }
 
 static bool useNee = true;
 void setNextEventEstimation(bool enabled) { useNee = enabled; }
@@ -220,6 +230,8 @@ void pathtraceTimingReport()
     if (dev_lensBlocked != nullptr && lensRays > 0.0)
     {
         printf("TIMING,lens.blocked_fraction,%.4f\n", pathtraceLensBlockedFraction());
+        printf("TIMING,lens.exit_pupil_bins,%d\n", dev_lensDevice.pupilBins);
+        printf("TIMING,lens.exit_pupil_ms,%.4f\n", lensPupilMs);
     }
     printf("TIMING,render.shadow_tail,%.4f\n", st.shadowTailMs / st.iterations);
     printf("BOUNCE,depth,alive_in,alive_out");
@@ -353,10 +365,20 @@ static void uploadLens()
         dev_lensDevice.filmDistance = p.filmDistance;
         dev_lensDevice.entrancePupilZ = p.entrancePupilZ;
         dev_lensDevice.rearZ = p.filmDistance - lens.surfaces.back().thickness;
-        dev_lensDevice.rearRadius = lens.surfaces.back().apertureRadius;
         // The film's height is the sensor's; its width follows the image
         dev_lensDevice.pixelMm = lens.sensorMm.y / (float)cam.resolution.y;
         dev_lensDevice.mmToScene = 0.001f * cam.unitsPerMeter;
+        const float filmWidth = lens.sensorMm.y * (float)cam.resolution.x / (float)cam.resolution.y;
+        dev_lensDevice.halfDiagonal = 0.5f * sqrtf(filmWidth * filmWidth + lens.sensorMm.y * lens.sensorMm.y);
+        dev_lensDevice.aimRadius = lensAimRadius(lens, dev_lensDevice.halfDiagonal);
+        dev_lensDevice.pupilBins = exitPupilBinCount(dev_lensDevice.halfDiagonal);
+        CUDA_CHECK(cudaMalloc(&dev_lensPupil, dev_lensDevice.pupilBins * sizeof(glm::vec4)));
+        dev_lensDevice.pupil = dev_lensPupil;
+        float* areas = nullptr;
+        CUDA_CHECK(cudaMalloc(&areas, dev_lensDevice.pupilBins * sizeof(float)));
+        lensPupilMs = exitPupilBuildDevice(dev_lensDevice, EXIT_PUPIL_GRID, dev_lensPupil, areas);
+        CUDA_CHECK(cudaMemcpy(&lensPupil0Area, areas, sizeof(float), cudaMemcpyDeviceToHost));
+        cudaFree(areas);
         CUDA_CHECK(cudaMalloc(&dev_lensBlocked, sizeof(int)));
         CUDA_CHECK(cudaMemset(dev_lensBlocked, 0, sizeof(int)));
         lensRays = 0.0;
@@ -369,6 +391,8 @@ static void freeLens()
     dev_lens = NULL;
     cudaFree(dev_lensAspheric);
     dev_lensAspheric = NULL;
+    cudaFree(dev_lensPupil);
+    dev_lensPupil = NULL;
     cudaFree(dev_lensBlocked);
     dev_lensBlocked = NULL;
     dev_lensDevice = {};
@@ -401,6 +425,16 @@ void pathtraceReset()
         CUDA_CHECK(cudaMemset(dev_lensBlocked, 0, sizeof(int)));
         lensRays = 0.0;
     }
+}
+
+int pathtraceExitPupilBins()
+{
+    return dev_lensDevice.pupilBins;
+}
+
+float pathtraceExitPupilBuildMs()
+{
+    return lensPupilMs;
 }
 
 float pathtraceLensBlockedFraction()
@@ -487,16 +521,47 @@ __global__ void generateRayFromCamera(Camera cam, LensDevice lens, int iter, int
                 -(float(x + jx) - (float)cam.resolution.x * 0.5f) * lens.pixelMm,
                 ((float)(y + jy) - (float)cam.resolution.y * 0.5f) * lens.pixelMm,
                 lens.filmDistance);
-            // Aimed at the whole rear element; rays outside the exit pupil come back blocked
-            const float r = lens.rearRadius * sqrtf(u01(rng));
-            const float phi = TWO_PI * u01(rng);
-            const glm::vec3 rear(r * cosf(phi), r * sinf(phi), lens.rearZ);
+            const float u = u01(rng);
+            const float v = u01(rng);
+            const float rFilm = sqrtf(film.x * film.x + film.y * film.y);
+            const float diskArea = PI * lens.aimRadius * lens.aimRadius;
+            glm::vec4 box(0.0f);
+            float area = diskArea;
+            if (lens.useExitPupil)
+            {
+                const int bin = min((int)(rFilm / lens.halfDiagonal * (float)lens.pupilBins), lens.pupilBins - 1);
+                box = lens.pupil[bin];
+                area = (box.z - box.x) * (box.w - box.y);
+            }
+            glm::vec3 rear;
+            if (area < diskArea)
+            {
+                // The bin's box, built for a film point on +x, turned to this film point's angle
+                const float px = box.x + u * (box.z - box.x);
+                const float py = box.y + v * (box.w - box.y);
+                const float cosA = rFilm > 0.0f ? film.x / rFilm : 1.0f;
+                const float sinA = rFilm > 0.0f ? film.y / rFilm : 0.0f;
+                rear = glm::vec3(cosA * px - sinA * py, sinA * px + cosA * py, lens.rearZ);
+            }
+            else
+            {
+                // The whole rear element, when its disk is the smaller region around the pupil
+                area = diskArea;
+                const float r = lens.aimRadius * sqrtf(u);
+                const float phi = TWO_PI * v;
+                rear = glm::vec3(r * cosf(phi), r * sinf(phi), lens.rearZ);
+            }
             glm::vec3 o = film;
             glm::vec3 dir = glm::normalize(rear - film);
-            const bool out = traceLens(lens.surfaces, lens.count - 1, 0, lens.rearZ, o, dir)
+            // cos^4 of the film-to-rear direction's angle to the axis, over the pdf of the sampled area
+            const float cosTheta = -dir.z;
+            const float cos2 = cosTheta * cosTheta;
+            const float weight = cos2 * cos2 * area / lens.weightNorm;
+            const bool out = area > 0.0f && traceLens(lens.surfaces, lens.count - 1, 0, lens.rearZ, o, dir)
                 && isfinite(o.x + o.y + o.z + dir.x + dir.y + dir.z);
             if (out)
             {
+                segment.color = glm::vec3(weight);
                 // Lens z runs against view, with the entrance pupil at cam.position
                 segment.ray.origin = cam.position
                     + (cam.right * o.x + cam.up * o.y + cam.view * (lens.entrancePupilZ - o.z)) * lens.mmToScene;
@@ -902,6 +967,9 @@ void pathtrace(uchar4* pbo, int iter)
     }
     LensDevice lens = dev_lensDevice;
     lens.blocked = cam.type == CAMERA_REAL_LENS && dev_lens != nullptr ? dev_lensBlocked : nullptr;
+    lens.useExitPupil = useExitPupil ? 1 : 0;
+    const float filmToRear = lens.filmDistance - lens.rearZ;
+    lens.weightNorm = usePhysicalCameraWeight ? filmToRear * filmToRear : lensPupil0Area;
     if (lens.blocked != nullptr)
     {
         lensRays += pixelcount;

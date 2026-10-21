@@ -20,6 +20,8 @@ struct Options
     // Off by default: the sort's gather costs more than it saves the shade kernel (README, Performance).
     bool materialSort = false;
     bool compaction = true;
+    bool exitPupil = true;
+    bool physicalCameraWeight = false;
     bool nee = true;
     bool optix = true;
     bool optixValidation = false;

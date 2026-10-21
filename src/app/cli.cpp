@@ -12,7 +12,7 @@ const char* const USAGE =
     "Usage: %s SCENE [--headless] [--spp N] [--res WxH] [--depth N] [--out PATH.png] [--env FILE]\n"
     "                     [--no-rr] [--no-aa] [--sort] [--no-compact] [--no-nee] [--no-env-nee] [--no-env-compensation]\n"
     "                     [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
-    "                     [--lens pinhole|thin|FILE] [--aperture R] [--focus D]\n"
+    "                     [--lens pinhole|thin|FILE] [--aperture R] [--focus D] [--no-exit-pupil] [--camera-weight simple|physical]\n"
     "                     [--no-optix] [--optix-validate] [--timing]\n"
     "       %s --list\n"
     "  SCENE            a scene .json, a .gltf / .glb file that is the whole scene, or a scene name:\n"
@@ -30,6 +30,9 @@ const char* const USAGE =
     "                   in scenes/lenses/ (a .json prescription) for the real lens\n"
     "  --aperture R     the thin lens's aperture radius, scene units (0 is a pinhole)\n"
     "  --focus D        the thin lens's focus distance, scene units (default: the distance to LOOKAT)\n"
+    "  --no-exit-pupil  real lens: aim camera rays at the whole rear element instead of the exit pupil table\n"
+    "  --camera-weight  real lens: simple (default; the center pixel wide open weighs 1) or physical\n"
+    "                   (irradiance on the film, which needs an exposure to look right)\n"
     "  --no-rr          disable Russian roulette path termination\n"
     "  --no-aa          no antialiasing: every camera ray goes through its pixel's center\n"
     "  --sort           sort paths by material before shading (off by default: it costs 1.3 to 2x, see the README)\n"
@@ -144,6 +147,17 @@ Options parseArguments(int argc, char** argv)
         else if (a == "--no-compact")
         {
             options.compaction = false;
+        }
+        else if (a == "--no-exit-pupil")
+        {
+            options.exitPupil = false;
+        }
+        else if (a == "--camera-weight")
+        {
+            std::string m = needValue("--camera-weight");
+            if (m == "simple")        options.physicalCameraWeight = false;
+            else if (m == "physical") options.physicalCameraWeight = true;
+            else fatal("--camera-weight expects simple or physical, not \"%s\"", m.c_str());
         }
         else if (a == "--no-nee")
         {
