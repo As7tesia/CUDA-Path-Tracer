@@ -9,8 +9,6 @@
 
 namespace
 {
-// Workspace, allocated by wavefrontInit. The spare buffers trade places with
-// the caller's buffers on every swap (ping pong)
 int capacity = 0;
 PathSegment* dev_sparePaths = nullptr;
 ShadeableIntersection* dev_spareIntersections = nullptr;
@@ -20,22 +18,15 @@ int* dev_sortedKeys = nullptr;     // required by CUB, unused afterwards
 void* dev_cubTemp = nullptr;
 size_t cubTempBytes = 0;
 
-// Three survivor counters. The current bounce appends into
-// dev_survivorCounts[survivorSlot] and zeroes the next slot; the slot moves on
-// by one per bounce and carries over from one iteration to the next, so no
-// reset is needed between iterations.
+// Slots move on per bounce and carry over between iterations, so no reset is needed
 int* dev_survivorCounts = nullptr;
 int survivorSlot = 0;
 
-// The shadow queue (wavefront_ops.h): one ray buffer and two counters. The
-// shade kernel appends into dev_shadowCounts[shadowSlot]; the slot flips per
-// shade launch and carries over between iterations, like survivorSlot.
 ShadowRay* dev_shadowRays = nullptr;
 int* dev_shadowCounts = nullptr;
 int shadowSlot = 0;
 
-// Also catches a missing wavefrontInit: CUB treats a null temp pointer as a
-// size query and would return success without doing any work.
+// Also catches a missing wavefrontInit: CUB treats a null temp pointer as a size query
 void checkCapacity(int numPaths)
 {
     if (numPaths > capacity)
@@ -53,13 +44,8 @@ __global__ void fillIndices(int n, int* indices)
     }
 }
 
-// Position i of the outputs receives element sortedIndices[i] of the inputs.
-// The struct copies below have to be memcpys, which the compiler turns into
-// all loads first, then all stores. glm 0.9.6 defined the vectors' operator=
-// by hand, which made the structs non-trivially-copyable: the copies became
-// member-wise statements the compiler could not reorder (the pointers might
-// alias), one memory round trip per word, and this kernel ran 3 to 4x slower
-// than the same bytes moved as a block.
+// The struct copies must be memcpys (all loads, then all stores): a
+// hand-written glm operator= once made them member-wise and this kernel 3 to 4x slower.
 static_assert(std::is_trivially_copyable<PathSegment>::value,
     "PathSegment must be trivially copyable so the gather copies it as a block");
 static_assert(std::is_trivially_copyable<ShadeableIntersection>::value,
@@ -94,8 +80,6 @@ void wavefrontInit(int maxPaths)
     CUDA_CHECK(cudaMemset(dev_shadowCounts, 0, 2 * sizeof(int)));
     shadowSlot = 0;
 
-    // With a null temp pointer CUB only reports how much temporary storage it
-    // needs, here for the sort at the largest input.
     CUDA_CHECK(cub::DeviceRadixSort::SortPairs(nullptr, cubTempBytes, dev_sortedKeys, dev_sortedKeys,
         dev_indices, dev_sortedIndices, maxPaths));
     CUDA_CHECK(cudaMalloc(&dev_cubTemp, cubTempBytes));
@@ -152,8 +136,7 @@ ShadowQueue wavefrontSwapShadowQueue()
 
 int wavefrontCountSurvivors(cudaStream_t stream)
 {
-    // The host loop needs the count to size the next launches, so this is the
-    // one synchronization per bounce.
+    // The one synchronization per bounce
     int numAlive = 0;
     CUDA_CHECK(cudaMemcpyAsync(&numAlive, dev_survivorCounts + survivorSlot, sizeof(int),
         cudaMemcpyDeviceToHost, stream));
@@ -177,18 +160,14 @@ void sortMaterials(int numPaths, int keyBits, const int* materialIds,
     checkCapacity(numPaths);
 
     const int numBlocks = (numPaths + PATH_BLOCK_SIZE - 1) / PATH_BLOCK_SIZE;
-    // 0, 1, 2, ... into dev_indices, the values the sort carries along
     fillIndices<<<numBlocks, PATH_BLOCK_SIZE, 0, stream>>>(numPaths, dev_indices);
 
-    // Only the low keyBits bits take part: one radix pass instead of four for
-    // a small scene, because CUB's radix sorts 8 bits per pass and sorting
-    // bits 0-31 would take 4 passes.
+    // CUB sorts 8 bits per pass, so only the low keyBits bits take part
     size_t bytes = cubTempBytes;
     CUDA_CHECK(cub::DeviceRadixSort::SortPairs(dev_cubTemp, bytes,
         materialIds, dev_sortedKeys, dev_indices, dev_sortedIndices,
         numPaths, 0, keyBits, stream));
 
-    // Move the paths themselves, so shadeMaterial's reads stay coalesced.
     gatherByIndex<<<numBlocks, PATH_BLOCK_SIZE, 0, stream>>>(numPaths, dev_sortedIndices,
         paths, intersections, dev_sparePaths, dev_spareIntersections);
 

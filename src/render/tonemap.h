@@ -1,26 +1,20 @@
 #pragma once
 
-// View transform: scene-linear RGB -> display-encoded sRGB in [0, 1].
-// Shared by the viewport kernel (sendImageToPBO) and the PNG writer
-// (saveImage) so what you see is what gets saved. Never touches the
-// accumulation buffer; it is applied at display / save time only.
+// View transform: scene-linear RGB to display-encoded sRGB, applied at
+// display and save time only.
 
 #include <cuda_runtime.h>
 #include <glm/glm.hpp>
 
 enum ToneMapMode
 {
-    TONEMAP_NONE = 0,   // clamp only, no gamma, base-code behavior.
-    TONEMAP_ACES = 1,   // ACES fit (Narkowicz / Hill) + sRGB encode
-    TONEMAP_AGX  = 2,   // Sobotka AgX (Wrensch minimal fit) + sRGB encode
-    TONEMAP_AGX_PUNCHY = 3,   // AgX with the "punchy" look: more contrast and saturation
+    TONEMAP_NONE = 0,   // clamp only, no gamma
+    TONEMAP_ACES = 1,
+    TONEMAP_AGX  = 2,
+    TONEMAP_AGX_PUNCHY = 3,
 };
 
-// Which ACES fit `aces` uses. 0 = Narkowicz single rational curve, per channel.
-// 1 = Stephen Hill's fit with the sRGB -> AP1 -> sRGB round trip, scaled by
-// 1/0.6 on input so its brightness matches Narkowicz at the same exposure
-// (same convention as three.js). Compile-time on purpose: the difference on
-// most scenes is small and not worth a runtime flag.
+// 0 = Narkowicz per-channel fit, 1 = Stephen Hill's fit scaled by 1/0.6 on input (three.js convention).
 #define ACES_FIT_HILL 0
 
 __host__ __device__ inline float srgbEncode(float c)
@@ -41,9 +35,8 @@ __host__ __device__ inline glm::vec3 acesFit(glm::vec3 x)
     return glm::clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.f, 1.f);
 }
 
-// Stephen Hill's ACES fit, from ACES.hlsl in MJP's BakingLab (MIT).
-// sRGB -> AP1, rational RRT+ODT curve, AP1 -> sRGB. The reference lists the
-// matrices row-major for HLSL mul(M, v), but glm's constructor is column-major, thus the transposes
+// Stephen Hill's ACES fit, from ACES.hlsl in MJP's BakingLab (MIT). The
+// reference lists the matrices row-major for HLSL, hence the transposes.
 __host__ __device__ inline glm::vec3 acesHillFit(glm::vec3 c)
 {
     const glm::mat3 inputMat = glm::transpose(glm::mat3(
@@ -63,9 +56,8 @@ __host__ __device__ inline glm::vec3 acesHillFit(glm::vec3 c)
     return glm::clamp(v, 0.f, 1.f);
 }
 
-// AgX after Troy Sobotka, analytic form from Benjamin Wrensch's
-// "Minimal AgX Implementation". Matrices are column-major, same argument
-// order as the GLSL mat3 constructor in the reference.
+// AgX after Troy Sobotka, analytic form from Benjamin Wrensch's "Minimal AgX
+// Implementation". Matrices are column-major like the reference's GLSL.
 __host__ __device__ inline glm::vec3 agxSigmoid(glm::vec3 x)
 {
     glm::vec3 x2 = x * x;
@@ -79,9 +71,7 @@ __host__ __device__ inline glm::vec3 agxSigmoid(glm::vec3 x)
          - 0.00232f;
 }
 
-// AgX "punchy" look from the same reference: an ASC CDL grade (slope, offset,
-// power, then saturation about luma) applied in the sigmoid's output space,
-// before the outset matrix. Blender ships the same look under that name.
+// The "punchy" look from the same reference; Blender ships it under that name.
 __host__ __device__ inline glm::vec3 agxLookPunchy(glm::vec3 val)
 {
     const glm::vec3 lw(0.2126f, 0.7152f, 0.0722f);
@@ -106,7 +96,6 @@ __host__ __device__ inline glm::vec3 agx(glm::vec3 val, bool punchy)
     const float maxEv = 4.026069f;
 
     val = inset * val;
-    // log2 of 0 is -inf, which the clamp handles. Inputs are non-negative.
     val = glm::vec3(log2f(val.x), log2f(val.y), log2f(val.z));
     val = glm::clamp(val, minEv, maxEv);
     val = (val - minEv) / (maxEv - minEv);
@@ -116,8 +105,7 @@ __host__ __device__ inline glm::vec3 agx(glm::vec3 val, bool punchy)
         val = agxLookPunchy(glm::clamp(val, 0.f, 1.f));
     }
     val = outset * val;
-    // The sigmoid output is already 2.2-gamma encoded. Linearize and
-    // re-encode with the proper sRGB curve so all modes share one OETF.
+    // The sigmoid output is 2.2-gamma encoded; linearize and re-encode as sRGB
     val = glm::clamp(val, 0.f, 1.f);
     val = glm::vec3(powf(val.x, 2.2f), powf(val.y, 2.2f), powf(val.z, 2.2f));
     return srgbEncode(val);

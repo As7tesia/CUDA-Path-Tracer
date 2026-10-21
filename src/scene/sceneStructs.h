@@ -11,7 +11,7 @@ enum class GeomType
 {
     SPHERE,
     CUBE,
-    MESH  // one glTF primitive's triangles, see TriangleMesh
+    MESH  // one glTF primitive's triangles
 };
 
 struct Ray
@@ -20,37 +20,26 @@ struct Ray
     glm::vec3 direction;
 };
 
-// One glTF primitive: triCount consecutive triangles of the scene's flat
-// index array. Each index points into the flat vertex arrays (positions,
-// normals, uvs and tangents share it), already offset, so a triangle needs no
-// base vertex. A Geom of type MESH instances one of these under its
-// transform; several Geoms may share one (a mesh used by more than one glTF
-// node).
+// One glTF primitive's triangles in the flat index array; indices are already offset, so no base vertex.
 struct TriangleMesh
 {
     int indexOffset;  // first triangle in the index array
     int triCount;
 };
 
-// Device pointers to the scene's flat mesh arrays, uploaded once by
-// pathtraceInit and read by both intersection paths (the naive kernel loops
-// over them; OptiX builds its acceleration structures from them and reads the
-// vertex attributes in its hit programs). Read-only after the upload.
+// Device pointers to the flat mesh arrays; read-only after upload.
 struct MeshBuffers
 {
     glm::vec3* positions;
     glm::vec3* normals;     // per vertex, unit length, object space
     glm::vec2* uvs;         // per vertex, TEXCOORD_0; (0, 0) for a primitive without one
-    // per vertex, object space: xyz along increasing u, w = +-1 the bitangent
-    // sign (bitangent = w * cross(normal, tangent), as in glTF); all zero for
-    // a primitive whose material has no normal map
+    // Object space, xyz along increasing u; bitangent = w * cross(normal, tangent) as in glTF; zero without a normal map.
     glm::vec4* tangents;
     glm::ivec3* indices;    // per triangle, into the vertex arrays
     TriangleMesh* meshes;   // indexed by Geom::meshId
 };
 
-// A decoded glTF image: 8-bit RGBA, rows top to bottom. glTF puts uv (0, 0)
-// at the top left of the image, so a texture fetch at uv reads it as stored.
+// 8-bit RGBA, rows top to bottom; glTF's uv (0, 0) is the top left, so fetches read it as stored.
 struct TextureImage
 {
     int width;
@@ -58,10 +47,6 @@ struct TextureImage
     std::vector<unsigned char> rgba;  // width * height * 4
 };
 
-// One image as a material slot reads it: the glTF sampler's wrap and filter
-// modes, and whether the texels are sRGB-encoded color, which the texture
-// unit decodes to linear, or linear data. Becomes one CUDA texture object
-// (textures.cpp); several may share an image.
 struct Texture
 {
     int image;  // into Scene::textureImages
@@ -76,15 +61,9 @@ struct Geom
     GeomType type;
     int materialId;
     int meshId;  // MESH only: which TriangleMesh; -1 for the primitives
-    // MESH only: -1 when transform mirrors (negative determinant), which
-    // flips the bitangent sign of the mesh's tangents; 1 otherwise
+    // MESH only: -1 when transform mirrors, flipping the bitangent sign.
     float tangentSign;
-    // Light linking, with Cycles' semantics: every light and emitter belongs
-    // to one of 32 groups, and bit k of lightMask is set when this object
-    // receives light from group k. Group 0 holds every unlinked light, so
-    // bit 0 is always set; without linking the mask is all ones. lightGroup
-    // is the group this object's own emission belongs to when it emits. Set
-    // from a glTF node's extras (gltf_loader.cpp); a scene JSON cannot link.
+    // Cycles-style light linking: bit k set receives group k; group 0 holds unlinked lights, so bit 0 is always set.
     unsigned int lightMask = 0xffffffffu;
     int lightGroup = 0;
     glm::mat4 transform;
@@ -92,7 +71,6 @@ struct Geom
     glm::mat4 invTranspose;
 };
 
-// glTF's alpha modes. The alpha test is alphaCutOut in mesh_hit.h.
 enum AlphaMode
 {
     ALPHA_OPAQUE,
@@ -100,30 +78,24 @@ enum AlphaMode
     ALPHA_BLEND  // alpha is coverage: a hit counts with probability alpha
 };
 
-// Every material is glTF's metallic-roughness model with the extensions
-// bsdf.h lists, shaded by scatterPbr. A glTF material fills it from the file
-// (gltf_loader.cpp); a scene JSON's material types are translated into it
-// (scene.cpp). The defaults are glTF's default material: white, fully
-// metallic, fully rough. Every texture slot indexes Scene::textures (-1 for
-// none), and the texture value multiplies the factor it belongs to.
+// glTF metallic-roughness with its extensions; defaults are glTF's default material. Texture slots are -1 for none.
 struct Material
 {
-    glm::vec3 baseColor = glm::vec3(1.0f);        // base color factor
-    float ior = 1.5f;                             // KHR_materials_ior; 0 means a Fresnel term of 1
-    float alpha = 1.0f;                           // base color factor alpha
+    glm::vec3 baseColor = glm::vec3(1.0f);
+    float ior = 1.5f;                             // 0 means a Fresnel term of 1
+    float alpha = 1.0f;
     AlphaMode alphaMode = ALPHA_OPAQUE;
     float alphaCutoff = 0.5f;
     float metallic = 1.0f;
     float roughness = 1.0f;
     float normalScale = 1.0f;                     // scales the normal map's x and y
     glm::vec3 emission = glm::vec3(0.0f);         // emissive factor * KHR_materials_emissive_strength
-    float transmission = 0.0f;                    // KHR_materials_transmission
-    float specularFactor = 1.0f;                  // KHR_materials_specular
+    float transmission = 0.0f;
+    float specularFactor = 1.0f;
     glm::vec3 specularColorFactor = glm::vec3(1.0f);
-    float clearcoat = 0.0f;                       // KHR_materials_clearcoat
+    float clearcoat = 0.0f;
     float clearcoatRoughness = 0.0f;
-    // KHR_materials_volume: absorption per unit of world distance inside the
-    // object, -ln(attenuationColor) / attenuationDistance; zero without it
+    // Per unit of world distance: -ln(attenuationColor) / attenuationDistance.
     glm::vec3 absorption = glm::vec3(0.0f);
     int baseColorTexture = -1;                    // sRGB rgb, linear alpha
     int metallicRoughnessTexture = -1;            // G roughness, B metallic
@@ -132,15 +104,12 @@ struct Material
     int transmissionTexture = -1;                 // R
 };
 
-// How generateRayFromCamera makes a ray. All three stay selectable: the
-// pinhole is the cmp reference, the thin lens the README baseline against
-// the real lens.
+// The pinhole stays as the cmp reference, the thin lens as the baseline against the real lens.
 enum CameraType
 {
     CAMERA_PINHOLE,
     CAMERA_THIN_LENS,
-    // A lens prescription (Scene::lens), traced surface by surface from the
-    // film out (render/lens_trace.h)
+    // Traced surface by surface from the film out.
     CAMERA_REAL_LENS,
 };
 
@@ -153,17 +122,13 @@ struct Camera
     glm::vec3 up;
     glm::vec3 right;
     glm::vec2 pixelLength;
-    // right is -cross(view, up) instead of cross(view, up), so the image is
-    // flipped left to right. Set by a glTF camera whose transform mirrors.
+    // right is -cross(view, up), flipping the image left to right.
     bool mirrored;
     CameraType type;
-    // The thin lens: the aperture's radius, in the plane through position
-    // spanned by right and up, and the distance along view to the plane in
-    // focus. Both in scene units.
+    // Scene units.
     float apertureRadius;
     float focusDistance;
-    // Scene units per meter, which sizes the real lens (in millimeters)
-    // against the scene. 1 unless the scene says otherwise.
+    // Sizes the real lens (in mm) against the scene.
     float unitsPerMeter;
 };
 
@@ -182,54 +147,30 @@ struct PathSegment
     glm::vec3 color;
     int pixelIndex;
     int remainingBounces;
-    // The material the path is inside, -1 in air: set when it refracts into
-    // a PBR surface, cleared when it refracts out. Its KHR_materials_volume
-    // absorption applies to every segment in between.
+    // Material the path is inside, -1 in air.
     int medium;
-    // The solid-angle density scatterPbr sampled ray.direction with, over the
-    // BSDF's rough lobes (evalPbr's pdf). 0 for a camera ray and for a smooth
-    // lobe's direction, which next event estimation cannot sample: the
-    // emission such a ray reaches counts in full instead of through a MIS
-    // weight.
+    // Solid-angle pdf over the rough lobes; 0 for a camera ray or smooth lobe, whose hit emission counts without MIS.
     float pdf;
-    // Geom::lightMask of the surface the ray left: the emission of an
-    // emitter it hits counts only when that surface receives the emitter's
-    // group. All ones for a camera ray, since linking never hides an emitter
-    // from the camera.
+    // Geom::lightMask of the surface the ray left; all ones for a camera ray.
     unsigned int receiverMask;
 };
 
-// Use with a corresponding PathSegment to do:
-// 1) color contribution computation
-// 2) BSDF evaluation: generate a new ray
 struct ShadeableIntersection
 {
   float t;
   glm::vec3 surfaceNormal;
-  glm::vec2 uv;  // texture coordinates at the hit; (0, 0) on spheres and cubes
-  // World-space tangent at the hit (xyz, not unit length) and bitangent sign
-  // (w), see MeshBuffers::tangents. The sign already includes a mirroring
-  // instance transform. All zero on spheres, cubes and meshes without one.
+  glm::vec2 uv;  // (0, 0) on spheres and cubes
+  // World space, not unit length; w already includes a mirroring transform. Zero without a tangent.
   glm::vec4 tangent;
   int materialId;
   bool outside;
-  // |cos| between the ray and the geometric normal at the hit. surfaceNormal
-  // is the interpolated normal on a mesh, and the light pdf of a hit on an
-  // emitter has to use the same flat-triangle cosine next event estimation
-  // samples the emitter with. Written by the OptiX hit programs only: next
-  // event estimation needs OptiX, so the naive kernel leaves it unset.
+  // |cos| to the flat-triangle normal, matching NEE's light pdf; written by the OptiX hit programs only.
   float cosGeometric;
-  // The hit Geom's light linking (Geom::lightMask, Geom::lightGroup): what
-  // the surface receives, for the light sample taken here and the path's
-  // next ray, and the group its own emission belongs to.
   unsigned int lightMask;
   int lightGroup;
 };
 
-// One emissive triangle in world space, a light next event estimation picks
-// (lights.cpp). cross(e1, e2) is the front-face normal, so a mirroring
-// instance transform has its corners 1 and 2 swapped. Cubes have uv (0, 0)
-// at every corner.
+// cross(e1, e2) is the front-face normal, so a mirroring transform swaps corners 1 and 2.
 struct LightTriangle
 {
     glm::vec3 p0;
@@ -239,7 +180,7 @@ struct LightTriangle
     glm::vec2 uv1;
     glm::vec2 uv2;
     int materialId;
-    int group;  // the Geom's lightGroup (light linking)
+    int group;  // the Geom's lightGroup
 };
 
 enum PunctualLightType
@@ -249,36 +190,26 @@ enum PunctualLightType
     LIGHT_DISTANT
 };
 
-// A light without a surface: a KHR_lights_punctual point, spot or
-// directional light, or a PBRT distant light. No ray can hit one, so only
-// next event estimation reaches it, and its light counts without a MIS
-// weight.
+// A light without a surface; only NEE reaches it, without a MIS weight.
 struct PunctualLight
 {
     PunctualLightType type;
     glm::vec3 position;   // LIGHT_POINT, LIGHT_SPOT: where it is; LIGHT_DISTANT: unit direction toward it
-    // LIGHT_POINT: radiant intensity (W/sr); LIGHT_SPOT: the same on its
-    // axis; LIGHT_DISTANT: irradiance facing it (W/m^2)
+    // W/sr for point and spot (on axis), W/m^2 irradiance facing it for distant.
     glm::vec3 intensity;
-    // LIGHT_SPOT: the unit direction it shines in and its cone, as the
-    // cosines of the half angles: full intensity inside the inner cone,
-    // nothing outside the outer one, a smoothstep in the cosine between
-    // (spotFalloff in nee.h). cosInner == cosOuter is a hard edge.
+    // LIGHT_SPOT only; cones as half-angle cosines, cosInner == cosOuter is a hard edge.
     glm::vec3 direction;
     float cosOuter;
     float cosInner;
-    int group;            // light linking group, 0 for an unlinked light; its pick probability is in LightList::punctualPickPdf
+    int group;            // light linking group, 0 for an unlinked light
 };
 
-// A shadow ray of next event estimation, queued by shadeMaterial and traced
-// by the next OptiX launch: when nothing lies between origin and tMax, the
-// light is visible and contribution goes into the pixel.
 struct ShadowRay
 {
     glm::vec3 origin;
     glm::vec3 direction;     // unit length
     float tMax;              // just short of the point on the light
-    glm::vec3 contribution;  // the light sample's whole term, MIS weight included
+    glm::vec3 contribution;  // MIS weight included
     int pixelIndex;
-    unsigned int alphaSeed;  // seeds the ALPHA_BLEND test, see shadowAlphaSeed (mesh_hit.h)
+    unsigned int alphaSeed;  // seeds the ALPHA_BLEND test
 };

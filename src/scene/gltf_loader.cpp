@@ -1,13 +1,5 @@
-// glTF loading through tinygltf. See gltf_loader.h.
-//
-// This is the one translation unit that compiles tinygltf's implementation.
-// The repo already has nlohmann's json.hpp, so tinygltf uses that instead of
-// its own copy. Images are decoded by tinygltf's built-in loader through
-// stb_image (implementation compiled in stb.cpp), whether they are external
-// files, data URIs or buffer views: every image comes out as RGBA, 8 or 16
-// bits per channel. An image file that is missing is a warning and the image
-// stays empty; one that exists and does not decode fails the whole load.
-// The glTF writer is off.
+// glTF loading through tinygltf; the one TU that compiles tinygltf's implementation, on the repo's json.hpp.
+// Images decode through stb_image to RGBA, 8 or 16 bits; a missing image file only warns, an undecodable one fails the load.
 
 #define TINYGLTF_IMPLEMENTATION
 #define TINYGLTF_NO_INCLUDE_JSON
@@ -38,13 +30,10 @@
 
 namespace
 {
-// Lumens per watt, the photometric constant KHR_lights_punctual's candela
-// and lux are converted with (see Loader::lightFor).
+// Photometric constant for KHR_lights_punctual's candela and lux.
 constexpr double LUMENS_PER_WATT = 683.0;
 
-// A window onto one accessor's elements: glTF stores vertex attributes in
-// buffer views that may interleave several attributes, so element i sits at
-// data + i * stride, not at i * sizeof(element).
+// One accessor's elements; buffer views may interleave attributes, so element i sits at data + i * stride.
 struct AccessorView
 {
     const unsigned char* data = nullptr;
@@ -90,7 +79,7 @@ bool viewAccessor(const tinygltf::Model& model, int accessorIndex, AccessorView&
         err = "accessor with an unsupported layout";
         return false;
     }
-    // count is bounded by the buffer size first so the product below cannot wrap.
+    // count is bounded by the buffer size so the product cannot wrap.
     const size_t begin = bv.byteOffset + a.byteOffset;
     const size_t end = a.count == 0 ? begin : begin + (a.count - 1) * stride + componentSize * numComponents;
     if (a.count > buffer.data.size() || end > buffer.data.size())
@@ -117,7 +106,6 @@ glm::vec3 readVec3(const AccessorView& v, size_t i)
     return glm::vec3(f[0], f[1], f[2]);
 }
 
-// Index accessors come in three widths, all unsigned; readIndex assumes one of them.
 bool isIndexType(int componentType)
 {
     return componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE
@@ -139,8 +127,7 @@ unsigned int readIndex(const AccessorView& v, size_t i)
     }
 }
 
-// Texture coordinates come as floats, or as unsigned bytes or shorts that
-// glTF requires to be normalized to [0, 1]; readUv assumes one of the three.
+// Integer texture coordinates are normalized to [0, 1] per the glTF spec.
 bool isUvType(int componentType)
 {
     return componentType == TINYGLTF_COMPONENT_TYPE_FLOAT
@@ -168,7 +155,6 @@ glm::vec2 readUv(const AccessorView& v, size_t i)
     }
 }
 
-// glTF sampler wrap mode to CUDA's. REPEAT is glTF's default.
 cudaTextureAddressMode addressMode(int gltfWrap)
 {
     switch (gltfWrap)
@@ -182,8 +168,6 @@ cudaTextureAddressMode addressMode(int gltfWrap)
     }
 }
 
-// A node's transform relative to its parent: either a full matrix or
-// translation * rotation * scale, each part optional.
 glm::mat4 nodeLocalMatrix(const tinygltf::Node& node)
 {
     if (node.matrix.size() == 16)
@@ -218,9 +202,7 @@ glm::mat4 nodeLocalMatrix(const tinygltf::Node& node)
     return t * r * s;
 }
 
-// Extensions and extras reach this file as raw JSON values. object[key], or
-// a null value when object is not a JSON object or has no such member
-// (Value::Get asserts on anything that is not an object).
+// object[key], or null when absent; Value::Get asserts on non-objects.
 const tinygltf::Value& member(const tinygltf::Value& object, const char* key)
 {
     static const tinygltf::Value null;
@@ -233,8 +215,6 @@ float numberMember(const tinygltf::Value& object, const char* key, float fallbac
     return value.IsNumber() ? (float)value.GetNumberAsDouble() : fallback;
 }
 
-// One of a material's extensions as a JSON object, or a null value when the
-// material does not have it.
 const tinygltf::Value& extension(const tinygltf::Material& material, const char* name)
 {
     static const tinygltf::Value null;
@@ -242,14 +222,11 @@ const tinygltf::Value& extension(const tinygltf::Material& material, const char*
     return found == material.extensions.end() ? null : found->second;
 }
 
-// A number from one of a material's extensions, or fallback when the
-// material does not have the extension or the extension does not say.
 float extensionNumber(const tinygltf::Material& material, const char* name, const char* key, float fallback)
 {
     return numberMember(extension(material, name), key, fallback);
 }
 
-// A color (three numbers) from one of a material's extensions, or fallback.
 glm::vec3 extensionColor(const tinygltf::Material& material, const char* name, const char* key, glm::vec3 fallback)
 {
     const tinygltf::Value& value = member(extension(material, name), key);
@@ -270,8 +247,7 @@ glm::vec3 extensionColor(const tinygltf::Material& material, const char* name, c
     return color;
 }
 
-// A texture slot inside one of a material's extensions ({"index", "texCoord"}),
-// in the form tinygltf gives the core slots; index -1 when there is none.
+// An extension's texture slot as a TextureInfo; index -1 when there is none.
 tinygltf::TextureInfo extensionTexture(const tinygltf::Material& material, const char* name, const char* key)
 {
     const tinygltf::Value& slot = member(extension(material, name), key);
@@ -281,7 +257,6 @@ tinygltf::TextureInfo extensionTexture(const tinygltf::Material& material, const
     return info;
 }
 
-// The material extensions this loader reads. Others are named once per file.
 const char* const READ_EXTENSIONS[] = {
     "KHR_materials_emissive_strength",
     "KHR_materials_ior",
@@ -303,16 +278,12 @@ bool isReadExtension(const std::string& name)
     return false;
 }
 
-// Names, once per file, what the materials ask for that the loader does not
-// do, so a render that differs from the asset's look explains itself. The
-// occlusion texture is left out on purpose and not named: it stands in for
-// the shadowing a path tracer computes anyway.
+// Prints each unsupported material extension once per file; occlusion is not named, path tracing computes it.
 void reportUnsupportedMaterialFeatures(const tinygltf::Model& model, const std::string& path)
 {
     std::map<std::string, int> extensions;
     for (const tinygltf::Material& material : model.materials)
     {
-        // Counted once per material, however many of its slots carry them.
         std::set<std::string> unread;
         for (const auto& e : material.extensions)
         {
@@ -321,8 +292,7 @@ void reportUnsupportedMaterialFeatures(const tinygltf::Model& model, const std::
                 unread.insert(e.first);
             }
         }
-        // Texture-level extensions (KHR_texture_transform) sit on the slots
-        // the loader reads, not on the material; none of them is applied.
+        // Texture-level extensions (KHR_texture_transform) are not applied.
         const tinygltf::ExtensionMap* slots[] = {
             &material.pbrMetallicRoughness.baseColorTexture.extensions,
             &material.pbrMetallicRoughness.metallicRoughnessTexture.extensions,
@@ -356,10 +326,7 @@ void reportUnsupportedMaterialFeatures(const tinygltf::Model& model, const std::
     }
 }
 
-// The render settings of a research scene, see GltfRenderHints. Two are left
-// alone. fov_degrees is PBRT's angle across the shorter side of the image,
-// and the camera's yfov already is the vertical angle. samples_per_pixel is
-// tuned for PBRT, whose paths sample the lights and need far fewer samples.
+// fov_degrees is skipped (yfov already holds it) and samples_per_pixel too (tuned for PBRT).
 GltfRenderHints renderHints(const tinygltf::Model& model)
 {
     GltfRenderHints hints;
@@ -374,13 +341,8 @@ GltfRenderHints renderHints(const tinygltf::Model& model)
     return hints;
 }
 
-// Light linking from a node's extras, as the Stardust exporter writes them
-// (scenes/blender-migration/tools/export_stardust.py): "lightMask", the bits
-// of the groups the node's meshes receive, and "lightGroup", the group the
-// node's light or emissive meshes belong to (see Geom::lightMask). A node
-// without them receives every group and emits in group 0. The exporter keeps
-// groups to 0..30 so a mask fits a JSON integer; the low 32 bits are taken
-// in case a parser read it as a negative int.
+// Light linking from node extras lightMask/lightGroup, as scenes/blender-migration/tools/export_stardust.py writes them.
+// The exporter keeps groups to 0..30 so a mask fits a JSON integer; the low 32 bits cover a negative parse.
 struct LightLink
 {
     unsigned int mask = 0xffffffffu;
@@ -412,16 +374,13 @@ LightLink lightLinkFor(const tinygltf::Node& node, const std::string& path)
     return link;
 }
 
-// Whether an entry of extras.pbrt.light_sources is a PBRT infinite light.
 bool isInfiniteLight(const tinygltf::Value& light)
 {
     const tinygltf::Value& kind = member(light, "pbrt");
     return kind.IsString() && kind.Get<std::string>() == "infinite";
 }
 
-// The file's first PBRT infinite light, see GltfEnvironment. Its "source"
-// path is relative to the PBRT scene's folder, which the research scenes
-// keep as source/ next to gltf/.
+// "source" is relative to the PBRT scene folder, which the research scenes keep as source/ next to gltf/.
 std::optional<GltfEnvironment> pbrtEnvironment(const tinygltf::Model& model, const std::string& path)
 {
     const tinygltf::Value& sources = member(member(model.extras, "pbrt"), "light_sources");
@@ -456,18 +415,13 @@ std::optional<GltfEnvironment> pbrtEnvironment(const tinygltf::Model& model, con
     return std::nullopt;
 }
 
-// Whether an entry of extras.pbrt.light_sources is a PBRT distant light.
 bool isDistantLight(const tinygltf::Value& light)
 {
     const tinygltf::Value& kind = member(light, "pbrt");
     return kind.IsString() && kind.Get<std::string>() == "distant";
 }
 
-// The file's PBRT distant lights, appended to the scene's punctual lights.
-// radiance_rgb is the irradiance facing the light, in the units the
-// emission uses; the light shines from "from" toward "to" under
-// pbrt_transform, which lists PBRT's matrix column by column. The research
-// scenes keep PBRT's world coordinates, so the direction needs nothing else.
+// radiance_rgb is irradiance facing the light; pbrt_transform is column-major, in PBRT's world coordinates.
 void addPbrtDistantLights(const tinygltf::Model& model, Scene& scene)
 {
     const tinygltf::Value& sources = member(member(model.extras, "pbrt"), "light_sources");
@@ -506,14 +460,7 @@ void addPbrtDistantLights(const tinygltf::Model& model, Scene& scene)
     }
 }
 
-// Names the lights in the file that do not reach the render, so a dark image
-// explains itself. Emissive surfaces light a scene, and so do the punctual
-// lights (KHR_lights_punctual, which tinygltf parses into model.lights).
-// PBRT's infinite and distant lights become the environment and distant
-// lights when the file is the whole scene (sceneLightsRead). The research
-// scenes list the PBRT lights under extras.pbrt.light_sources and mark those
-// glTF cannot express as "metadata_only"; the list's area lights are in the
-// file as emissive meshes.
+// Prints the file's lights that do not reach the render; research scenes mark PBRT-only lights "metadata_only".
 void reportUnusedLights(const tinygltf::Model& model, const std::string& path, bool sceneLightsRead)
 {
     int dark = 0;
@@ -556,15 +503,14 @@ void reportUnusedLights(const tinygltf::Model& model, const std::string& path, b
     }
 }
 
-// One primitive as MikkTSpace sees it: triangles over the primitive's own
-// vertices, and a tangent out for every triangle corner.
+// One primitive as MikkTSpace sees it.
 struct MikkPrimitive
 {
     const glm::vec3* positions;
     const glm::vec3* normals;
     const glm::vec2* uvs;
     const std::vector<unsigned int>& indices;  // three per triangle
-    std::vector<glm::vec4> corners;            // tangent and sign per corner, filled by mikkSetTangent
+    std::vector<glm::vec4> corners;            // tangent and sign per corner
 
     unsigned int vertex(int face, int vert) const { return indices[face * 3 + vert]; }
 };
@@ -602,11 +548,7 @@ void mikkNormal(const SMikkTSpaceContext* context, float out[], const int face, 
     out[2] = n.z;
 }
 
-// glTF's v runs down the image, while MikkTSpace (and Blender, where most
-// normal maps are baked against it) take v up. MikkTSpace's bitangent follows
-// increasing v, and glTF wants it toward the top of the image (the normal
-// map's +Y), so it gets 1 - v. The tangent follows u and is the same either
-// way; only the sign changes.
+// glTF's v runs down the image and MikkTSpace's up, so it gets 1 - v; only the bitangent sign changes.
 void mikkTexCoord(const SMikkTSpaceContext* context, float out[], const int face, const int vert)
 {
     const MikkPrimitive& p = mikkData(context);
@@ -622,8 +564,7 @@ void mikkSetTangent(const SMikkTSpaceContext* context, const float tangent[], co
     p.corners[face * 3 + vert] = glm::vec4(tangent[0], tangent[1], tangent[2], sign < 0.0f ? -1.0f : 1.0f);
 }
 
-// State for one file: the model, the scene being filled, and the maps that
-// keep a primitive or a material shared by several nodes as one entry.
+// State for one file; the maps keep entries shared by several nodes as one.
 struct Loader
 {
     const tinygltf::Model& model;
@@ -634,22 +575,14 @@ struct Loader
     std::map<std::pair<int, int>, int> meshIds;        // (glTF mesh, primitive) -> Scene mesh, -1 if unusable
     std::map<std::pair<int, bool>, int> textureIds;    // (glTF texture, sRGB) -> Scene texture, -1 if unusable
     std::map<int, int> imageIds;                       // glTF image -> Scene texture image, -1 if unusable
-    std::optional<GltfCamera> camera;                  // the first usable camera the walk reached
+    std::optional<GltfCamera> camera;
 
-    // A primitive this loader cannot use is skipped, not fatal: the rest of
-    // the file still loads.
     void warn(const char* what, int meshIndex, int primIndex)
     {
         fprintf(stderr, "glTF %s: mesh %d primitive %d skipped: %s\n", path.c_str(), meshIndex, primIndex, what);
     }
 
-    // Every glTF material becomes a Material (the model bsdf.h describes):
-    // the core metallic-roughness factors and texture slots (base color,
-    // metallic-roughness, normal, emissive), the alpha mode, and the factors
-    // of the extensions in READ_EXTENSIONS. Of the extensions' textures only
-    // transmissionTexture is read. A primitive without a material gets glTF's
-    // default material, which is Material's default: white, fully metallic,
-    // fully rough.
+    // Of the extensions' textures only transmissionTexture is read; Material's default is glTF's default material.
     int materialFor(int gltfMaterial)
     {
         if (materialOverride >= 0)
@@ -676,18 +609,13 @@ struct Loader
             m.baseColorTexture = textureFor(pbr.baseColorTexture.index, pbr.baseColorTexture.texCoord, true);
             if (m.baseColorTexture < 0 && pbr.baseColorTexture.index >= 0)
             {
-                // The slot names a texture whose image cannot be used: the
-                // surface shows magenta, so a broken asset is visible in the
-                // render and not only on stderr.
+                // Magenta, so a broken asset shows in the render.
                 m.baseColorTexture = missingTexture();
             }
             m.metallicRoughnessTexture = textureFor(pbr.metallicRoughnessTexture.index, pbr.metallicRoughnessTexture.texCoord, false);
             m.normalTexture = textureFor(source.normalTexture.index, source.normalTexture.texCoord, false);
             m.normalScale = (float)source.normalTexture.scale;
 
-            // Emission is the emissive factor times the emissive texture
-            // times KHR_materials_emissive_strength (1 without it). A black
-            // factor leaves the texture nothing to scale.
             const std::vector<double>& e = source.emissiveFactor;
             const glm::vec3 emissive = e.size() == 3 ? glm::vec3((float)e[0], (float)e[1], (float)e[2]) : glm::vec3(0.0f);
             m.emission = emissive * extensionNumber(source, "KHR_materials_emissive_strength", "emissiveStrength", 1.0f);
@@ -706,8 +634,7 @@ struct Loader
                 m.alphaMode = ALPHA_BLEND;
             }
 
-            // ior 0 is glTF's code for a Fresnel term of 1; any other value
-            // below 1 is invalid and read as 1.
+            // ior 0 means a Fresnel term of 1 in glTF; other values below 1 are invalid.
             m.ior = extensionNumber(source, "KHR_materials_ior", "ior", 1.5f);
             if (m.ior != 0.0f && m.ior < 1.0f)
             {
@@ -721,10 +648,7 @@ struct Loader
                 m.transmissionTexture = textureFor(slot.index, slot.texCoord, false);
             }
 
-            // KHR_materials_volume contributes only its absorption: every
-            // transmissive surface is a solid boundary here, so the
-            // thickness that tells thin-walled from solid is not read. An
-            // absent attenuation distance is infinite, no absorption.
+            // Only the volume's absorption is read: every transmissive surface is solid, thickness is ignored.
             const float distance = extensionNumber(source, "KHR_materials_volume", "attenuationDistance", 0.0f);
             if (distance > 0.0f)
             {
@@ -745,15 +669,7 @@ struct Loader
         return id;
     }
 
-    // The Scene texture for one of a material's texture slots (glTF texture
-    // index and texture coordinate set), or -1 when the slot is empty or its
-    // image is unusable. An empty slot leaves the factor alone; for an
-    // unusable image materialFor gives the base color slot the magenta
-    // texture and leaves the other slots to their factor, since magenta there
-    // would mean a mirror, a sideways normal or a glowing surface. srgb says
-    // the slot holds color (base color, emissive) rather than data. Only
-    // TEXCOORD_0 is loaded, so a slot that names another set is read with
-    // TEXCOORD_0.
+    // The Scene texture for a slot, or -1 when it is empty or unusable. Only TEXCOORD_0 is loaded.
     int textureFor(int index, int texCoord, bool srgb)
     {
         if (index < 0)
@@ -787,10 +703,7 @@ struct Loader
                 const tinygltf::Sampler& sampler = model.samplers[source->sampler];
                 t.wrapU = addressMode(sampler.wrapS);
                 t.wrapV = addressMode(sampler.wrapT);
-                // There are no mipmaps, so only the magnification filter
-                // applies. Minification needs none: the camera jitters its
-                // rays across the pixel, so samples average the texels a
-                // pixel covers.
+                // No mipmaps: pixel jitter averages the texels under a pixel, so only magFilter applies.
                 t.filter = sampler.magFilter == TINYGLTF_TEXTURE_FILTER_NEAREST ? cudaFilterModePoint : cudaFilterModeLinear;
             }
             id = (int)scene.textures.size();
@@ -800,9 +713,7 @@ struct Loader
         return id;
     }
 
-    // The scene's magenta texture (Scene::missingTexture), made the first time
-    // a base color slot needs it: one opaque texel, so an alpha-tested surface
-    // stays visible.
+    // One opaque magenta texel, so an alpha-tested surface stays visible.
     int missingTexture()
     {
         if (scene.missingTexture < 0)
@@ -824,11 +735,7 @@ struct Loader
         return scene.missingTexture;
     }
 
-    // The Scene image for a glTF image, or -1 when tinygltf has no pixels for
-    // it: the file is missing, or there is no image index (-1), which is what
-    // a texture whose image only an extension names (KTX2, WebP) has, as does
-    // a bad texture index. tinygltf decodes to RGBA; 16-bit images are
-    // rounded to 8 bits, (v + 128) / 257 mapping 0..65535 onto 0..255.
+    // -1 when tinygltf has no pixels (missing file, KTX2 or WebP via extension); 16-bit images round to 8 bits.
     int imageFor(int gltfImage)
     {
         auto found = imageIds.find(gltfImage);
@@ -873,8 +780,6 @@ struct Loader
         return id;
     }
 
-    // Keeps the pose of the first perspective camera the walk reaches; a
-    // file's other cameras are ignored.
     void cameraFor(int gltfCamera, const glm::mat4& world)
     {
         if (camera || gltfCamera < 0 || gltfCamera >= (int)model.cameras.size())
@@ -882,9 +787,7 @@ struct Loader
             return;
         }
         const tinygltf::Camera& source = model.cameras[gltfCamera];
-        // The upper 3x3 holds the camera's axes. Its determinant is negative
-        // when the transform mirrors, and zero when a scale of 0 has
-        // flattened the axes, which leaves no direction to look in.
+        // Negative when the transform mirrors, zero when a scale of 0 leaves no direction.
         const float det = glm::determinant(glm::mat3(world));
         if (source.type != "perspective" || source.perspective.yfov <= 0.0 || det == 0.0f)
         {
@@ -901,16 +804,7 @@ struct Loader
         camera = c;
     }
 
-    // A KHR_lights_punctual light at a node, in world space: a point or spot
-    // light at the node's origin, a spot or directional light shining down
-    // the node's -Z axis. glTF gives a point or spot light's intensity in
-    // candela and a directional light's in lux; dividing by 683 lm/W turns
-    // them back into the radiant units the emission uses, undoing the
-    // conversion Blender's exporter makes. A spot's cone is its outer and
-    // inner cone half angles (outer at most 90 degrees, inner at most the
-    // outer), with the falloff spotFalloff in nee.h describes between them.
-    // Lights of intensity 0 are left out (reportUnusedLights names them).
-    // group is the node's light linking group (lightLinkFor).
+    // Spot and directional lights shine down the node's -Z; dividing by 683 lm/W undoes Blender's candela and lux.
     void lightFor(int gltfLight, const glm::mat4& world, int group)
     {
         if (gltfLight < 0 || gltfLight >= (int)model.lights.size())
@@ -954,8 +848,7 @@ struct Loader
         }
     }
 
-    // Appends the primitive's vertices and triangles to the scene's flat
-    // arrays and returns its TriangleMesh index, or -1 if it cannot be used.
+    // The primitive's TriangleMesh index, or -1 if it cannot be used.
     int meshFor(int meshIndex, int primIndex)
     {
         const std::pair<int, int> key(meshIndex, primIndex);
@@ -979,7 +872,6 @@ struct Loader
         }
         std::string err;
 
-        // Positions: required, float VEC3.
         auto posAttr = prim.attributes.find("POSITION");
         AccessorView pos;
         if (posAttr == prim.attributes.end() || !viewAccessor(model, posAttr->second, pos, err) || !isFloatVec3(pos))
@@ -993,9 +885,7 @@ struct Loader
             scene.positions.push_back(readVec3(pos, i));
         }
 
-        // Indices: from the accessor, or 0, 1, 2, ... when the primitive is
-        // not indexed. Stored offset by baseVertex, so they address the
-        // scene's flat arrays directly.
+        // Stored offset by baseVertex, so they address the scene's flat arrays.
         std::vector<unsigned int> local;
         if (prim.indices >= 0)
         {
@@ -1043,10 +933,7 @@ struct Loader
             scene.indices.push_back(glm::ivec3(baseVertex + a, baseVertex + b, baseVertex + c));
         }
 
-        // Normals: from the file when present and well formed, else
-        // area-weighted face normals accumulated per vertex (the cross
-        // product's length is twice the triangle's area, so summing the raw
-        // cross products weights big triangles more).
+        // Missing normals: area-weighted face normals (raw cross products) summed per vertex.
         auto nrmAttr = prim.attributes.find("NORMAL");
         AccessorView nrm;
         if (nrmAttr != prim.attributes.end() && viewAccessor(model, nrmAttr->second, nrm, err)
@@ -1073,13 +960,10 @@ struct Loader
             }
             for (size_t i = 0; i < pos.count; ++i)
             {
-                // A vertex no triangle uses keeps a placeholder; nothing reads it.
                 scene.normals.push_back(glm::dot(sum[i], sum[i]) > 0.0f ? glm::normalize(sum[i]) : glm::vec3(0.0f, 0.0f, 1.0f));
             }
         }
 
-        // Texture coordinates: TEXCOORD_0 when present and well formed, else
-        // (0, 0) at every vertex, which only matters to a textured material.
         auto uvAttr = prim.attributes.find("TEXCOORD_0");
         AccessorView uv;
         std::string uvErr;
@@ -1103,10 +987,7 @@ struct Loader
             scene.uvs.resize(scene.uvs.size() + pos.count, glm::vec2(0.0f));
         }
 
-        // Tangents, which only a normal map uses: TANGENT when present and
-        // well formed, else generated when the primitive's material has a
-        // normal map and the primitive has texture coordinates to generate
-        // them from, else zero (the shade kernel skips the map then).
+        // A zero tangent makes the shade kernel skip the normal map.
         auto tanAttr = prim.attributes.find("TANGENT");
         AccessorView tan;
         std::string tanErr;
@@ -1145,16 +1026,7 @@ struct Loader
         return (int)scene.meshes.size() - 1;
     }
 
-    // Tangents for a primitive whose file has none, the way glTF asks for
-    // them: MikkTSpace over the positions, normals and TEXCOORD_0, which is
-    // what normal maps are baked against. The primitive's vertices start at
-    // baseVertex and its triangles at indexOffset; positions, normals and
-    // uvs are already in the scene, tangents are appended here.
-    //
-    // MikkTSpace gives every triangle corner its own tangent. Corners that
-    // share a vertex nearly always agree; where they do not (a mirrored uv
-    // seam, a hard break in the tangent frame), the vertex is copied so each
-    // copy carries one tangent, and the corner is pointed at its copy.
+    // MikkTSpace tangents, as the glTF spec asks; a vertex whose corners disagree is split, one copy per tangent.
     void generateTangents(int baseVertex, size_t vertexCount, int indexOffset, int triCount)
     {
         TimingScope timing("load.mikktspace");
@@ -1185,8 +1057,6 @@ struct Loader
             return;
         }
 
-        // Each vertex keeps a list of the tangents its corners have asked for
-        // so far and which vertex (itself or a copy) carries each one.
         struct Variant
         {
             glm::vec4 tangent;
@@ -1234,8 +1104,7 @@ struct Loader
         scene.tangents.insert(scene.tangents.end(), tangents.begin(), tangents.end());
     }
 
-    // Walks the node tree, accumulating transforms, and makes one Geom per
-    // primitive of every node that has a mesh.
+    // Walks the node tree and makes one Geom per primitive.
     void visit(int nodeIndex, const glm::mat4& parent, int depth)
     {
         if (nodeIndex < 0 || nodeIndex >= (int)model.nodes.size() || depth > 64)
@@ -1278,10 +1147,7 @@ struct Loader
 };
 }  // namespace
 
-// tinygltf's own image decoder (stb_image), with its time added to
-// load.image_decode: tinygltf decodes every image while it reads the file, so
-// this is the only way to tell the decoding apart from the JSON and buffer
-// parsing. See the timing split in loadGltf.
+// tinygltf decodes images during the file read, so this wrapper is the only way to time decoding apart.
 static bool timedLoadImageData(tinygltf::Image* image, const int imageIndex, std::string* err, std::string* warn,
     int reqWidth, int reqHeight, const unsigned char* bytes, int size, void* userData)
 {
@@ -1300,8 +1166,7 @@ bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int mate
     const bool binary = lowercaseExtension(path) == ".glb";
     bool loaded;
     {
-        // The file read is parse plus decode; load.gltf_parse is the read
-        // minus the decoding the callback above counted during it.
+        // load.gltf_parse is the read minus the decoding counted during it.
         const double decodeBefore = timingGet("load.image_decode");
         const auto start = std::chrono::steady_clock::now();
         loaded = binary ? loader.LoadBinaryFromFile(&model, &err, &warn, path)
@@ -1324,11 +1189,7 @@ bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int mate
     const size_t firstMesh = scene.meshes.size();
     const size_t firstTriangle = scene.indices.size();
 
-    // Start from the default scene's root nodes. A file with no scenes lists
-    // nodes only, so every node nobody names as a child is a root.
-    // load.gltf_nodes is this walk: materials, vertex arrays, generated
-    // normals and tangents (load.mikktspace counts the tangents again on
-    // their own), instances.
+    // A file with no scenes treats every node nobody names as a child as a root.
     {
         TimingScope timing("load.gltf_nodes");
         const int sceneIndex = model.defaultScene >= 0 ? model.defaultScene : 0;
@@ -1362,7 +1223,6 @@ bool loadGltf(const std::string& path, const glm::mat4& sceneTransform, int mate
         }
     }
 
-    // World-space bounds of what was added, for placing the object in a scene.
     glm::vec3 lo, hi;
     scene.bounds(firstGeom, scene.geoms.size(), lo, hi);
     printf("glTF %s: %zu triangles in %zu primitives, %zu instances, bounds (%.3f, %.3f, %.3f) to (%.3f, %.3f, %.3f)\n",

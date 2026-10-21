@@ -1,8 +1,4 @@
-// OptiX intersection stage, host side. See optix_intersect.h.
-//
-// A .cpp on purpose: optix.h switches to the device API whenever __CUDACC__
-// is defined, so host code that includes it cannot live in a .cu. The CUDA
-// runtime calls below only need cuda_runtime.h.
+// OptiX intersection stage, host side.
 
 #define NOMINMAX  // optix_stubs.h includes windows.h, whose min/max macros break glm
 
@@ -23,38 +19,34 @@
 #include <cstdio>
 #include <vector>
 
-// The device programs from optix_programs.cu, compiled to OptiX-IR by nvcc
-// and turned into this array by cmake/EmbedFile.cmake (see CMakeLists.txt).
+// optix_programs.cu compiled to OptiX-IR, embedded by cmake/EmbedFile.cmake.
 extern const unsigned char optix_programs_ir[];
 extern const size_t optix_programs_ir_size;
 
 namespace
 {
-// Everything OptiX owns for the lifetime of the scene, created by
-// optixIntersectInit and released by optixIntersectFree.
 constexpr int NUM_GROUPS = 6;         // raygen, path miss, shadow miss, cube hit, sphere hit, mesh hit
 constexpr int NUM_MISS_GROUPS = 2;    // miss index 0 = path rays, 1 = shadow rays
 constexpr int NUM_HIT_GROUPS = 3;     // sbtOffset 0 = cube, 1 = sphere, 2 = mesh
 
 OptixDeviceContext context = nullptr;
-OptixModule module = nullptr;        // every program: raygen, miss, sphere intersection, closest hits
+OptixModule module = nullptr;
 OptixProgramGroup groups[NUM_GROUPS] = {};
 OptixPipeline pipeline = nullptr;
 OptixShaderBindingTable sbt = {};
 CUdeviceptr dev_sbtRecords = 0;
 CUdeviceptr dev_cubeGas = 0;
 CUdeviceptr dev_sphereGas = 0;
-std::vector<CUdeviceptr> dev_meshGas;  // one GAS per TriangleMesh
+std::vector<CUdeviceptr> dev_meshGas;
 CUdeviceptr dev_ias = 0;
 OptixTraversableHandle iasHandle = 0;
 OptixIntersectParams* dev_params = nullptr;
-InstanceRecord* dev_instances = nullptr;  // instance id -> material and mesh
-// pathtrace.cu's device arrays, passed through to the hit programs
+InstanceRecord* dev_instances = nullptr;
+// Owned by pathtrace.cu, not freed here
 MeshBuffers meshBuffers = {};
 const Material* dev_materials = nullptr;
 const cudaTextureObject_t* dev_textures = nullptr;
 
-// Whether a Geom's hits go through the any-hit alpha test.
 bool isAlphaTested(const Scene* scene, const Geom& g)
 {
     return g.type == GeomType::MESH && scene->materials[g.materialId].alphaMode != ALPHA_OPAQUE;
@@ -71,12 +63,9 @@ bool check(OptixResult result, const char* call)
     return false;
 }
 
-// Init stops at the first failure so pathtraceInit can fall back.
 #define OPTIX_TRY(call) do { if (!check((call), #call)) return false; } while (0)
 
-// Compile log from module, program group or pipeline creation, printed only
-// when the call failed: on success it holds statistics, and warnings arrive
-// through logCallback anyway.
+// Printed only on failure: on success the log holds statistics, and warnings come through logCallback.
 void printLog(const char* what, OptixResult result, const char* log, size_t logSize)
 {
     if (result != OPTIX_SUCCESS && logSize > 1)
@@ -104,12 +93,10 @@ void release(CUdeviceptr& d)
     d = 0;
 }
 
-// Builds one acceleration structure (GAS or IAS) from a single build input
-// into a fresh output buffer, which stays allocated until optixIntersectFree.
 bool buildAccel(const OptixBuildInput& input, CUdeviceptr& output, OptixTraversableHandle& handle)
 {
     OptixAccelBuildOptions options = {};
-    options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;  // trace speed over build speed (PREFER_FAST_BUILD is the opposite)
+    options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
     options.operation = OPTIX_BUILD_OPERATION_BUILD;
 
     OptixAccelBufferSizes sizes = {};
@@ -124,10 +111,7 @@ bool buildAccel(const OptixBuildInput& input, CUdeviceptr& output, OptixTraversa
     return check(result, "optixAccelBuild");
 }
 
-// Unit cube, corners at +-0.5: 8 vertices, 12 triangles, two per face in the
-// order -x +x -y +y -z +z, wound counterclockwise seen from outside.
-// __closesthit__cube derives the face normal from the primitive index, so the
-// face order is part of the contract.
+// Unit cube at +-0.5, faces -x +x -y +y -z +z, counterclockwise from outside; __closesthit__cube depends on this order.
 bool buildCubeGas(OptixTraversableHandle& handle)
 {
     float3 vertices[8];
@@ -138,12 +122,12 @@ bool buildCubeGas(OptixTraversableHandle& handle)
                                   (i & 4) ? 0.5f : -0.5f);
     }
     const uint3 triangles[12] = {
-        {0, 4, 6}, {0, 6, 2},   // -x
-        {1, 7, 5}, {1, 3, 7},   // +x
-        {0, 5, 4}, {0, 1, 5},   // -y
-        {2, 6, 7}, {2, 7, 3},   // +y
-        {0, 2, 3}, {0, 3, 1},   // -z
-        {4, 7, 6}, {4, 5, 7},   // +z
+        {0, 4, 6}, {0, 6, 2},
+        {1, 7, 5}, {1, 3, 7},
+        {0, 5, 4}, {0, 1, 5},
+        {2, 6, 7}, {2, 7, 3},
+        {0, 2, 3}, {0, 3, 1},
+        {4, 7, 6}, {4, 5, 7},
     };
     CUdeviceptr dev_vertices = upload(vertices, sizeof(vertices));
     CUdeviceptr dev_triangles = upload(triangles, sizeof(triangles));
@@ -161,16 +145,12 @@ bool buildCubeGas(OptixTraversableHandle& handle)
     input.triangleArray.numSbtRecords = 1;
 
     bool ok = buildAccel(input, dev_cubeGas, handle);
-    // The build copies what it needs; the inputs are not read at trace time.
     release(dev_vertices);
     release(dev_triangles);
     return ok;
 }
 
-// Unit sphere: one custom primitive whose bounds are the unit cube, so
-// traversal only knows a box and __intersection__sphere in optix_programs.cu
-// does the actual test. The built-in sphere primitive is hollow and never
-// hits from inside, which a refractive sphere needs; see the comment there.
+// A custom primitive, since the built-in sphere never hits from inside, which refraction needs.
 bool buildSphereGas(OptixTraversableHandle& handle)
 {
     const OptixAabb bounds = { -0.5f, -0.5f, -0.5f, 0.5f, 0.5f, 0.5f };
@@ -189,12 +169,7 @@ bool buildSphereGas(OptixTraversableHandle& handle)
     return ok;
 }
 
-// One triangle GAS per TriangleMesh, from the flat device arrays pathtrace.cu
-// uploaded: the whole vertex array serves as the vertex buffer and the mesh's
-// slice of the index array as the index buffer. Both faces stay hittable
-// (no culling flag), which a refractive mesh needs for the exit hit. A mesh
-// keeps any-hit only if some instance of it has an ALPHA_MASK or ALPHA_BLEND material;
-// buildIas then turns it off again on the instances that do not.
+// Any-hit stays on for a mesh with any alpha-tested instance; buildIas turns it off on the other instances.
 bool buildMeshGases(const Scene* scene, const MeshBuffers& buffers, std::vector<OptixTraversableHandle>& handles)
 {
     dev_meshGas.assign(scene->meshes.size(), 0);
@@ -232,16 +207,11 @@ bool buildMeshGases(const Scene* scene, const MeshBuffers& buffers, std::vector<
     return true;
 }
 
-// One instance per Geom: the unit cube, unit sphere or one of the mesh GASes
-// under the Geom's transform. instanceId is the Geom's index, which the
-// hit programs use to look up the InstanceRecord, and sbtOffset picks the hit
-// program (hit group record 0, 1 or 2). Only alpha-tested instances run the
-// any-hit program; the flag disables it on every other instance, which may
-// share a mesh GAS with an alpha-tested one.
+// One instance per Geom; instanceId is the Geom's index, which the hit programs use to find the InstanceRecord.
 bool buildIas(const Scene* scene, OptixTraversableHandle cubeGas, OptixTraversableHandle sphereGas,
               const std::vector<OptixTraversableHandle>& meshGas)
 {
-    std::vector<OptixInstance> instances(scene->geoms.size());  // zeroed
+    std::vector<OptixInstance> instances(scene->geoms.size());
     for (size_t i = 0; i < instances.size(); ++i)
     {
         const Geom& g = scene->geoms[i];
@@ -285,10 +255,9 @@ bool buildIas(const Scene* scene, OptixTraversableHandle cubeGas, OptixTraversab
     return ok;
 }
 
-// Module from the embedded OptiX-IR, six program groups, one pipeline.
 bool buildPipeline()
 {
-    OptixModuleCompileOptions moduleOptions = {};  // defaults: full optimization, line info
+    OptixModuleCompileOptions moduleOptions = {};
     OptixPipelineCompileOptions pipelineOptions = {};
     pipelineOptions.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
     pipelineOptions.numPayloadValues = 0;    // the programs write to params.intersections directly
@@ -326,7 +295,7 @@ bool buildPipeline()
     descs[4].hitgroup.entryFunctionNameCH = "__closesthit__sphere";
     descs[4].hitgroup.moduleIS = module;
     descs[4].hitgroup.entryFunctionNameIS = "__intersection__sphere";
-    descs[5].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;  // built-in triangle intersection, no IS
+    descs[5].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     descs[5].hitgroup.moduleCH = module;
     descs[5].hitgroup.entryFunctionNameCH = "__closesthit__mesh";
     descs[5].hitgroup.moduleAH = module;
@@ -351,7 +320,7 @@ bool buildPipeline()
         return false;
     }
 
-    // Stack for one trace through an IAS over GASes (traversable graph depth 2).
+    // Traversable graph depth 2: an IAS over GASes.
     OptixStackSizes stackSizes = {};
     for (OptixProgramGroup group : groups)
     {
@@ -367,8 +336,7 @@ bool buildPipeline()
     return true;
 }
 
-// Records carry only the program header: the programs get everything through
-// the launch parameters, and an instance's sbtOffset picks its hit record.
+// Records carry only the program header; the programs read everything from the launch parameters.
 struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) Record
 {
     char header[OPTIX_SBT_RECORD_HEADER_SIZE];
@@ -386,10 +354,10 @@ bool buildSbt()
     sbt.raygenRecord = dev_sbtRecords;
     sbt.missRecordBase = dev_sbtRecords + sizeof(Record);
     sbt.missRecordStrideInBytes = sizeof(Record);
-    sbt.missRecordCount = NUM_MISS_GROUPS;  // path rays, shadow rays
+    sbt.missRecordCount = NUM_MISS_GROUPS;
     sbt.hitgroupRecordBase = dev_sbtRecords + (1 + NUM_MISS_GROUPS) * sizeof(Record);
     sbt.hitgroupRecordStrideInBytes = sizeof(Record);
-    sbt.hitgroupRecordCount = NUM_HIT_GROUPS;  // cube, sphere, mesh
+    sbt.hitgroupRecordCount = NUM_HIT_GROUPS;
     return true;
 }
 
@@ -398,8 +366,7 @@ bool init(const Scene* scene, const MeshBuffers& buffers, const Material* materi
 {
     {
         TimingScope timing("init.optix_context");
-        // optixInit loads the driver's OptiX library and fills the function
-        // table; the version check against OPTIX_ABI_VERSION happens here.
+        // Loads the driver's OptiX library and checks it against OPTIX_ABI_VERSION.
         OPTIX_TRY(optixInit());
 
         OptixDeviceContextOptions options = {};
@@ -407,8 +374,7 @@ bool init(const Scene* scene, const MeshBuffers& buffers, const Material* materi
         options.logCallbackLevel = 3;  // fatal, error, warning
         options.validationMode = validation ? OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL
                                             : OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
-        // A null CUDA context means the current one, which pathtraceInit's
-        // allocations have already created, so OptiX shares it with the kernels.
+        // A null CUDA context means the current one, shared with the kernels.
         OPTIX_TRY(optixDeviceContextCreate(nullptr, &options, &context));
     }
 
@@ -422,7 +388,7 @@ bool init(const Scene* scene, const MeshBuffers& buffers, const Material* materi
         {
             return false;
         }
-        CUDA_CHECK(cudaDeviceSynchronize());  // the builds run on the device; time them, not their launch
+        CUDA_CHECK(cudaDeviceSynchronize());
     }
     {
         TimingScope timing("init.optix_pipeline");
@@ -432,7 +398,6 @@ bool init(const Scene* scene, const MeshBuffers& buffers, const Material* materi
         }
     }
 
-    // Per-instance table for the hit programs: one record per Geom, in Geom order.
     std::vector<InstanceRecord> records(scene->geoms.size());
     for (size_t i = 0; i < records.size(); ++i)
     {
@@ -458,7 +423,7 @@ bool optixIntersectInit(const Scene* scene, const MeshBuffers& buffers, const Ma
     {
         return true;
     }
-    optixIntersectFree();  // release whatever a partial init created
+    optixIntersectFree();
     return false;
 }
 
@@ -501,7 +466,7 @@ void optixIntersectFree()
     dev_params = nullptr;
     cudaFree(dev_instances);
     dev_instances = nullptr;
-    meshBuffers = {};  // these three are owned by pathtrace.cu, not freed here
+    meshBuffers = {};
     dev_materials = nullptr;
     dev_textures = nullptr;
     iasHandle = 0;
@@ -533,9 +498,7 @@ void optixIntersect(int iter, int numPaths, const PathSegment* paths,
     params.materials = dev_materials;
     params.textures = dev_textures;
     params.handle = iasHandle;
-    // The buffers ping-pong every bounce, so the parameters go up per launch.
-    // The source is pageable, so the copy is staged before this returns and
-    // the stack variable can go out of scope.
+    // A pageable source is staged before cudaMemcpyAsync returns, so the stack variable may go out of scope.
     CUDA_CHECK(cudaMemcpyAsync(dev_params, &params, sizeof(params), cudaMemcpyHostToDevice, stream));
 
     OptixResult result = optixLaunch(pipeline, stream, reinterpret_cast<CUdeviceptr>(dev_params),

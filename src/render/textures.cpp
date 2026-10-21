@@ -1,5 +1,3 @@
-// The scene's textures on the GPU. See textures.h.
-
 #include "render/textures.h"
 
 #include "scene/scene.h"
@@ -12,10 +10,10 @@ namespace
 {
 std::vector<cudaArray_t> arrays;                     // one per Scene::textureImages entry
 std::vector<cudaTextureObject_t> objects;            // one per Scene::textures entry
-cudaTextureObject_t* dev_textureObjects = nullptr;   // objects, on the device
+cudaTextureObject_t* dev_textureObjects = nullptr;
 cudaArray_t environmentArray = nullptr;
 cudaTextureObject_t environmentObject = 0;
-const float* environmentTables[3] = {};  // EnvironmentMap::pdfUv, conditionalCdf, marginalCdf
+const float* environmentTables[3] = {};  // pdfUv, conditionalCdf, marginalCdf
 }  // namespace
 
 cudaTextureObject_t* texturesInit(const Scene& scene)
@@ -46,9 +44,9 @@ cudaTextureObject_t* texturesInit(const Scene& scene)
         desc.addressMode[0] = texture.wrapU;
         desc.addressMode[1] = texture.wrapV;
         desc.filterMode = texture.filter;
-        desc.readMode = cudaReadModeNormalizedFloat;  // uchar 0..255 reads as 0..1
+        desc.readMode = cudaReadModeNormalizedFloat;
         desc.sRGB = texture.srgb ? 1 : 0;
-        desc.normalizedCoords = 1;                    // uv in [0, 1] spans the image
+        desc.normalizedCoords = 1;
 
         cudaTextureObject_t object = 0;
         CUDA_CHECK(cudaCreateTextureObject(&object, &resource, &desc, nullptr));
@@ -71,7 +69,7 @@ void texturesFree()
     {
         cudaFreeArray(array);
     }
-    cudaFree(dev_textureObjects);  // no-op if null
+    cudaFree(dev_textureObjects);
     objects.clear();
     arrays.clear();
     dev_textureObjects = nullptr;
@@ -102,13 +100,12 @@ EnvironmentMap environmentInit(const Environment& env)
     desc.addressMode[0] = cudaAddressModeWrap;   // u runs around the horizon
     desc.addressMode[1] = cudaAddressModeClamp;  // v stops at the poles
     desc.filterMode = cudaFilterModeLinear;
-    desc.readMode = cudaReadModeElementType;     // floats as stored
+    desc.readMode = cudaReadModeElementType;
     desc.normalizedCoords = 1;
     CUDA_CHECK(cudaCreateTextureObject(&environmentObject, &resource, &desc, nullptr));
     map.texture = environmentObject;
 
-    // The sampling table. A map that is black all over has none; the light
-    // list leaves it out, so nothing samples it.
+    // An all-black map has no sampling table
     if (!env.pdfUv.empty())
     {
         const auto upload = [](const std::vector<float>& v) {
@@ -135,12 +132,12 @@ void environmentFree()
     {
         cudaDestroyTextureObject(environmentObject);
     }
-    cudaFreeArray(environmentArray);  // no-op if null
+    cudaFreeArray(environmentArray);
     environmentObject = 0;
     environmentArray = nullptr;
     for (const float*& table : environmentTables)
     {
-        cudaFree((void*)table);  // no-op if null
+        cudaFree((void*)table);
         table = nullptr;
     }
 }

@@ -1,39 +1,6 @@
-// The light list next event estimation picks from (see Scene in scene.h).
-//
-// Every light gets a share of the picks proportional to its power, the way
-// PBRT's power light sampler weighs them, so the brighter and larger lights
-// get more of the samples:
-//
-//   emissive triangle   2 pi * area * luminance(emission), emitting from both sides
-//   point light         4 pi * luminance(intensity)
-//   spot light          its cone's solid angle * luminance(intensity)
-//   distant light       pi * r^2 * luminance(irradiance), r the scene's bounding sphere
-//   environment         pi * r^2 * integral of its luminance over all directions
-//
-// The last two are the flux through a disk as large as the scene, which for
-// the environment is pi r^2 per direction, integrated. A one-color
-// environment of luminance L comes to 4 pi^2 r^2 L. A spot's cone, with the
-// smoothstep falloff between its inner and outer angles (nee.h), has the
-// solid angle 2 pi (1 - (cosInner + cosOuter) / 2): the smoothstep
-// integrates to half over the band between the two.
-//
-// Light linking (Geom::lightMask): the shares are computed once per
-// distinct receiver mask in the scene, counting only the lights that mask
-// receives, so a surface never spends a sample on a light that cannot reach
-// it. The tables are row-major by mask (Scene::lightMasks); the shade
-// kernel finds a surface's row from its mask (lightRow in nee.h).
-//
-// A triangle's emission is its material's emission factor times the average
-// color of the material's emissive texture over the whole image, as PBRT-v4
-// weighs an image area light. A material that glows in a few spots of a
-// mostly black texture, like DamagedHelmet's, then gets few of the picks.
-// Within a triangle the point is picked uniformly by area, whatever the
-// texture holds there. The emission is the same for every triangle of a
-// material, so the area cancels out of the density per unit area,
-//
-//   P_pick / area = 2 pi * luminance(emission) / total power,
-//
-// which is one number per material (Scene::emitterAreaPdf).
+// The NEE light list: power shares per PBRT's power light sampler, one row per receiver mask.
+// Distant lights and the environment count the flux through a disk as large as the scene's bounding sphere.
+// Emissive textures weigh by their average color, as PBRT-v4 weighs an image area light.
 
 #include "scene/scene.h"
 
@@ -46,8 +13,7 @@
 
 namespace
 {
-// The unit cube's corners (+-0.5) and its 12 triangles, wound
-// counterclockwise seen from outside, the same as the OptiX cube GAS.
+// Counterclockwise seen from outside, the same as the OptiX cube GAS.
 glm::vec3 cubeCorner(int i)
 {
     return glm::vec3((i & 1) ? 0.5f : -0.5f, (i & 2) ? 0.5f : -0.5f, (i & 4) ? 0.5f : -0.5f);
@@ -62,8 +28,7 @@ const int CUBE_TRIANGLES[12][3] = {
     {4, 7, 6}, {4, 5, 7},   // +z
 };
 
-// A texture's average color over its whole image, linear, as the texture
-// unit reads it: an sRGB texture is decoded first.
+// Linear, as the texture unit reads it.
 glm::vec3 averageColor(const Texture& texture, const TextureImage& image)
 {
     float decode[256];
@@ -87,10 +52,7 @@ glm::vec3 averageColor(const Texture& texture, const TextureImage& image)
 
 void Scene::buildLights()
 {
-    // An emissive sphere reaches the image through BSDF sampling only, so
-    // its material has to tell the shade kernel that NEE never samples it.
-    // A sphere that shares its material with a cube or a mesh gets its own
-    // copy of it.
+    // NEE never samples emissive spheres, so one sharing a material with a cube or mesh gets its own copy.
     std::vector<bool> onTriangles(materials.size(), false);
     for (const Geom& g : geoms)
     {
@@ -117,8 +79,6 @@ void Scene::buildLights()
         g.materialId = found->second;
     }
 
-    // Each material's emission for weighing its triangles: the factor times
-    // its emissive texture's average color, each texture averaged once.
     std::vector<glm::vec3> emission(materials.size(), glm::vec3(0.0f));
     std::unordered_map<int, glm::vec3> textureAverages;
     for (size_t m = 0; m < materials.size(); ++m)
@@ -139,7 +99,6 @@ void Scene::buildLights()
         emission[m] *= found->second;
     }
 
-    // Every triangle of an emissive cube or mesh, in world space.
     lightTriangles.clear();
     std::vector<double> power;
     auto addTriangle = [&](const Geom& g, glm::vec3 p0, glm::vec3 p1, glm::vec3 p2, glm::vec2 uv0, glm::vec2 uv1,
@@ -147,8 +106,7 @@ void Scene::buildLights()
         p0 = glm::vec3(g.transform * glm::vec4(p0, 1.0f));
         p1 = glm::vec3(g.transform * glm::vec4(p1, 1.0f));
         p2 = glm::vec3(g.transform * glm::vec4(p2, 1.0f));
-        // A mirroring transform turns the winding around; swapping two
-        // corners turns it back, so cross(e1, e2) stays the front face.
+        // Keeps cross(e1, e2) the front face under a mirroring transform.
         if (mirrored)
         {
             std::swap(p1, p2);
@@ -164,15 +122,15 @@ void Scene::buildLights()
         t.materialId = g.materialId;
         t.group = g.lightGroup;
         const double area = 0.5 * (double)glm::length(glm::cross(t.e1, t.e2));
-        if (area > 0.0)  // a degenerate triangle has nothing to pick
+        if (area > 0.0)
         {
             lightTriangles.push_back(t);
+            // 2 pi: an emissive triangle emits from both sides.
             power.push_back(2.0 * PI * area * luminance(emission[g.materialId]));
         }
     };
     for (const Geom& g : geoms)
     {
-        // A black emissive texture leaves nothing to pick either.
         if (g.type == GeomType::SPHERE || luminance(emission[g.materialId]) <= 0.0f)
         {
             continue;
@@ -198,8 +156,6 @@ void Scene::buildLights()
         }
     }
 
-    // Punctual lights. A distant light's power is what it pours onto a disk
-    // as large as the scene.
     glm::vec3 lo;
     glm::vec3 hi;
     bounds(0, geoms.size(), lo, hi);
@@ -216,6 +172,7 @@ void Scene::buildLights()
         else if (light.type == LIGHT_SPOT)
         {
             ++spotLights;
+            // The smoothstep falloff integrates to half over the band between the cones.
             const double solidAngle = 2.0 * PI * (1.0 - 0.5 * ((double)light.cosInner + light.cosOuter));
             power.push_back(solidAngle * luminance(light.intensity));
         }
@@ -225,8 +182,7 @@ void Scene::buildLights()
         }
     }
 
-    // The environment, last, when there is one: the same disk, lit from
-    // every direction.
+    // The environment goes last.
     const bool hasEnvironment = environmentLight && environment.radianceIntegral > 0.0f;
     if (hasEnvironment)
     {
@@ -251,10 +207,7 @@ void Scene::buildLights()
         return;
     }
 
-    // The distinct receiver masks, all ones first, each with its own row of
-    // the tables. A scene without linking has the one row. Past the limit
-    // the remaining masks share row 0 (lightRow in nee.h), which only
-    // wastes picks.
+    // Masks past the limit share row 0, which only wastes picks.
     const size_t MAX_LIGHT_MASKS = 64;
     lightMasks.push_back(0xffffffffu);
     size_t unlistedMasks = 0;
@@ -290,8 +243,7 @@ void Scene::buildLights()
     for (size_t m = 0; m < numMasks; ++m)
     {
         const unsigned int mask = lightMasks[m];
-        // A light this mask does not receive gets no share of its row; the
-        // environment is never linked.
+        // The environment is never linked.
         const auto share = [&](size_t i) {
             if (i < lightTriangles.size())
             {
@@ -310,13 +262,11 @@ void Scene::buildLights()
         }
         if (maskTotal <= 0.0)
         {
-            // Nothing reaches this mask: its row picks light 0 every time,
-            // and sampleLight rejects it as not received.
+            // The row picks light 0 every time, and sampleLight rejects it as not received.
             continue;
         }
 
-        // Summed in double: in a scene with millions of emissive triangles
-        // each one's share is near float's resolution next to 1.
+        // Double: with millions of emitters each share is near float's resolution next to 1.
         float* cdf = lightCdf.data() + m * numLights;
         double running = 0.0;
         for (size_t i = 0; i < power.size(); ++i)

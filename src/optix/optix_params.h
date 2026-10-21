@@ -1,46 +1,36 @@
 #pragma once
 
-// Launch parameters for the OptiX intersection stage. Filled per launch by
-// optix_intersect.cpp and read on the device by optix_programs.cu, so this
-// header is included by both a host .cpp and an OptiX-IR compile: keep it to
-// plain structs and pointers.
+// OptiX launch parameters, included by a host .cpp and an OptiX-IR compile: plain structs and pointers only.
 
 #include <optix.h>
 
 #include "scene/sceneStructs.h"
 
-// What a hit program needs to know about the instance it hit, indexed by
-// optixGetInstanceId() (the Geom's index). A compact record rather than the
-// Geom itself, so a hit loads 20 bytes and not three mat4s.
+// Per-instance data for the hit programs, indexed by optixGetInstanceId(): 20 bytes instead of the Geom's three mat4s.
 struct InstanceRecord
 {
     int materialId;
-    int meshId;              // MESH instances: index into MeshBuffers::meshes; -1 otherwise
-    float tangentSign;       // Geom::tangentSign
-    unsigned int lightMask;  // Geom::lightMask
-    int lightGroup;          // Geom::lightGroup
+    int meshId;              // index into MeshBuffers::meshes; -1 for non-mesh instances
+    float tangentSign;
+    unsigned int lightMask;
+    int lightGroup;
 };
 
-// One launch traces two kinds of rays: launch indices below numPaths are
-// path rays, the ones past it the shadow rays the previous shade launch
-// queued (next event estimation), which only ask whether anything blocks
-// them.
+// Launch indices below numPaths are path rays; the rest are shadow rays that only test for a blocker.
 struct OptixIntersectParams
 {
-    int iter;                              // seeds the ALPHA_BLEND test (alphaPathSeed)
+    int iter;                              // seeds the ALPHA_BLEND test
     int numPaths;
-    const PathSegment* paths;              // paths[i].ray is the ray for launch index i < numPaths
+    const PathSegment* paths;
     const ShadowRay* shadowRays;           // shadowRays[i - numPaths] for launch index i >= numPaths
-    const int* shadowCount;                // how many shadowRays the queue holds; the launch may be wider
-    glm::vec3* image;                      // a shadow ray that reaches its light adds its contribution here
-    ShadeableIntersection* intersections;  // closest-hit and miss write intersections[i]
-    int* materialIds;                      // sort key per path: materialId on hit, numMaterials on miss
+    const int* shadowCount;                // the launch may be wider than this
+    glm::vec3* image;
+    ShadeableIntersection* intersections;
+    int* materialIds;                      // materialId on a hit, numMaterials on a miss
     int numMaterials;
-    const InstanceRecord* instances;       // indexed by instance id
-    MeshBuffers buffers;                   // the same flat mesh arrays the naive kernel reads
-    // The scene's materials and texture objects, for the any-hit alpha test
-    // of ALPHA_MASK and ALPHA_BLEND materials. textures is null when the
-    // scene has none.
+    const InstanceRecord* instances;
+    MeshBuffers buffers;
+    // For the any-hit alpha test; textures is null when the scene has none.
     const Material* materials;
     const cudaTextureObject_t* textures;
     OptixTraversableHandle handle;         // the IAS over the unit cube, unit sphere and mesh GASes

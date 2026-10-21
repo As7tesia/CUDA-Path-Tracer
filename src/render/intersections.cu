@@ -113,10 +113,7 @@ __host__ __device__ float sphereIntersectionTest(
     return glm::length(r.origin - intersectionPoint);
 }
 
-// Moller-Trumbore, both faces. Solves o + t d = p0 + u (p1 - p0) + v (p2 - p0)
-// for t, u, v and accepts the hit if it is ahead of the origin and inside the
-// triangle. u and v are the barycentric weights of p1 and p2, so the caller
-// can interpolate vertex data with (1 - u - v, u, v).
+// Moller-Trumbore, both faces; u and v are the barycentric weights of p1 and p2.
 __host__ __device__ static bool rayTriangle(
     glm::vec3 o, glm::vec3 d,
     glm::vec3 p0, glm::vec3 p1, glm::vec3 p2,
@@ -126,8 +123,6 @@ __host__ __device__ static bool rayTriangle(
     const glm::vec3 e2 = p2 - p0;
     const glm::vec3 pvec = glm::cross(d, e2);
     const float det = glm::dot(e1, pvec);
-    // det is (twice the area) * cos of the angle to the ray; zero means the ray
-    // lies in the triangle's plane. Keeping the sign accepts back faces too.
     if (fabsf(det) < 1e-12f)
     {
         return false;
@@ -164,9 +159,6 @@ __device__ float meshIntersectionTest(
     glm::vec4& tangent,
     bool& outside)
 {
-    // Object space, with the direction normalized like the other tests, so
-    // the object-space t is a distance there and the world distance comes
-    // from the transformed hit point at the end.
     const glm::vec3 o = multiplyMV(geom.inverseTransform, glm::vec4(r.origin, 1.0f));
     const glm::vec3 d = glm::normalize(multiplyMV(geom.inverseTransform, glm::vec4(r.direction, 0.0f)));
 
@@ -184,10 +176,6 @@ __device__ float meshIntersectionTest(
         if (rayTriangle(o, d, buffers.positions[tri.x], buffers.positions[tri.y], buffers.positions[tri.z], t, u, v)
             && t < tMin)
         {
-            // Only a hit that would become the closest is alpha tested, so
-            // an alpha-tested mesh reads the texture for few of its
-            // triangles. A BLEND decision depends only on the hit, not on
-            // the order triangles are tested in, so OptiX keeps the same one.
             if (alphaTested)
             {
                 const glm::vec2 hitUv = interpolate(buffers.uvs, tri, u, v);
@@ -212,15 +200,10 @@ __device__ float meshIntersectionTest(
     const glm::vec3 p1 = buffers.positions[tri.y];
     const glm::vec3 p2 = buffers.positions[tri.z];
 
-    // The geometric normal (glTF winds front faces counterclockwise) says
-    // which side the ray came from. Its dot product with the direction has
-    // the same sign in object and world space, so no transform is needed.
+    // glTF winds front faces counterclockwise; the sign of the dot product is the same in object space
     const glm::vec3 geometricNormal = glm::cross(p1 - p0, p2 - p0);
     outside = glm::dot(geometricNormal, d) < 0.0f;
 
-    // Shading normal, uv and tangent the same way __closesthit__mesh makes
-    // them (mesh_hit.h), with the instance's matrices: normals go to
-    // world space with the inverse transpose, tangents with the transform.
     const auto normalToWorld = [&](glm::vec3 n) { return multiplyMV(geom.invTranspose, glm::vec4(n, 0.0f)); };
     const auto vectorToWorld = [&](glm::vec3 t) { return multiplyMV(geom.transform, glm::vec4(t, 0.0f)); };
     normal = meshShadingNormal(interpolate(buffers.normals, tri, hitU, hitV), geometricNormal, outside, r.direction,

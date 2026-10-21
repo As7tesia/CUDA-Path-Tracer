@@ -1,24 +1,13 @@
-// Host-side check of scatterPbr and evalPbr: the mean sample weight is the
-// lobe's directional albedo, integral of f * cos over directions. Compares it
-// to a brute-force integral of the analytic BSDF (uniform sphere sampling)
-// for metal, plastic, glass and clearcoat at a few view angles and
-// roughnesses. Then evalPbr: its f * cos against the same analytic BSDF, and
-// its pdf against what scatterPbr actually samples. Last, fuzzes random
-// inputs for NaN / Inf / negative weights and pdfs. Every check prints a
-// line, and the exit code is nonzero when one fails. Built by the bsdf_test
-// target (CMakeLists.txt, outside the default build); the README's
-// "Checking the BSDF" table comes from its output.
+// Checks scatterPbr and evalPbr against a brute-force integral of the analytic BSDF, then fuzzes them; nonzero exit on a failure.
+// The README's "Checking the BSDF" table comes from this output.
 #include "render/bsdf.cu"
 
 #include <cstdio>
 #include <cmath>
 
-// Two estimates agree when they differ by at most this many combined
-// standard errors. The seeds are fixed, so a pass or a failure repeats on
-// every run.
+// Combined standard errors two estimates may differ by; the seeds are fixed, so results repeat.
 static const double MAX_SIGMA = 5.0;
 
-// Running sums for the mean of a per-channel quantity and its standard error.
 struct Estimate
 {
     glm::dvec3 sum = glm::dvec3(0.0);
@@ -66,7 +55,7 @@ struct Case
     PbrSurface s;
 };
 
-// Analytic f(wo, wi) * |cos wi| for the material, normal (0, 0, 1), wo outside.
+// Analytic f * |cos wi| with normal (0, 0, 1) and wo outside.
 static glm::vec3 fcos(const Case& c, glm::vec3 wo, glm::vec3 wi)
 {
     const glm::vec3 n(0, 0, 1);
@@ -96,14 +85,12 @@ static glm::vec3 fcos(const Case& c, glm::vec3 wo, glm::vec3 wi)
         base += metal * schlickRef(c.s.baseColor, glm::dot(wo, h)) * spec;
         const glm::vec3 F = w * schlickRef(f0, glm::dot(wo, h));
         const float maxF = maxComponent(F);
-        // plastic
         base += (1 - metal) * (1 - c.s.transmission) * (F * spec + (1 - maxF) * c.s.baseColor / PI * ci);
-        // glass reflection (outside, no TIR)
         base += (1 - metal) * c.s.transmission * F * spec;
     }
     else if (c.s.transmission > 0)
     {
-        // glass transmission, PBRT-v4 dielectric BTDF without the 1/eta^2 radiance factor
+        // PBRT-v4 dielectric BTDF without the 1/eta^2 radiance factor
         const float etap = c.m.ior;  // n_t / n_i, wo outside
         glm::vec3 wm = glm::normalize(wi * etap + wo);
         if (wm.z < 0) wm = -wm;
@@ -147,8 +134,6 @@ int main()
         add("coated plastic", 0, r, 0, glm::vec3(0.5f, 0.1f, 0.1f), 1, 1.0f, 0.3f);
     }
 
-    // z is the largest per-channel difference over the combined standard
-    // error; a case fails above MAX_SIGMA.
     const int N = 1 << 21;
     printf("%-15s %5s %6s  %-26s %-26s %5s\n", "case", "rough", "theta", "sampled albedo", "reference albedo", "z");
     for (const Case& c : cases)
@@ -172,7 +157,6 @@ int main()
             Estimate ref;
             for (int i = 0; i < N * 4; ++i)
             {
-                // uniform sphere
                 const float z = 1 - 2 * u01(rng);
                 const float r = sqrtf(fmaxf(0, 1 - z * z));
                 const float phi = TWO_PI * u01(rng);
@@ -197,11 +181,7 @@ int main()
         }
     }
 
-    // evalPbr. Its f * cos against the analytic BSDF above at random
-    // directions (front side only, as fcos is written). Its pdf against
-    // scatterPbr's samples, from both sides of glass: the pdf integrates to
-    // the share of samples scatterPbr keeps, and f * cos / pdf over those
-    // samples averages to the albedo they estimate with their own weights.
+    // evalPbr: f * cos against fcos (front side only), pdf against scatterPbr's samples from both sides.
     {
         const int M = 1 << 16;
         const int N2 = 1 << 20;
@@ -228,8 +208,7 @@ int main()
                         return glm::vec3(r * cosf(phi), r * sinf(phi), z);
                     };
 
-                    // Largest difference to fcos relative to its value (plus a
-                    // floor for the near-zero ones), over random directions.
+                    // Relative error, with a 1e-3 floor for near-zero values
                     double maxError = 0.0;
                     if (outside)
                     {
@@ -278,9 +257,7 @@ int main()
                     const glm::dvec3 weightMean = weights.mean(N2);
                     const glm::dvec3 ratioSe = ratios.standardError(N2);
                     const glm::dvec3 weightSe = weights.standardError(N2);
-                    // Pure Lambert has no variance: every weight is the base
-                    // color, and every f * cos / pdf is too up to float
-                    // rounding, so a zero error allows for that rounding.
+                    // Pure Lambert has no variance, so a zero error still allows for float rounding.
                     double zRatio = 0.0;
                     for (int k = 0; k < 3; ++k)
                     {
@@ -303,7 +280,6 @@ int main()
         printf("\n");
     }
 
-    // Smooth limits: exact albedos.
     {
         Case c = cases[0];
         c.s.roughness = 0;
@@ -316,8 +292,7 @@ int main()
         const bool scattered = scatterPbr(p, glm::vec3(0), glm::vec3(0, 0, 1), true, c.m, c.s, rng);
         const glm::vec3 F = schlickFresnel(c.s.baseColor, wo.z);
         const glm::vec3 mirror(-wo.x, -wo.y, wo.z);
-        // A smooth lobe's direction is one a light sample cannot take: pdf 0,
-        // and evalPbr gives nothing at that very direction.
+        // A smooth lobe has pdf 0, and evalPbr gives nothing even at its exact direction.
         const BsdfEval e = evalPbr(wo, mirror, glm::vec3(0, 0, 1), true, c.m, c.s);
         const bool ok = check(scattered && glm::length(p.color - F) < 1e-6f && glm::length(p.ray.direction - mirror) < 1e-6f
             && p.pdf == 0.0f && e.pdf == 0.0f && e.fCos == glm::vec3(0.0f));
@@ -347,9 +322,7 @@ int main()
                     refl += p.ray.direction.z > 0;
                 }
             }
-            // Every sample weighs exactly 1 (white glass, the Fresnel term
-            // cancels). The reflected share is Schlick at the transmitted
-            // angle below the critical angle, and all of it above.
+            // White glass weighs exactly 1; the reflected share is Schlick at the transmitted angle, or 1 past TIR.
             const float sin2T = 1.5f * 1.5f * sinf(theta) * sinf(theta);
             const double expected = sin2T >= 1.0f ? 1.0 : schlickFresnel(glm::vec3(iorF0(1.5f)), sqrtf(1.0f - sin2T)).x;
             const double reflected = refl / (double)M;
@@ -360,7 +333,6 @@ int main()
         }
     }
 
-    // Fuzz: random parameters and directions, including grazing ones and tilted shading normals.
     {
         thrust::default_random_engine rng(99);
         thrust::uniform_real_distribution<float> u01(0, 1);
@@ -382,7 +354,6 @@ int main()
             const float ct = u01(rng) < 0.1f ? 1e-4f * u01(rng) : u01(rng);
             const float ph = TWO_PI * u01(rng);
             const glm::vec3 wo(sqrtf(1 - ct * ct) * cosf(ph), sqrtf(1 - ct * ct) * sinf(ph), ct);
-            // shading normal tilted toward wo's side, still facing wo
             glm::vec3 sn = glm::normalize(n + 0.6f * glm::vec3(u01(rng) - 0.5f, u01(rng) - 0.5f, 0));
             if (u01(rng) < 0.5f || glm::dot(sn, wo) <= 0) sn = n;
             const bool typical = ct > 0.1f && sn == n;
@@ -393,7 +364,6 @@ int main()
             p.color = glm::vec3(1);
             const bool outside = u01(rng) < 0.5f;
 
-            // evalPbr at a random direction: finite and not negative.
             {
                 const float z = 1 - 2 * u01(rng);
                 const float r = sqrtf(fmaxf(0, 1 - z * z));

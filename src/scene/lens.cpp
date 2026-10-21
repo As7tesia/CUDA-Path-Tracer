@@ -39,8 +39,6 @@ std::string lowercaseExtensionOf(const std::string& path)
     return ext;
 }
 
-// The checks both formats need once the surfaces are read: one stop, gaps
-// that go forward, apertures that let something through.
 void validate(LensSystem& lens, const std::string& name)
 {
     if (lens.surfaces.empty())
@@ -59,7 +57,7 @@ void validate(LensSystem& lens, const std::string& name)
             }
             lens.stopIndex = (int)i;
         }
-        // Only the last gap may be 0, meaning the film distance is not known
+        // Only the last gap may be 0: the film distance is not known.
         const bool last = i + 1 == lens.surfaces.size();
         if (s.thickness < 0.0f || (!last && s.thickness == 0.0f))
         {
@@ -141,7 +139,6 @@ void analyzeLens(LensSystem& lens)
 {
     const LensSurface* s = lens.surfaces.data();
     const int count = (int)lens.surfaces.size();
-    // Vertex positions of the stop and the last surface, and the glass's length
     float zStop = 0.0f;
     float zLast = 0.0f;
     for (int i = 0; i + 1 < count; ++i)
@@ -153,9 +150,7 @@ void analyzeLens(LensSystem& lens)
         }
     }
 
-    // A ray parallel to the axis and close to it, scene to film. Where it
-    // crosses the axis is the paraxial focus; its height over the slope it
-    // leaves with is the effective focal length.
+    // A near-axis parallel ray: its axis crossing is the paraxial focus, height over exit slope the focal length.
     const float h = 0.01f * s[0].apertureRadius;
     glm::vec3 o(h, 0.0f, -1.0f);
     glm::vec3 d(0.0f, 0.0f, 1.0f);
@@ -167,17 +162,13 @@ void analyzeLens(LensSystem& lens)
     const float zFocus = o.z - o.x * d.z / d.x;
     p.focalLength = -h * d.z / d.x;
     p.backFocus = zFocus - zLast;
-    // A file that leaves the film gap at 0 gets the paraxial focus, so a
-    // distant object is in focus
     if (lens.surfaces.back().thickness == 0.0f)
     {
         lens.surfaces.back().thickness = p.backFocus;
     }
     p.filmDistance = lensLength(lens);
 
-    // The entrance pupil is the stop as the scene sees it. A ray leaving the
-    // stop's center at a slight lean, traced out through the front, crosses
-    // the axis at the pupil's center.
+    // A slightly leaning ray from the stop's center, traced out the front, crosses the axis at the pupil's center.
     if (lens.stopIndex == 0)
     {
         p.entrancePupilZ = 0.0f;
@@ -193,8 +184,7 @@ void analyzeLens(LensSystem& lens)
         p.entrancePupilZ = o.z - o.x * d.z / d.x;
     }
 
-    // The pupil's radius: the widest ray parallel to the axis that passes
-    // every aperture and the stop, by bisection on its height
+    // Pupil radius: bisection for the widest parallel ray that gets through.
     float lo = 0.0f;
     float hi = s[0].apertureRadius;
     for (int i = 0; i < 40; ++i)

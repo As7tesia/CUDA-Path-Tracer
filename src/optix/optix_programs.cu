@@ -1,17 +1,4 @@
-// OptiX device programs for the intersection stage. Compiled by nvcc to
-// OptiX-IR (see CMakeLists.txt), not linked like the other .cu files: the
-// driver compiles them at run time when optixModuleCreate runs.
-//
-// For path rays the programs produce what computeIntersections in
-// pathtrace.cu produces, so shadeMaterial and the material sort cannot tell
-// the two apart: t along the normalized ray, the surface normal with the same
-// orientation convention as the naive tests, the uv, the tangent, the
-// material id, the outside flag, the light linking fields, and the sort key.
-// They also write the geometric cosine next event estimation needs, which
-// the naive kernel leaves out. The same launch traces the queued shadow rays (see
-// OptixIntersectParams), which stop at the first hit and add their light in
-// their miss program. There is no payload: every program knows its launch
-// index and writes straight into the buffers.
+// OptiX device programs, compiled to OptiX-IR; path-ray hits match what computeIntersections writes.
 
 #include <optix.h>
 
@@ -33,26 +20,13 @@ static __forceinline__ __device__ glm::vec3 toVec3(float3 v)
     return glm::vec3(v.x, v.y, v.z);
 }
 
-// One thread per path: read its ray and trace it. The direction is normalized
-// so optixGetRayTmax() in the hit programs is a world-space distance, which is
-// what shadeMaterial expects when it rebuilds the hit point as origin + t * dir.
-// No ray flags: the geometry and instance flags (optix_intersect.cpp) leave
-// any-hit on for alpha-tested (ALPHA_MASK and ALPHA_BLEND) instances only.
-//
-// Past the paths, one thread per queued shadow ray. The launch is as wide as
-// the number of paths the queuing shade launch had, which bounds the queue,
-// so the host never reads back how many rays it holds; the threads past
-// that count return. A shadow ray only asks whether anything lies before
-// tMax: it ends at the first hit it finds, runs no closest-hit program, and
-// takes miss program 1. The hit groups are the path rays' own, so the alpha
-// test still runs and cut-outs let light through.
+// One thread per path, then one per queued shadow ray; path directions are normalized so t is a world distance.
 extern "C" __global__ void __raygen__paths()
 {
     const unsigned int i = optixGetLaunchIndex().x;
     if (i < (unsigned int)params.numPaths)
     {
-        // An ended path, left in place when compaction is off, traces
-        // nothing; the shade kernel skips it too.
+        // Ended paths stay in place when compaction is off
         if (params.paths[i].remainingBounces <= 0)
         {
             return;
@@ -62,11 +36,11 @@ extern "C" __global__ void __raygen__paths()
             toFloat3(ray.origin),
             toFloat3(glm::normalize(ray.direction)),
             0.0f,                  // tmin: the naive tests accept any t > 0 too
-            1e16f,                 // tmax
-            0.0f,                  // ray time, no motion blur
+            1e16f,
+            0.0f,                  // ray time
             OptixVisibilityMask(255),
             OPTIX_RAY_FLAG_NONE,
-            0,                     // SBT offset, added to the instance's sbtOffset
+            0,                     // SBT offset
             1,                     // SBT stride: one set of hit groups for both kinds of ray
             0);                    // miss program index
         return;
@@ -90,8 +64,6 @@ extern "C" __global__ void __raygen__paths()
         1);                        // __miss__shadow
 }
 
-// A miss is t = -1 and the one-past-the-last material id as the sort key,
-// the same as the naive kernel.
 extern "C" __global__ void __miss__paths()
 {
     const unsigned int i = optixGetLaunchIndex().x;
@@ -99,25 +71,19 @@ extern "C" __global__ void __miss__paths()
     params.materialIds[i] = params.numMaterials;
 }
 
-// A shadow ray that reached tMax without a hit: nothing blocks the light, so
-// its contribution goes into the pixel. A path queues at most one shadow ray
-// per bounce and each pixel has one path, so no two threads add to the same
-// pixel, and the shade kernels that also add to it run before and after the
-// launch.
+// No atomic: a pixel has one path, so at most one shadow ray per launch adds to it.
 extern "C" __global__ void __miss__shadow()
 {
     const ShadowRay& ray = params.shadowRays[optixGetLaunchIndex().x - params.numPaths];
     params.image[ray.pixelIndex] += ray.contribution;
 }
 
-// The hit instance's record: material, and mesh for MESH instances.
 static __forceinline__ __device__ InstanceRecord instance()
 {
     return params.instances[optixGetInstanceId()];
 }
 
-// geometricNormal is unit length in world space; only its cosine with the
-// ray is kept (ShadeableIntersection::cosGeometric).
+// geometricNormal is unit length in world space.
 static __forceinline__ __device__ void writeHit(const InstanceRecord& inst, glm::vec3 normal, glm::vec2 uv,
     glm::vec4 tangent, bool outside, glm::vec3 geometricNormal)
 {
@@ -137,23 +103,15 @@ static __forceinline__ __device__ void writeHit(const InstanceRecord& inst, glm:
     params.materialIds[i] = inst.materialId;
 }
 
-// Unit cube GAS: 12 triangles, two per face, in the order -x +x -y +y -z +z
-// (see buildCubeGas), so the primitive index says which face was hit. Like
-// boxIntersectionTest the normal faces the ray: the face's outward normal
-// when the ray came from outside, the inward one when the ray started inside
-// the cube and is leaving (the exit hit of a refractive cube).
+// Like boxIntersectionTest, the normal faces the ray: inward on the exit hit from inside.
 extern "C" __global__ void __closesthit__cube()
 {
     const unsigned int face = optixGetPrimitiveIndex() / 2;
     float n[3] = { 0.0f, 0.0f, 0.0f };
     n[face / 2] = (face & 1) ? 1.0f : -1.0f;
 
-    // Object to world for a normal is the inverse transpose, which handles the
-    // non-uniform scales the scene files use for walls.
     const float3 worldNormal = optixTransformNormalFromObjectToWorldSpace(make_float3(n[0], n[1], n[2]));
-    // A closest-hit program cannot read the object-space ray (only
-    // intersection and any-hit programs can), so the world ray is transformed
-    // by hand with the hit instance's transform.
+    // A closest-hit program cannot read the object-space ray, so the world ray is transformed by hand.
     const float3 origin = optixTransformPointFromWorldToObjectSpace(optixGetWorldRayOrigin());
     const bool outside = fmaxf(fabsf(origin.x), fmaxf(fabsf(origin.y), fabsf(origin.z))) > 0.5f;
 
@@ -165,16 +123,8 @@ extern "C" __global__ void __closesthit__cube()
     writeHit(instance(), normal, glm::vec2(0.0f), glm::vec4(0.0f), outside, normal);
 }
 
-// Unit sphere GAS: one custom primitive, center at the origin, radius 0.5,
-// intersected by the program below. OptiX's built-in sphere primitive is not
-// usable here: it is hollow, back faces are culled, and a ray that starts
-// inside never hits it (Programming Guide 9.1, "Curves and Spheres"), which
-// is exactly the ray a refractive sphere sends out after the first bounce.
-//
-// Same quadratic and same inside rule as sphereIntersectionTest. The
-// object-space direction is left unnormalized on purpose: OptiX derives it
-// from the (normalized) world ray, so the same t parameterizes both spaces
-// and the reported t is the world distance shadeMaterial needs.
+// Radius 0.5 at the origin; the built-in sphere never hits from inside (OptiX Programming Guide 9.1, "Curves and Spheres").
+// The object-space direction stays unnormalized, so t is the same world distance in both spaces.
 extern "C" __global__ void __intersection__sphere()
 {
     const glm::vec3 o = toVec3(optixGetObjectRayOrigin());
@@ -193,8 +143,6 @@ extern "C" __global__ void __intersection__sphere()
     const float tNear = (-b - root) / a;
     const float tFar = (-b + root) / a;
 
-    // Both roots ahead: the ray came from outside and enters at the near one.
-    // Only the far root ahead: the ray started inside and leaves through it.
     float t;
     bool outside;
     if (tNear > 0.0f && tFar > 0.0f)
@@ -212,17 +160,13 @@ extern "C" __global__ void __intersection__sphere()
         return;
     }
 
-    // Attributes for the closest-hit program: the object-space hit point,
-    // which is also the normal direction for a sphere at the origin, and the
-    // inside/outside decision, so it is made in one place.
+    // Attributes: the object-space hit point, which is also the normal direction, then outside.
     const glm::vec3 hit = o + t * d;
     optixReportIntersection(t, 0,
         __float_as_uint(hit.x), __float_as_uint(hit.y), __float_as_uint(hit.z),
         static_cast<unsigned int>(outside));
 }
 
-// Like sphereIntersectionTest the normal is flipped to face the ray when the
-// ray started inside.
 extern "C" __global__ void __closesthit__sphere()
 {
     const float3 hit = make_float3(__uint_as_float(optixGetAttribute_0()),
@@ -239,13 +183,7 @@ extern "C" __global__ void __closesthit__sphere()
     writeHit(instance(), normal, glm::vec2(0.0f), glm::vec4(0.0f), outside, normal);
 }
 
-// Mesh GAS: OptiX's built-in triangle intersection reports which triangle of
-// the instance's TriangleMesh was hit and where on it (barycentrics u, v
-// weighting vertices 1 and 2). The vertex data comes from the same flat
-// arrays the naive kernel reads. Same conventions as meshIntersectionTest:
-// the geometric normal decides outside, the interpolated vertex normal is
-// the shading normal, flipped to face the ray on a back-face hit, and the uv
-// and tangent are interpolated with the same weights.
+// Same conventions as meshIntersectionTest: the geometric normal decides outside.
 extern "C" __global__ void __closesthit__mesh()
 {
     const InstanceRecord inst = instance();
@@ -255,15 +193,11 @@ extern "C" __global__ void __closesthit__mesh()
     const glm::vec3 p1 = params.buffers.positions[tri.y];
     const glm::vec3 p2 = params.buffers.positions[tri.z];
 
-    // Object-space direction, transformed by hand since a closest-hit program
-    // cannot read the object ray. Only its sign against the geometric normal
-    // matters, and that is the same in object and world space.
+    // Only the sign against the geometric normal matters, which object and world space share.
     const glm::vec3 d = toVec3(optixTransformVectorFromWorldToObjectSpace(optixGetWorldRayDirection()));
     const glm::vec3 geometricNormal = glm::cross(p1 - p0, p2 - p0);
     const bool outside = glm::dot(geometricNormal, d) < 0.0f;
 
-    // Shading normal, uv and tangent the same way meshIntersectionTest makes
-    // them (mesh_hit.h), with the hit instance's transforms.
     const auto normalToWorld = [](glm::vec3 n) { return toVec3(optixTransformNormalFromObjectToWorldSpace(toFloat3(n))); };
     const auto vectorToWorld = [](glm::vec3 t) { return toVec3(optixTransformVectorFromObjectToWorldSpace(toFloat3(t))); };
     const float2 bary = optixGetTriangleBarycentrics();
@@ -275,13 +209,7 @@ extern "C" __global__ void __closesthit__mesh()
     writeHit(inst, normal, uv, tangent, outside, glm::normalize(normalToWorld(geometricNormal)));
 }
 
-// Any-hit for alpha-tested instances only (the others have it disabled by
-// their instance flags): a hit in a cut-out is ignored and traversal goes on,
-// the same test meshIntersectionTest makes. OptiX may call this more than
-// once for the same triangle; the test gives the same answer every time.
-// The primitive index is the triangle's index in its mesh, since each mesh
-// GAS is built from that mesh's slice of the index array. A shadow ray
-// carries its own seed.
+// OptiX may call this more than once per triangle, so the cut-out test must give the same answer each time.
 extern "C" __global__ void __anyhit__mesh()
 {
     const InstanceRecord inst = instance();

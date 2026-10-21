@@ -54,7 +54,7 @@ void Image::saveEXR(const std::string &baseFilename)
 {
     std::string filename = baseFilename + ".exr";
     const char* err = nullptr;
-    // RGB float32 (the 0 is "not half"), ZIP compressed by tinyexr.
+    // 0: float32 channels, not half.
     if (SaveEXR((const float*) pixels, xSize, ySize, 3, 0, filename.c_str(), &err) == TINYEXR_SUCCESS)
     {
         std::cout << "Saved " << filename << "." << std::endl;

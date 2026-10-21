@@ -22,15 +22,8 @@
 #include "optix/optix_intersect.h"
 #include "render/textures.h"
 
-// After kernel launches: waits for the device and ends the program, naming
-// msg, if anything launched since the last check failed (the error a kernel
-// hits only shows once the device has run it). ERRORCHECK 0 skips both, and
-// the explicit wait after the intersection stage. Off in Release since the
-// 2026-10-02 profile: the two waits per bounce cost 5 to 10% of a sample at
-// 1024x1024 and up to 20% at 400x400 (README, Performance). A kernel error
-// still ends the run, at wavefrontSwapPaths' stream wait in the same bounce,
-// with that call's name instead of the stage's. -DERRORCHECK=1 turns it back
-// on.
+// Off in Release: the two device waits per bounce cost 5 to 20% of a sample.
+// A kernel error still ends the run at wavefrontSwapPaths' stream wait.
 #ifndef ERRORCHECK
 #ifdef NDEBUG
 #define ERRORCHECK 0
@@ -48,7 +41,6 @@ void checkCUDAErrorFn(const char* msg, const char* file, int line)
 #endif // ERRORCHECK
 }
 
-//Kernel that writes the image to the OpenGL PBO directly.
 __global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution, int iter, glm::vec3* image,
     ToneMapMode toneMap, float exposure)
 {
@@ -58,15 +50,14 @@ __global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution, int iter, glm
     if (x < resolution.x && y < resolution.y)
     {
         int index = x + (y * resolution.x);
-        glm::vec3 pix = image[index] / (float)iter;   // running average, scene-linear
-        pix = applyToneMap(pix, toneMap, exposure);   // display-encoded [0, 1]
+        glm::vec3 pix = image[index] / (float)iter;
+        pix = applyToneMap(pix, toneMap, exposure);
 
         glm::ivec3 color;
         color.x = glm::clamp((int)(pix.x * 255.0), 0, 255);
         color.y = glm::clamp((int)(pix.y * 255.0), 0, 255);
         color.z = glm::clamp((int)(pix.z * 255.0), 0, 255);
 
-        // Each thread writes one pixel location in the texture (textel)
         pbo[index].w = 0;
         pbo[index].x = color.x;
         pbo[index].y = color.y;
@@ -80,38 +71,23 @@ static glm::vec3* dev_image = NULL;
 static Geom* dev_geoms = NULL;
 static Material* dev_materials = NULL;
 static int* dev_materialIds = NULL;
-// two ping-pong pairs: wavefrontSwapPaths (after shading) and sortMaterials
-// swap them with the spare buffers in wavefront_ops.cu, so they change every
-// bounce.
+// Swapped with the spare buffers in wavefront_ops.cu every bounce
 static PathSegment* dev_paths = NULL;
 static ShadeableIntersection* dev_intersections = NULL;
-// The scene's flat mesh arrays (see Scene), read by the naive kernel and by
-// OptiX. Null pointers when the scene has no meshes.
 static MeshBuffers dev_mesh = {};
-// Texture objects indexed like Scene::textures (textures.cpp), null when the
-// scene has none.
 static cudaTextureObject_t* dev_textures = NULL;
-// The scene's environment (textures.cpp), radiance zero when it has none.
 static EnvironmentMap dev_environment = {};
-// Next event estimation's light list (nee.h, from Scene's), numLights 0 when
-// the scene has nothing it can sample. uploadLights fills it from hst_scene.
 static LightList dev_lights = {};
-// The real lens's surfaces and their aspheric coefficients (Scene::lens),
-// null when the scene has none. Uploaded here so the table is runtime data.
-// dev_lensDevice is what the generate kernel reads; dev_lensBlocked counts the
-// camera rays the lens blocked since the last reset, over lensRays camera
-// rays, for the blocked-ray fraction (the aspheric terms are not read yet).
 static LensSurface* dev_lens = NULL;
-static float* dev_lensAspheric = NULL;
+static float* dev_lensAspheric = NULL;  // not read yet
 static LensDevice dev_lensDevice = {};
-static int* dev_lensBlocked = NULL;
-static double lensRays = 0.0;
+static int* dev_lensBlocked = NULL;     // camera rays the lens blocked since the last reset
+static double lensRays = 0.0;           // camera rays since the last reset
 static void uploadLights();
 static void freeLights();
 static void uploadLens();
 static void freeLens();
 
-// Device copy of a host vector, or null when it is empty.
 template <typename T>
 static T* uploadVector(const std::vector<T>& v)
 {
@@ -145,16 +121,12 @@ void setCompaction(bool enabled) { useCompaction = enabled; }
 static bool useNee = true;
 void setNextEventEstimation(bool enabled) { useNee = enabled; }
 
-// OptiX intersection stage. useOptix is the request; optixReady is whether
-// optixIntersectInit succeeded, which is what intersectScene checks.
 static bool useOptix = true;
 static bool optixValidation = false;
-static bool optixReady = false;
+static bool optixReady = false;  // optixIntersectInit succeeded
 void setOptix(bool enabled) { useOptix = enabled; }
 void setOptixValidation(bool enabled) { optixValidation = enabled; }
 
-// Shadow rays are traced by the OptiX launch, so next event estimation needs
-// OptiX, and a light to sample.
 bool pathtraceNeeAvailable() { return optixReady && dev_lights.numLights > 0; }
 
 static ToneMapMode toneMapMode = TONEMAP_AGX_PUNCHY;
@@ -165,13 +137,8 @@ void setToneMap(ToneMapMode mode, float exposure)
     toneMapExposure = exposure;
 }
 
-// --timing (timing.h): cudaEvents around every stage of every bounce. The
-// time between two consecutive events is what the GPU timeline shows between
-// them, so a stage's time is its kernels plus the launch gaps and any host
-// synchronization inside it (the error checks, wavefrontSwapPaths' readback
-// of the alive count, which is all the compact stage holds since compaction
-// moved into shadeMaterial). Sums over iterations; pathtraceTimingReport
-// averages.
+// --timing: cudaEvents around every stage of every bounce, so a stage's time
+// includes launch gaps and host synchronization inside it. Summed over iterations.
 namespace
 {
 enum Stage { STAGE_INTERSECT, STAGE_SORT, STAGE_SHADE, STAGE_COMPACT, NUM_STAGES };
@@ -179,15 +146,13 @@ const char* const STAGE_NAMES[NUM_STAGES] = { "intersect", "sort", "shade", "com
 
 struct StageTiming
 {
-    int maxDepth = 0;                 // bounces the events cover
-    int iterations = 0;               // iterations summed so far
+    int maxDepth = 0;
+    int iterations = 0;
     double generateMs = 0.0;
-    double shadowTailMs = 0.0;        // the launch of the last bounce's shadow rays, after the loop
+    double shadowTailMs = 0.0;        // the last bounce's shadow ray launch, after the loop
     std::vector<double> stageMs;      // [depth * NUM_STAGES + stage]
     std::vector<double> alive;        // [depth]: paths entering bounce depth; [maxDepth]: left after the last
-    // 0 before generate, 1 after, then 2 + depth * NUM_STAGES + stage, then
-    // one after the shadow tail
-    std::vector<cudaEvent_t> events;
+    std::vector<cudaEvent_t> events;  // 0 before generate, 1 after, then per stage, then after the shadow tail
 
     int eventIndex(int depth, int stage) const { return 2 + depth * NUM_STAGES + stage; }
     int tailIndex() const { return 2 + maxDepth * NUM_STAGES; }
@@ -216,7 +181,6 @@ void stageTimingInit(int maxDepth)
     }
 }
 
-// Waits for the iteration's last event and adds every interval to the sums.
 void stageTimingAccumulate(int bounces)
 {
     StageTiming& st = stageTiming;
@@ -251,7 +215,6 @@ void pathtraceTimingReport()
     printf("TIMING,size.PathSegment_bytes,%zu\n", sizeof(PathSegment));
     printf("TIMING,size.ShadeableIntersection_bytes,%zu\n", sizeof(ShadeableIntersection));
     printf("TIMING,size.ShadowRay_bytes,%zu\n", sizeof(ShadowRay));
-    // The material sort's key range: how many groups the sort can make
     printf("TIMING,scene.materials,%d\n", (int)hst_scene->materials.size());
     printf("TIMING,render.generate,%.4f\n", st.generateMs / st.iterations);
     if (dev_lensBlocked != nullptr && lensRays > 0.0)
@@ -284,7 +247,6 @@ void pathtraceInit(Scene* scene)
     const Camera& cam = hst_scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
 
-    // Device memory before and after, for the scene's footprint
     size_t freeBefore = 0;
     size_t totalMemory = 0;
     CUDA_CHECK(cudaMemGetInfo(&freeBefore, &totalMemory));
@@ -303,9 +265,7 @@ void pathtraceInit(Scene* scene)
     CUDA_CHECK(cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection)));
     CUDA_CHECK(cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection)));
 
-    // The material sort's key per path, written by the intersection stage
     CUDA_CHECK(cudaMalloc(&dev_materialIds, pixelcount * sizeof(int)));
-    // Spare buffers and CUB storage for compaction and the material sort
     wavefrontInit(pixelcount);
 
     {
@@ -324,9 +284,6 @@ void pathtraceInit(Scene* scene)
         dev_environment = environmentInit(scene->environment);
     }
 
-    // OptiX intersection stage: context, acceleration structures, pipeline
-    // and shader binding table, built once for this scene. If the driver has
-    // no OptiX or any step fails, computeIntersections stays in use.
     optixReady = useOptix && optixIntersectInit(scene, dev_mesh, dev_materials, dev_textures, optixValidation);
     if (useOptix && !optixReady)
     {
@@ -350,7 +307,7 @@ void pathtraceInit(Scene* scene)
 
 void pathtraceFree()
 {
-    cudaFree(dev_image);  // no-op if dev_image is null
+    cudaFree(dev_image);
     cudaFree(dev_paths);
     cudaFree(dev_geoms);
     cudaFree(dev_materials);
@@ -374,17 +331,12 @@ void pathtraceFree()
     dev_textures = NULL;
     environmentFree();
     dev_environment = {};
-    // Frees the spares. dev_paths / dev_intersections above may hold the
-    // workspace's original buffers by now; the two sides still free each
-    // allocation exactly once.
     wavefrontFree();
     stageTimingFree();
 
     checkCUDAError("pathtraceFree");
 }
 
-// The lens from hst_scene, for pathtraceInit and a lens swap: the table,
-// what the generate kernel reads of it, and the blocked-ray counter.
 static void uploadLens()
 {
     const Scene& scene = *hst_scene;
@@ -424,7 +376,6 @@ static void freeLens()
 
 void pathtraceSetLens()
 {
-    // The last iteration's generate kernel may still read the old table
     CUDA_CHECK(cudaDeviceSynchronize());
     freeLens();
     uploadLens();
@@ -432,12 +383,9 @@ void pathtraceSetLens()
 
 void pathtraceSetEnvironment(const Environment& env)
 {
-    // The last iteration's kernels may still read the old texture.
     CUDA_CHECK(cudaDeviceSynchronize());
     environmentFree();
     dev_environment = environmentInit(env);
-    // The environment's power is part of the light list, so every light's
-    // share of the picks changes with it.
     freeLights();
     hst_scene->buildLights();
     uploadLights();
@@ -466,7 +414,6 @@ float pathtraceLensBlockedFraction()
     return (float)(blocked / lensRays);
 }
 
-// The light list from hst_scene, for pathtraceInit and an environment swap.
 static void uploadLights()
 {
     dev_lights.triangles = uploadVector(hst_scene->lightTriangles);
@@ -495,21 +442,9 @@ static void freeLights()
     dev_lights = {};
 }
 
-// One path per pixel, starting at the camera: a ray through a random point
-// in the pixel (antialiasing), white throughput and traceDepth bounces left.
-// The pinhole sends it from the eye; the thin lens from a random point on
-// the aperture, aimed so that rays through one pixel meet on the plane in
-// focus; the real lens from the pixel's point on the film, through a random
-// point of the rear element and out through every surface of the lens
-// (lens_trace.h). The pinhole draws its two random numbers first and nothing
-// else, so its image does not change when the other cameras draw more.
-// Without antialias every ray goes through the pixel's center; the two
-// numbers are still drawn, so the rest of the stream stays the same.
-//
-// A ray the lens blocks (vignetted at a rim or the stop, or reflected back by
-// total internal reflection) carries nothing: black and with no bounces
-// left, so the intersection stage skips it and the shade kernel drops it.
-// Their count, one atomic per warp, is the lens's blocked-ray fraction.
+// One path per pixel. The pinhole draws its two random numbers first and
+// nothing else, so its image does not change when the other cameras draw
+// more. A ray the lens blocks is black with no bounces left.
 __global__ void generateRayFromCamera(Camera cam, LensDevice lens, int iter, int traceDepth, bool antialias,
     PathSegment* pathSegments)
 {
@@ -523,30 +458,22 @@ __global__ void generateRayFromCamera(Camera cam, LensDevice lens, int iter, int
 
         segment.color = glm::vec3(1.0f, 1.0f, 1.0f);
 
-        // jitter the x and y pixel coordinates as floats
         thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
         thrust::uniform_real_distribution<float> u01(0, 1);
-        float jx = u01(rng);   // in [0, 1)
+        float jx = u01(rng);
         float jy = u01(rng);
         if (!antialias)
         {
             jx = 0.5f;
             jy = 0.5f;
         }
-        // The direction through the pixel, 1 along view, so that position +
-        // d * t lies on the plane t ahead of the camera. Pixel (0, 0) is the
-        // top left of the image, as the PNG and the viewport texture store
-        // it: x runs along right, y against up.
+        // Pixel (0, 0) is the top left: x runs along right, y against up
         const glm::vec3 d = cam.view
             + cam.right * cam.pixelLength.x * (float(x + jx) - (float)cam.resolution.x * 0.5f)
             - cam.up * cam.pixelLength.y * ((float)(y + jy) - (float)cam.resolution.y * 0.5f);
 
         if (cam.type == CAMERA_THIN_LENS)
         {
-            // Every ray through this pixel passes the same point of the plane
-            // in focus, so that plane is sharp and everything off it blurs by
-            // the aperture's size. A uniform point on the aperture disk: the
-            // radius goes as sqrt(u) so the area is covered evenly.
             const glm::vec3 focus = cam.position + d * cam.focusDistance;
             const float r = cam.apertureRadius * sqrtf(u01(rng));
             const float phi = TWO_PI * u01(rng);
@@ -555,18 +482,12 @@ __global__ void generateRayFromCamera(Camera cam, LensDevice lens, int iter, int
         }
         else if (cam.type == CAMERA_REAL_LENS && lens.surfaces != nullptr)
         {
-            // The pixel's point on the film, in lens space (mm, z toward the
-            // film). The lens turns the image over, so the pixel right of
-            // center sits left of center on the film and the pixel below
-            // center sits above it; cam.right already carries a mirrored
-            // camera's flip.
+            // The lens turns the image over, so the film point is mirrored in x and y
             const glm::vec3 film(
                 -(float(x + jx) - (float)cam.resolution.x * 0.5f) * lens.pixelMm,
                 ((float)(y + jy) - (float)cam.resolution.y * 0.5f) * lens.pixelMm,
                 lens.filmDistance);
-            // A uniform point of the rear element's disk to aim at. Most of
-            // the disk is wasted away from the center (the exit pupil is
-            // smaller and off to one side); those rays come back blocked.
+            // Aimed at the whole rear element; rays outside the exit pupil come back blocked
             const float r = lens.rearRadius * sqrtf(u01(rng));
             const float phi = TWO_PI * u01(rng);
             const glm::vec3 rear(r * cosf(phi), r * sinf(phi), lens.rearZ);
@@ -576,9 +497,7 @@ __global__ void generateRayFromCamera(Camera cam, LensDevice lens, int iter, int
                 && isfinite(o.x + o.y + o.z + dir.x + dir.y + dir.z);
             if (out)
             {
-                // Lens space to the world: x along right, y along up, z
-                // against view, with the entrance pupil at cam.position so
-                // the framing matches the other camera types
+                // Lens z runs against view, with the entrance pupil at cam.position
                 segment.ray.origin = cam.position
                     + (cam.right * o.x + cam.up * o.y + cam.view * (lens.entrancePupilZ - o.z)) * lens.mmToScene;
                 segment.ray.direction = glm::normalize(cam.right * dir.x + cam.up * dir.y - cam.view * dir.z);
@@ -599,15 +518,14 @@ __global__ void generateRayFromCamera(Camera cam, LensDevice lens, int iter, int
 
         segment.pixelIndex = index;
         segment.remainingBounces = blocked ? 0 : traceDepth;
-        segment.medium = -1;  // the camera sits in air
-        segment.pdf = 0.0f;   // a light the camera sees directly counts in full
+        segment.medium = -1;
+        segment.pdf = 0.0f;
         segment.receiverMask = 0xffffffffu;  // linking never hides an emitter from the camera
     }
 
     if (lens.blocked != nullptr)
     {
-        // The 8x8 block is two whole warps and nothing above returns early,
-        // so every lane votes
+        // Nothing above returns early, so every lane votes
         const unsigned int votes = __ballot_sync(0xffffffffu, blocked);
         const int lane = (threadIdx.y * blockDim.x + threadIdx.x) & 31;
         if (lane == 0 && votes != 0u)
@@ -617,10 +535,7 @@ __global__ void generateRayFromCamera(Camera cam, LensDevice lens, int iter, int
     }
 }
 
-// The naive intersection stage: every path tests every Geom (every triangle
-// of a mesh), closest hit wins. Writes the hit, or t = -1 on a miss, and the
-// material sort key; the shade kernel makes the next ray. iter seeds the
-// ALPHA_BLEND test.
+// The naive intersection stage: every path tests every Geom, closest hit wins.
 __global__ void computeIntersections(
     int iter,
     int numPaths,
@@ -639,8 +554,6 @@ __global__ void computeIntersections(
     if (pathIndex < numPaths)
     {
         PathSegment pathSegment = pathSegments[pathIndex];
-        // An ended path, left in place when compaction is off, tests
-        // nothing; the shade kernel skips it too.
         if (pathSegment.remainingBounces <= 0)
         {
             return;
@@ -665,7 +578,6 @@ __global__ void computeIntersections(
         {
             Geom& geom = geoms[i];
 
-            // Only meshes have texture coordinates and tangents.
             tmpUv = glm::vec2(0.0f);
             tmpTangent = glm::vec4(0.0f);
             if (geom.type == GeomType::CUBE)
@@ -676,14 +588,12 @@ __global__ void computeIntersections(
             {
                 t = sphereIntersectionTest(geom, pathSegment.ray, tmpPoint, tmpNormal, tmpOutside);
             }
-            else  // MESH: every triangle of the instanced mesh
+            else
             {
                 t = meshIntersectionTest(geom, i, buffers.meshes[geom.meshId], buffers, materials[geom.materialId],
                     textures, alphaSeed, pathSegment.ray, tmpPoint, tmpNormal, tmpUv, tmpTangent, tmpOutside);
             }
 
-            // Compute the minimum t from the intersection tests to determine what
-            // scene geometry object was hit first.
             if (t > 0.0f && tMin > t)
             {
                 tMin = t;
@@ -698,13 +608,10 @@ __global__ void computeIntersections(
         if (hitGeomIndex == -1)
         {
             intersections[pathIndex].t = -1.0f;
-            // one past the last material id: misses sort last and the key
-            // range stays small enough for a one-pass radix sort
-            materialIds[pathIndex] = numMaterials;
+            materialIds[pathIndex] = numMaterials;  // misses sort last
         }
         else
         {
-            // The ray hits something
             intersections[pathIndex].t = tMin;
             intersections[pathIndex].materialId = geoms[hitGeomIndex].materialId;
             materialIds[pathIndex] = geoms[hitGeomIndex].materialId;
@@ -718,11 +625,7 @@ __global__ void computeIntersections(
     }
 }
 
-// The intersection stage behind one call: OptiX when it initialized, else
-// the naive kernel above. Both fill dev_intersections and dev_materialIds the
-// same way, so nothing downstream knows which one ran. OptiX also traces the
-// shadow rays the last shade launch queued, at most shadowBound of them;
-// without OptiX next event estimation is off and there are none.
+// OptiX when it initialized, else the naive kernel; OptiX also traces the queued shadow rays.
 static void intersectScene(int iter, int numPaths, int numMaterials, const ShadowQueue& shadows, int shadowBound)
 {
     if (optixReady)
@@ -747,25 +650,10 @@ static void intersectScene(int iter, int numPaths, int numMaterials, const Shado
     );
 }
 
-// The survivor append below takes whole warps.
 static_assert(PATH_BLOCK_SIZE % 32 == 0, "shadeMaterial's blocks must be whole warps");
 
-// Shades paths[0, numPaths) and appends the paths that go on to
-// survivors.paths, compacted: the compaction is fused into shading, so no
-// separate pass reads the paths again to drop the ones that ended. Without
-// compact, survivors.paths is pathSegments itself: each path shaded here goes
-// back to its own slot, an ended one is not touched, and survivors.count
-// still counts the ones that go on.
-//
-// With nee (next event estimation, which needs OptiX and a light in lights),
-// every hit that is not the path's last also samples a light and appends a
-// shadow ray carrying that sample's light to shadows, for the next OptiX
-// launch to trace. Each emitter's light then reaches the image along two
-// strategies, the light sample and a BSDF-sampled ray that happens to hit
-// the emitter, and the power heuristic splits it between them: both weights
-// come from the same two densities for the same direction (the BSDF's,
-// evalPbr, and the light's, sampleLight), so they add up to 1 and every
-// direction counts once.
+// Shades every path, appends the survivors to survivors.paths (in place when
+// compact is off) and, with nee, a shadow ray per hit to shadows.
 __global__ void shadeMaterial(
     int iter,
     int numPaths,
@@ -784,14 +672,8 @@ __global__ void shadeMaterial(
     glm::vec3* image)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    // Every lane of the warp has to reach the ballot at the end, so a lane
-    // with nothing to shade (past numPaths, or a path already ended) skips the
-    // shading instead of returning.
-    //
-    // Work on a register copy of the segment: one coalesced load here and one
-    // store at the end, instead of global traffic on every field access
-    // (scatterPbr takes it by reference, so it would otherwise hit global
-    // memory for every read and write inside).
+    // Every lane must reach the ballot at the end, so no early return. seg is
+    // a register copy: scatterPbr takes it by reference.
     PathSegment seg;
     bool alive = false;
     if (idx < numPaths)
@@ -800,28 +682,15 @@ __global__ void shadeMaterial(
         alive = seg.remainingBounces > 0;
     }
     const bool shaded = alive;
-    // This hit's light sample, appended to the shadow queue at the end like
-    // the survivors.
     ShadowRay shadow;
     bool queueShadow = false;
     if (alive)
     {
         ShadeableIntersection intersection = shadeableIntersections[idx];
 
-        // A path ends by setting remainingBounces to 0 and is then left out
-        // of the survivors. Its color is not read again: light reaches the
-        // image only through the environment, the emission added below and
-        // the light samples it queues.
         if (intersection.t <= 0.0f)
         {
-            // A miss: the path leaves the scene and adds the environment's
-            // light from its direction. A camera ray that misses sees the
-            // environment as the background. With next event estimation
-            // the environment is one of the lights, and a ray from a rough
-            // lobe shares its light with the environment sample the
-            // previous hit took, weighed against the environment's density
-            // for the same direction (the pick share of that surface's
-            // mask); a camera ray or a smooth lobe's ray keeps all of it.
+            // A miss adds the environment, MIS-weighted against the environment sample the previous hit took
             if (environment.radiance != glm::vec3(0.0f))
             {
                 float weight = 1.0f;
@@ -843,9 +712,7 @@ __global__ void shadeMaterial(
             const glm::vec3 hitPoint = seg.ray.origin + intersection.t * seg.ray.direction;
             const glm::vec3 wo = -seg.ray.direction;
 
-            // Inside a volume (the path refracted into a material and has not
-            // refracted out), the segment that just ended was absorbed along
-            // its length t (Beer-Lambert), whatever it ended on.
+            // Beer-Lambert absorption along the segment inside a volume
             if (seg.medium >= 0)
             {
                 const glm::vec3 absorption = materials[seg.medium].absorption;
@@ -855,8 +722,6 @@ __global__ void shadeMaterial(
                 }
             }
 
-            // The texture lookups happen once per hit. On the last bounce the
-            // path ends here, so only the emission is needed.
             const bool lastBounce = seg.remainingBounces == 1;
             PbrSurface surface;
             glm::vec3 emission;
@@ -869,23 +734,8 @@ __global__ void shadeMaterial(
                 surface = pbrSurface(material, intersection, wo, textures);
                 emission = surface.emission;
             }
-            // An emitting surface adds its light and the path goes on: an
-            // emitter also reflects, like any other surface. Each pixel has
-            // exactly one path per iteration, so no two threads add to the
-            // same pixel.
-            //
-            // With next event estimation, a ray the BSDF sampled from a rough
-            // lobe (pdf > 0) shares this light with the light sample the
-            // previous hit took: the light's density for the same direction
-            // is its area density in that surface's pick row times
-            // t^2 / cos at the emitter, with the flat triangle's cosine, as
-            // sampleLight computes it. A camera ray, a smooth lobe's ray and
-            // an emitter NEE does not sample (area density 0) keep all of it.
-            //
-            // Light linking: the emission counts only when the surface the
-            // ray left receives the emitter's group. The light sample that
-            // hit took gave zero for the same emitter (sampleLight), so the
-            // two strategies still agree.
+            // Emission, MIS-weighted against the light sample the previous hit
+            // took (pdf 0: camera ray, smooth lobe, or an emitter NEE does not sample)
             if (emission != glm::vec3(0.0f) && receivesGroup(seg.receiverMask, intersection.lightGroup))
             {
                 float weight = 1.0f;
@@ -901,22 +751,15 @@ __global__ void shadeMaterial(
                 }
                 image[seg.pixelIndex] += seg.color * emission * weight;
             }
-            // From here on the path leaves this surface: what it receives
-            // decides which emitters the next ray may count.
             seg.receiverMask = intersection.lightMask;
 
             if (lastBounce)
             {
-                seg.remainingBounces = 0;  // the next ray would not be traced
+                seg.remainingBounces = 0;
             }
             else
             {
-                // Next event estimation: one light sample per hit, before
-                // Russian roulette as in PBRT, so a path that ends here still
-                // gets its direct light. The BSDF is evaluated toward the
-                // light, and the power heuristic weighs the sample against
-                // the BSDF's density for that direction. A smooth material
-                // gives nothing (evalPbr is zero), and no shadow ray goes out.
+                // One light sample per hit, before Russian roulette as in PBRT
                 if (nee)
                 {
                     thrust::uniform_real_distribution<float> u01(0, 1);
@@ -932,8 +775,6 @@ __global__ void shadeMaterial(
                         if (f.fCos != glm::vec3(0.0f))
                         {
                             const float weight = light.pdf > 0.0f ? powerHeuristic(light.pdf, f.pdf) : 1.0f;
-                            // The shadow ray leaves on the side the light is
-                            // on: through the surface for a transmission.
                             const float side = glm::dot(light.wi, intersection.surfaceNormal) > 0.0f ? 1.0f : -1.0f;
                             shadow.origin = offsetOrigin(hitPoint, side * intersection.surfaceNormal);
                             shadow.direction = light.wi;
@@ -946,11 +787,6 @@ __global__ void shadeMaterial(
                     }
                 }
 
-                // Russian roulette from the third bounce: the path survives
-                // with a probability that follows the luminance of its
-                // throughput (at most 0.95), and a survivor's throughput is
-                // divided by that probability, which keeps the estimate
-                // unbiased.
                 if (russianRoulette && depth >= 3)
                 {
                     const glm::vec3 c = seg.color;
@@ -968,14 +804,11 @@ __global__ void shadeMaterial(
 
                 if (seg.remainingBounces > 0)
                 {
-                    // A sample that carries no light ends the path.
                     if (scatterPbr(seg, hitPoint, intersection.surfaceNormal, intersection.outside, material, surface,
                             rng))
                     {
                         --seg.remainingBounces;
-                        // A direction past the surface refracted into the
-                        // object or out of it: the medium for the absorption
-                        // above travels with the path.
+                        // A direction past the surface refracted into the object or out of it
                         if (glm::dot(seg.ray.direction, intersection.surfaceNormal) < 0.0f)
                         {
                             seg.medium = intersection.outside ? intersection.materialId : -1;
@@ -992,10 +825,7 @@ __global__ void shadeMaterial(
         alive = seg.remainingBounces > 0;
     }
 
-    // The warp's survivors take consecutive slots of survivors.paths: lane 0
-    // reserves them with one atomicAdd for the whole warp, and each survivor
-    // writes to the reserved base plus the number of survivors in the lanes
-    // below it. A path that ended is not written anywhere.
+    // Warp-aggregated append: lane 0 reserves the warp's slots with one atomicAdd
     const unsigned int warpSurvivors = __ballot_sync(0xffffffffu, alive);
     const unsigned int lane = threadIdx.x % 32;
     int base = 0;
@@ -1006,8 +836,6 @@ __global__ void shadeMaterial(
     base = __shfl_sync(0xffffffffu, base, 0);
     if (!compact)
     {
-        // In place: only a path shaded here changed. Every lane reaches the
-        // ballot above, so the ones that ended earlier skip just the store.
         if (shaded)
         {
             survivors.paths[idx] = seg;
@@ -1019,15 +847,11 @@ __global__ void shadeMaterial(
         survivors.paths[base + __popc(warpSurvivors & lanesBelow)] = seg;
     }
 
-    // The next bounce appends into nextCount. It last held the survivors of
-    // the bounce two back, and nothing reads it anymore.
     if (idx == 0)
     {
         *survivors.nextCount = 0;
     }
 
-    // Shadow rays the same way. Without next event estimation the queue
-    // and its counters are left alone.
     if (nee)
     {
         const unsigned int warpShadows = __ballot_sync(0xffffffffu, queueShadow);
@@ -1048,8 +872,6 @@ __global__ void shadeMaterial(
     }
 }
 
-// Number of bits needed to hold every value in [0, maxValue]. Sets the radix
-// sort's key range so it runs one pass for a scene with few materials.
 static int bitsToHold(int maxValue)
 {
     int bits = 1;
@@ -1066,22 +888,18 @@ void pathtrace(uchar4* pbo, int iter)
     const Camera& cam = hst_scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
     const int numMaterials = (int)hst_scene->materials.size();
-    // Sort keys lie in [0, numMaterials]; numMaterials is the miss key.
-    const int materialKeyBits = bitsToHold(numMaterials);
+    const int materialKeyBits = bitsToHold(numMaterials);  // numMaterials is the miss key
 
-    // 2D block for generating ray from camera
     const dim3 blockSize2d(8, 8);
     const dim3 blocksPerGrid2d(
         (cam.resolution.x + blockSize2d.x - 1) / blockSize2d.x,
         (cam.resolution.y + blockSize2d.y - 1) / blockSize2d.y);
 
-    // The timing events record on the default stream, like every launch here
     const bool timing = timingEnabled() && stageTiming.ready(traceDepth);
     if (timing)
     {
         CUDA_CHECK(cudaEventRecord(stageTiming.events[0]));
     }
-    // The blocked-ray count runs only while the real lens renders
     LensDevice lens = dev_lensDevice;
     lens.blocked = cam.type == CAMERA_REAL_LENS && dev_lens != nullptr ? dev_lensBlocked : nullptr;
     if (lens.blocked != nullptr)
@@ -1096,33 +914,22 @@ void pathtrace(uchar4* pbo, int iter)
     }
 
     int depth = 0;
-    // numPaths is how many paths the launches cover, numAlive how many of
-    // them go on. They differ only without compaction, where the launches
-    // keep covering every pixel.
-    int numPaths = pixelcount;
+    int numPaths = pixelcount;  // paths the launches cover; differs from numAlive only without compaction
     int numAlive = pixelcount;
 
-    // Next event estimation's shadow rays are traced one bounce late, by the
-    // next bounce's intersection launch: the queue the last shade launch
-    // filled, and an upper bound on its count, the number of paths that
-    // launch shaded (0: nothing queued).
+    // Shadow rays are traced one bounce late, by the next intersection launch
     const bool nee = useNee && pathtraceNeeAvailable();
     ShadowQueue queuedShadows = {};
     int shadowBound = 0;
 
-    // One bounce per pass: intersect, sort by material, and shade, which makes
-    // the next rays and compacts away the paths that ended.
     bool iterationComplete = false;
     while (!iterationComplete)
     {
-        // dev_intersections is not cleared between bounces: both intersection
-        // paths write every entry, with t = -1 on a miss.
         if (timing)
         {
             stageTiming.alive[depth] += numAlive;
         }
 
-        // tracing
         dim3 numBlocks = (numPaths + PATH_BLOCK_SIZE - 1) / PATH_BLOCK_SIZE;
         intersectScene(iter, numPaths, numMaterials, queuedShadows, shadowBound);
         checkCUDAError("trace one bounce");
@@ -1134,10 +941,6 @@ void pathtrace(uchar4* pbo, int iter)
             CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.eventIndex(depth, STAGE_INTERSECT)]));
         }
 
-        // Material sort: group paths by the material they hit, so the threads
-        // of a shadeMaterial warp read the same material and mostly pick the
-        // same lobes. Swaps dev_paths and dev_intersections for the sorted
-        // copies.
         if (useMaterialSort)
         {
             sortMaterials(numPaths, materialKeyBits, dev_materialIds, dev_intersections, dev_paths);
@@ -1147,8 +950,6 @@ void pathtrace(uchar4* pbo, int iter)
             CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.eventIndex(depth, STAGE_SORT)]));
         }
 
-        // Shading writes the paths that go on, compacted, into the survivor
-        // buffer; the light of the others is already in the image.
         shadeMaterial<<<numBlocks, PATH_BLOCK_SIZE>>>(
             iter,
             numPaths,
@@ -1170,16 +971,12 @@ void pathtrace(uchar4* pbo, int iter)
         {
             CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.eventIndex(depth, STAGE_SHADE)]));
         }
-        // Every path of a bounce has the same bounces left, so the last
-        // bounce, which samples no lights, queues nothing.
         shadowBound = 0;
         if (nee)
         {
             queuedShadows = wavefrontSwapShadowQueue();
-            shadowBound = depth + 1 < traceDepth ? numPaths : 0;
+            shadowBound = depth + 1 < traceDepth ? numPaths : 0;  // the last bounce queues nothing
         }
-        // Swaps dev_paths for the survivors and reads their count back.
-        // Without compaction the paths were updated in place: only the count.
         if (useCompaction)
         {
             numAlive = wavefrontSwapPaths(dev_paths);
@@ -1203,8 +1000,7 @@ void pathtrace(uchar4* pbo, int iter)
         }
     }
 
-    // The shadow rays of the last bounce that queued any: the paths ended
-    // (or ran out of bounces), so a launch of shadow rays alone.
+    // The last bounce's shadow rays, with no paths left to trace alongside
     if (shadowBound > 0)
     {
         optixIntersect(iter, 0, dev_paths, dev_intersections, dev_materialIds, numMaterials, queuedShadows.rays,
@@ -1214,15 +1010,10 @@ void pathtrace(uchar4* pbo, int iter)
     if (timing)
     {
         CUDA_CHECK(cudaEventRecord(stageTiming.events[stageTiming.tailIndex()]));
-        stageTiming.alive[depth] += numAlive;  // survivors of the last bounce run
+        stageTiming.alive[depth] += numAlive;
         stageTimingAccumulate(depth);
     }
 
-    // No gather pass: shadeMaterial adds light to dev_image at the hit that
-    // emits it, or at the miss that reaches the environment, and the OptiX
-    // launches add the light samples whose shadow rays get through.
-
-    // Send results to OpenGL buffer for rendering (pbo is null in headless mode)
     if (pbo != nullptr)
     {
         sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, iter, dev_image,

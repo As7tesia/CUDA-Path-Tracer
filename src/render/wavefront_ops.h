@@ -2,41 +2,22 @@
 
 #include "scene/sceneStructs.h"
 
-// The wavefront's path buffers and the device-wide operations on them (the
-// survivor buffer shadeMaterial compacts into, and the material sort). Kept in
-// their own translation unit for build time only: a CUB algorithm
-// instantiation costs ~10 s of nvcc, and pathtrace.cu is the file edited most
-// often. Prefer adding new device-wide ops here rather than pulling CUB or
-// thrust algorithm headers into pathtrace.cu.
-//
-// Both are out of place and ping-pong: shadeMaterial and the sort write into a
-// spare buffer from the workspace below, which then trades places with the
-// caller's pointer, so the caller's paths (and, for the sort, intersections)
-// point at a different allocation after every call (except shading without
-// compaction, which updates the paths in place). The spare buffers and
-// CUB's temporary storage are shared, so all calls must go to the same stream.
+// Path buffers and the device-wide operations on them. CUB stays in this
+// translation unit: one algorithm instantiation costs ~10 s of nvcc.
+// Shading and the sort write into spare buffers that then swap with the
+// caller's pointers; the spares and CUB storage are shared, so every call
+// goes to the same stream.
 
-// Threads per block of the 1D kernels over the path array: the naive
-// intersection kernel and shadeMaterial in pathtrace.cu, the sort's helper
-// kernels here.
 constexpr int PATH_BLOCK_SIZE = 128;
 
-// Allocates the workspace for up to maxPaths paths: a spare PathSegment and
-// ShadeableIntersection buffer, the sort's index and key arrays, the three
-// survivor counters, and CUB temporary storage for the sort. Called from
-// pathtraceInit, wavefrontFree from pathtraceFree. The swaps only exchange
-// pointers, so pathtrace.cu freeing whatever its pointers hold and
-// wavefrontFree freeing whatever the spares hold releases every buffer once.
+// Workspace for up to maxPaths paths: spare path and intersection buffers,
+// sort arrays, survivor counters, CUB storage.
 void wavefrontInit(int maxPaths);
 void wavefrontFree();
 
-// Where shadeMaterial appends the paths that survive the current bounce
-// (compaction fused into shading): the spare path buffer and the counter of
-// this bounce's survivors, which starts at zero. nextCount is the counter the
-// following bounce appends into, and the shade kernel zeroes it. Three
-// counters rotate by bounce, so the one being zeroed is never one that a
-// queued or running kernel still reads. Ask after sortMaterials, which swaps
-// the spare too.
+// Where shadeMaterial appends the paths that survive the bounce. Three
+// counters rotate by bounce so the one being zeroed is never one a queued
+// kernel still reads.
 struct SurvivorBuffer
 {
     PathSegment* paths;
@@ -44,18 +25,10 @@ struct SurvivorBuffer
     int* nextCount;
 };
 SurvivorBuffer wavefrontSurvivors();
-// The same counters with paths itself as the buffer, for shading without
-// compaction (--no-compact): shadeMaterial writes each path it shades back to
-// its own slot and leaves the ended ones alone, so nothing is swapped.
+// The same counters with paths itself as the buffer (--no-compact).
 SurvivorBuffer wavefrontSurvivorsInPlace(PathSegment* paths);
 
-// Where shadeMaterial queues the shadow rays of next event estimation, one
-// per path at most, for the next OptiX launch to trace (see ShadowRay). Like
-// the survivors, the shade kernel appends into count, which starts at zero,
-// and zeroes nextCount for the following bounce. Two counters alternate: the
-// launch that reads one has finished before the shade kernel that zeroes it
-// runs, since all of them queue on one stream. The rays are overwritten by
-// every shade launch, after the launch before it has traced them.
+// Shadow rays shadeMaterial queues for the next OptiX launch, one per path at most.
 struct ShadowQueue
 {
     ShadowRay* rays;
@@ -63,28 +36,17 @@ struct ShadowQueue
     int* nextCount;
 };
 ShadowQueue wavefrontShadowQueue();
-// After the shade launch: moves the counters on and returns the queue that
-// launch filled, for the launch that traces it (nextCount is null there).
+// After the shade launch: returns the queue it filled and moves the counters on.
 ShadowQueue wavefrontSwapShadowQueue();
 
-// After the shade launch: swaps the survivor buffer with paths, moves the
-// counters on to the next bounce and returns the number of survivors. Paths
-// that ended are not in the new buffer (shadeMaterial has already added their
-// light to the image), and everything past the returned count is stale.
-// Reading the count back to the host synchronizes.
+// After the shade launch: swaps the survivors into paths and returns their
+// count (reading it synchronizes).
 int wavefrontSwapPaths(PathSegment*& paths, cudaStream_t stream = 0);
-// After a shade launch into wavefrontSurvivorsInPlace: moves the counters on
-// and returns how many paths go on, without swapping. Synchronizes the same way.
+// The survivor count after a shade launch into wavefrontSurvivorsInPlace, no swap.
 int wavefrontCountSurvivors(cudaStream_t stream = 0);
 
-// Sorts the first numPaths paths and their intersections by materialIds (one
-// int key per path, written by the intersection stage: materialId on hit,
-// numMaterials on miss). Radix-sorts (key, path index) pairs on only the low
-// keyBits bits (the caller computes the width of its largest key once, see
-// bitsToHold in pathtrace.cu), then gathers paths and intersections into the
-// spare buffers in sorted order and swaps both pointers. After this, paths
-// hitting the same material are contiguous, so shadeMaterial warps take one
-// branch and read one material. materialIds itself is left unsorted.
+// Sorts paths and intersections by material key (materialId on hit,
+// numMaterials on miss) over the low keyBits bits. materialIds stays unsorted.
 void sortMaterials(int numPaths, int keyBits, const int* materialIds,
                    ShadeableIntersection*& intersections, PathSegment*& paths,
                    cudaStream_t stream = 0);

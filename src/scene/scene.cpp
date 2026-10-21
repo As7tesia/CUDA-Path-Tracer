@@ -25,19 +25,14 @@ using json = nlohmann::json;
 
 namespace
 {
-// Render settings for a scene file that has none, the same as the scene
-// JSONs in scenes/ use. The image is square unless the file's camera gives
-// an aspect ratio.
+// Defaults for a glTF scene, matching the scene JSONs in scenes/.
 const int DEFAULT_HEIGHT = 1024;
 const int DEFAULT_ITERATIONS = 5000;
 const int DEFAULT_TRACE_DEPTH = 8;
-// Vertical field of view, in degrees, of the camera made for a glTF file
-// that has none.
+// Degrees, vertical.
 const float DEFAULT_FOVY = 45.0f;
 
-// Throws a std::runtime_error with the printf-style message. Loading reports
-// its errors this way rather than through fatal() so the window can show
-// the message and keep the scene it has; main() exits on them at startup.
+// Throws rather than fatal() so the window can show the message and keep its scene.
 [[noreturn]] void sceneError(const char* format, ...)
 {
     char message[1024];
@@ -48,7 +43,6 @@ const float DEFAULT_FOVY = 45.0f;
     throw std::runtime_error(message);
 }
 
-// The command line wins over the scene file.
 RenderSettings withOverrides(RenderSettings settings, const SceneOverrides& ov)
 {
     if (ov.width > 0 && ov.height > 0)
@@ -66,8 +60,6 @@ RenderSettings withOverrides(RenderSettings settings, const SceneOverrides& ov)
     return settings;
 }
 
-// The camera a scene's LENS key or --lens asks for: "pinhole", "thin", or a
-// lens file for the real lens.
 void setCameraType(CameraPose& pose, const std::string& value)
 {
     pose.lensFile.clear();
@@ -103,8 +95,7 @@ CameraPose withOverrides(CameraPose pose, const SceneOverrides& ov)
     return pose;
 }
 
-// A scene JSON array of three numbers. Throws, like json::at, when the key is
-// missing or holds something else.
+// Throws, like json::at, when the key is missing or not three numbers.
 glm::vec3 vec3At(const json& object, const char* key)
 {
     const json& v = object.at(key);
@@ -118,8 +109,7 @@ glm::vec3 vec3At(const json& object, const char* key)
 const std::string SCENE_DIR = "scenes/";
 const std::string CATALOG = "scenes/catalog.json";
 
-// The catalog's (name, path relative to scenes/) pairs in file order; none
-// when the file is missing.
+// (name, path relative to scenes/) pairs in file order.
 std::vector<std::pair<std::string, std::string>> readCatalog()
 {
     std::vector<std::pair<std::string, std::string>> entries;
@@ -143,7 +133,6 @@ std::vector<std::pair<std::string, std::string>> readCatalog()
     return entries;
 }
 
-// The stems of the scene JSONs in scenes/, sorted.
 std::vector<std::string> sceneJsonNames()
 {
     std::vector<std::string> names;
@@ -246,9 +235,7 @@ Scene::Scene(string filename, const SceneOverrides& ov)
     cout << "Reading scene from " << filename << " ..." << endl;
     cout << " " << endl;
     const string ext = lowercaseExtension(filename);
-    // Every error while loading, the loaders' own and a missing key or a
-    // value of the wrong type in a JSON, leaves here as a runtime_error
-    // that starts with the scene file's name.
+    // Every load error leaves as a runtime_error starting with the file's name.
     try
     {
         if (ext == ".json")
@@ -263,7 +250,6 @@ Scene::Scene(string filename, const SceneOverrides& ov)
         {
             sceneError("not a scene file (.json, .gltf or .glb)");
         }
-        // --env replaces the scene file's environment, at strength 1 and no rotation
         environment = loadEnvironment(ov.environmentFile.empty()
                 ? environmentSource
                 : EnvironmentSource{ ov.environmentFile, glm::vec3(1.0f), 0.0f },
@@ -320,14 +306,7 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
         sceneError("cannot open");
     }
     const json data = json::parse(f);
-    // Each material TYPE becomes parameters of the one material model
-    // (Material), starting from glTF's default material:
-    //   Diffuse     base color RGB and no specular layer: pure Lambert
-    //   Emitting    emits RGB * EMITTANCE; a black base with no specular
-    //               layer reflects nothing, so the path ends there
-    //   Specular    metal with base color RGB and roughness ROUGHNESS
-    //               (optional, 0 = a perfect mirror)
-    //   Refractive  smooth glass of index IOR, the refraction tinted by RGB
+    // Each material TYPE maps onto Material, starting from glTF's default material.
     std::unordered_map<std::string, uint32_t> materialIdsByName;
     for (const auto& item : data.at("Materials").items())
     {
@@ -371,8 +350,7 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
         materialIdsByName[name] = materials.size();
         materials.emplace_back(newMaterial);
     }
-    // Material by name. The map's operator[] would silently insert 0 for a
-    // typo, which is the light in every Cornell scene.
+    // Not operator[]: it would map a typo to 0, the light in every Cornell scene.
     auto materialIndex = [&](const std::string& name) -> int {
         auto found = materialIdsByName.find(name);
         if (found == materialIdsByName.end())
@@ -382,14 +360,10 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
         return (int)found->second;
     };
 
-    // FILE paths in the scene are relative to the scene file's folder.
+    // FILE paths are relative to the scene file's folder.
     const std::string sceneDir = jsonName.substr(0, jsonName.find_last_of("/\\") + 1);
 
-    // Environment (optional), the light from outside the scene: FILE is a
-    // lat-long .hdr or .exr, RGB instead of FILE one color in every
-    // direction. STRENGTH multiplies either (default 1). ROTATION turns the
-    // map about +Y, in degrees (default 0), the same number a Blender
-    // Mapping node's Z rotation takes.
+    // ROTATION is degrees about +Y, the same number as a Blender Mapping node's Z rotation.
     if (data.contains("Environment"))
     {
         const json& e = data.at("Environment");
@@ -414,9 +388,7 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
 
         if (type == "mesh")
         {
-            // A glTF file: its nodes and primitives become Geoms of type MESH
-            // under this transform. MATERIAL, when given, replaces the file's
-            // materials; without it they are appended to the material list.
+            // MATERIAL, when given, replaces the file's materials.
             const int materialOverride = p.contains("MATERIAL") ? materialIndex(p.at("MATERIAL").get<std::string>()) : -1;
             const std::string file = sceneDir + p.at("FILE").get<std::string>();
             if (!loadGltf(file, transform, materialOverride, *this))
@@ -461,16 +433,13 @@ void Scene::loadFromJSON(const std::string& jsonName, const SceneOverrides& ov)
     pose.up = vec3At(cameraData, "UP");
     pose.fovy = cameraData.at("FOVY").get<float>();
     pose.mirrored = false;
-    // Optional: LENS picks the camera (pinhole without it), APERTURE and
-    // FOCUS set the thin lens
     if (cameraData.contains("LENS"))
     {
         setCameraType(pose, cameraData.at("LENS").get<std::string>());
     }
     pose.apertureRadius = cameraData.value("APERTURE", 0.0f);
     pose.focusDistance = cameraData.value("FOCUS", 0.0f);
-    // How big the scene's unit is, for the real lens: 1 reads the scene in
-    // meters, 100 in centimeters
+    // 1 reads the scene in meters, 100 in centimeters.
     pose.unitsPerMeter = data.value("UNITS_PER_METER", 1.0f);
     if (!(pose.unitsPerMeter > 0.0f))
     {
@@ -492,8 +461,6 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
         sceneError("nothing to render");
     }
 
-    // A research scene's PBRT infinite light, through its converted lat-long
-    // map. A missing map leaves the scene without an environment.
     if (info.environment)
     {
         const GltfEnvironment& e = *info.environment;
@@ -525,7 +492,6 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
         cerr << "No light, emissive material or environment in " << gltfName << ": the render will be black" << endl;
     }
 
-    // The file's hints where it has them, the defaults elsewhere.
     const GltfRenderHints& hints = info.render;
     RenderSettings settings;
     settings.resolution = glm::ivec2(DEFAULT_HEIGHT);
@@ -538,14 +504,11 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
         settings.resolution.x = glm::max(1, (int)std::round(DEFAULT_HEIGHT * info.camera->aspectRatio));
     }
     settings.iterations = DEFAULT_ITERATIONS;
-    // PBRT's max_depth counts bounces, and its paths sample the lights at
-    // every bounce. A path here has to hit a light, which takes one more ray
-    // after the last bounce.
+    // PBRT's max_depth counts bounces; hitting a light takes one more ray here.
     settings.traceDepth = hints.maxDepth > 0 ? hints.maxDepth + 1 : DEFAULT_TRACE_DEPTH;
     settings.imageName = std::filesystem::path(gltfName).stem().string();
     settings = withOverrides(settings, ov);
 
-    // The scene's bounding sphere, from the box's center and half diagonal.
     const glm::vec3 center = 0.5f * (info.boundsMin + info.boundsMax);
     const float radius = glm::max(0.5f * glm::length(info.boundsMax - info.boundsMin), 1e-3f);
 
@@ -558,10 +521,7 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
         pose.fovy = glm::degrees(c.yfov);
         pose.mirrored = c.mirrored;
 
-        // A glTF camera has no look-at point and the interactive camera needs
-        // one to orbit: the point on the view axis nearest the middle of the
-        // scene, or one scene radius ahead when the middle is beside or
-        // behind the camera.
+        // The orbit point: on the view axis nearest the scene's center, else one radius ahead.
         float ahead = glm::dot(center - c.position, c.view);
         if (ahead < 0.01f * radius)
         {
@@ -571,8 +531,7 @@ void Scene::loadFromGltf(const std::string& gltfName, const SceneOverrides& ov)
     }
     else
     {
-        // No camera in the file: look at the whole scene from +Z, far enough
-        // back that the bounding sphere fits the narrower side of the image.
+        // From +Z, far enough back that the bounding sphere fits the narrower side.
         const float halfY = glm::radians(0.5f * DEFAULT_FOVY);
         const float aspect = (float)settings.resolution.x / (float)settings.resolution.y;
         const float halfAngle = glm::min(halfY, std::atan(std::tan(halfY) * aspect));
@@ -621,15 +580,11 @@ void Scene::initRenderState(const RenderSettings& settings, const CameraPose& po
         }
     }
 
-    // fovy is the full vertical field of view in degrees, so the half angle
-    // sets the image plane's half height at unit distance.
     float yscaled = tan(0.5f * pose.fovy * (PI / 180));
     float xscaled = (yscaled * camera.resolution.x) / camera.resolution.y;
     camera.pixelLength = glm::vec2(2 * xscaled / (float)camera.resolution.x,
         2 * yscaled / (float)camera.resolution.y);
 
-    // Orthonormal basis from eye, lookAt and up: view first, right from
-    // view and up, then up rebuilt so it is perpendicular to both.
     camera.view = glm::normalize(camera.lookAt - camera.position);
     camera.right = glm::normalize(glm::cross(camera.view, camera.up));
     camera.up = glm::normalize(glm::cross(camera.right, camera.view));
@@ -638,7 +593,6 @@ void Scene::initRenderState(const RenderSettings& settings, const CameraPose& po
         camera.right = -camera.right;
     }
 
-    //set up render camera stuff
     int arraylen = camera.resolution.x * camera.resolution.y;
     state.image.resize(arraylen);
     std::fill(state.image.begin(), state.image.end(), glm::vec3());

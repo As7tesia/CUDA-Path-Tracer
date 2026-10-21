@@ -1,14 +1,8 @@
 #pragma once
 
-// Tracing a ray through a lens prescription (scene/lens.h), surface by
-// surface. Host and device: the generate kernel traces camera rays with it,
-// lens.cpp works out a lens's focal length and pupil with it, and the host
-// test checks both against the published numbers.
-//
-// Lens space is millimeters. z runs along the optical axis from the front
-// vertex (z = 0) toward the film (z > 0); the scene is at z < 0. A surface's
-// radius is positive when its center of curvature lies toward the film, so
-// the surface bulges toward the scene.
+// Sequential trace through a lens prescription, host and device.
+// Lens space is millimeters: z runs from the front vertex (z = 0) toward the
+// film (z > 0), the scene is at z < 0. A positive radius bulges toward the scene.
 
 #include "scene/lens.h"
 
@@ -16,25 +10,21 @@
 
 #include <cmath>
 
-// What the generate kernel needs of a lens: the table on the device and the
-// numbers the host worked out from it (LensSystem::Paraxial). surfaces is
-// null when the scene has no lens.
+// The lens as the generate kernel sees it; surfaces is null without a lens.
 struct LensDevice
 {
     const LensSurface* surfaces;
     int count;
     float filmDistance;     // front vertex to film, mm
-    float entrancePupilZ;   // the entrance pupil's center, mm behind the front vertex: Camera::position sits here
-    float rearZ;            // the rear surface's vertex, mm behind the front vertex
-    float rearRadius;       // its aperture radius: camera rays are aimed at a point of this disk
+    float entrancePupilZ;   // mm behind the front vertex; Camera::position sits here
+    float rearZ;            // rear vertex, mm behind the front vertex
+    float rearRadius;       // camera rays are aimed at a point of this disk
     float pixelMm;          // film millimeters per pixel
-    float mmToScene;        // scene units per millimeter, 0.001 * UNITS_PER_METER
-    int* blocked;           // where the kernel counts the camera rays the lens blocked; null = do not count
+    float mmToScene;        // 0.001 * UNITS_PER_METER
+    int* blocked;           // count of blocked camera rays; null = do not count
 };
 
-// Where the ray o + t d (d unit length) meets surface s, whose vertex is at
-// z. Writes the hit and the unit normal facing the ray. False when the ray
-// misses the sphere or the hit lies behind the ray.
+// Hit of the ray on surface s (vertex at z) with the unit normal facing the ray.
 #ifdef __CUDACC__
 __host__ __device__
 #endif
@@ -42,7 +32,6 @@ inline bool intersectLensSurface(const LensSurface& s, float z, glm::vec3 o, glm
 {
     if (s.radius == 0.0f)
     {
-        // Flat: the stop, or a plano face
         if (d.z == 0.0f)
         {
             return false;
@@ -59,7 +48,6 @@ inline bool intersectLensSurface(const LensSurface& s, float z, glm::vec3 o, glm
     const float R = s.radius;
     const glm::vec3 c(0.0f, 0.0f, z + R);
     const glm::vec3 oc = o - c;
-    // |oc + t d|^2 = R^2: t^2 + 2 b t + cc = 0
     const float b = glm::dot(oc, d);
     const float cc = glm::dot(oc, oc) - R * R;
     const float disc = b * b - cc;
@@ -68,10 +56,7 @@ inline bool intersectLensSurface(const LensSurface& s, float z, glm::vec3 o, glm
         return false;
     }
     const float sq = sqrtf(disc);
-    // The lens surface is the half of the sphere around the vertex. A ray
-    // toward the film (d.z > 0) reaches it as the nearer root when the
-    // surface bulges toward the scene (R > 0) and as the farther root when
-    // it is hollow; toward the scene the two swap.
+    // The surface is the half of the sphere around the vertex, which picks the root
     const bool nearer = (d.z > 0.0f) == (R > 0.0f);
     const float t = nearer ? -b - sq : -b + sq;
     if (t <= 0.0f)
@@ -87,10 +72,7 @@ inline bool intersectLensSurface(const LensSurface& s, float z, glm::vec3 o, glm
     return true;
 }
 
-// Snell's law across a surface with unit normal n facing the ray, from index
-// n1 into n2. False at total internal reflection, where the camera trace
-// treats the ray as blocked (internal reflections belong to the lens flare
-// pass).
+// Snell's law from index n1 into n2; false at total internal reflection.
 #ifdef __CUDACC__
 __host__ __device__
 #endif
@@ -107,13 +89,8 @@ inline bool refractLens(glm::vec3 d, glm::vec3 n, float n1, float n2, glm::vec3&
     return true;
 }
 
-// Traces the ray o, d (d unit length) through surfaces from index from to
-// index to, one after the other: toward the film when to > from, toward the
-// scene when to < from, one surface when they are equal. zFrom is the vertex
-// of surface from. On return o and d are the ray as it leaves the last
-// surface crossed. False when the lens blocks the ray: a hit outside a
-// surface's clear aperture or the stop's opening, a missed surface, or total
-// internal reflection. Aspheric terms are not applied yet: a surface is
+// Traces o, d through surfaces from to to (either direction); false when the
+// lens blocks the ray. Aspheric terms are not applied yet: every surface is
 // traced as the sphere of its paraxial radius.
 #ifdef __CUDACC__
 __host__ __device__
@@ -138,8 +115,7 @@ inline bool traceLens(const LensSurface* s, int from, int to, float zFrom, glm::
         o = p;
         if (!surf.isStop)
         {
-            // The glass behind the surface is its own ior; the medium on its
-            // scene side is the previous surface's, air before the first
+            // ior is the glass behind the surface; air before the first
             const float sceneSide = i > 0 ? s[i - 1].ior : 1.0f;
             const float n1 = step > 0 ? sceneSide : surf.ior;
             const float n2 = step > 0 ? surf.ior : sceneSide;

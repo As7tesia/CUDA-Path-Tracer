@@ -34,9 +34,8 @@
 static std::string startTimeString;
 static Options options;
 
-// The viewport camera (viewport_camera.h)
 static ViewportPose viewportPose;
-static ViewportPose scenePose;  // the scene file's camera, restored by F
+static ViewportPose scenePose;  // the scene file's camera
 static float flySpeed;          // world units per second
 static bool camchanged = true;
 
@@ -46,11 +45,9 @@ static const float SECONDS_TO_CROSS_SCENE = 4.0f;
 static const float SPEED_STEP = 1.25f;
 // A wheel notch moves as far as this much flying
 static const float WHEEL_STEP_SECONDS = 0.25f;
-// A stalled frame (a slow render, the window waiting for input) moves the
-// flying camera at most this far ahead
+// The longest fly step a stalled frame may take
 static const float MAX_FRAME_SECONDS = 0.25f;
 
-// Mouse buttons held in the viewport (a press over an ImGui panel is ImGui's)
 static bool leftMousePressed = false;
 static bool rightMousePressed = false;
 static bool middleMousePressed = false;
@@ -58,39 +55,30 @@ static double lastX;
 static double lastY;
 
 static Scene* scene;
-static std::string sceneFile;   // the loaded scene's path, shown in the panel
-static std::string sceneTitle;  // its stem, for the window title
+static std::string sceneFile;
+static std::string sceneTitle;
 static GuiDataContainer guiData;
 static RenderState* renderState;
 static int iteration;
 
-// The panel's scene section. The list is read once at startup; a load the
-// panel asks for happens after the frame that asked, so the "Loading"
-// line is on screen while the window is busy.
+// Scene and environment loads run after the frame that asked, so the "Loading" line is on screen while they block.
 static std::vector<SceneName> sceneList;
 static int selectedScene = -1;
 static char scenePath[1024] = "";
 static std::string requestedScene;
-static std::string loadError;       // why the last load failed, until the next one
+static std::string loadError;
 
-// The panel's environment section, run the same way: the maps in
-// ENVIRONMENT_DIR are listed once at startup, and a load happens after the
-// frame that asked for it. A map loaded here replaces the scene file's own
-// environment and stays through later scene switches, as --env does.
 static std::vector<std::string> environmentList;
 static int selectedEnvironment = -1;
 static char environmentPath[1024] = "";
 static bool environmentRequested = false;
-static std::string requestedEnvironment;  // a map file; empty: the scene file's own
-static std::string environmentError;     // why the last load failed, until the next one
+static std::string requestedEnvironment;  // empty: the scene file's own
+static std::string environmentError;
 
-// The panel's lens picker: the files in LENS_DIR, listed once at startup. A
-// lens loads at once (a table of a few dozen rows) and replaces the scene's,
-// with the real lens selected; later scene switches keep it, as --lens does.
 static std::vector<std::string> lensList;
 static int selectedLens = -1;
 static char lensPath[1024] = "";
-static std::string lensError;  // why the last load failed, until the next one
+static std::string lensError;
 
 static int width;
 static int height;
@@ -103,7 +91,6 @@ static GLuint displayImage;
 static GLFWwindow* window;
 static ImGuiIO* io = nullptr;
 
-// Forward declarations for window loop and interactivity
 static void runCuda();
 static void runHeadless();
 static void flyFromKeys(float seconds);
@@ -127,10 +114,6 @@ static std::string currentTimeString()
     return std::string(buf);
 }
 
-//-------------------------------
-//----------SETUP STUFF----------
-//-------------------------------
-
 static void initTextures()
 {
     glGenTextures(1, &displayImage);
@@ -149,8 +132,7 @@ static void initVAO(void)
         -1.0f,  1.0f,
     };
 
-    // The texture's first row is the image's top (v = 0 at the top of the
-    // window) and its first column the image's left.
+    // v = 0 at the top of the window: the texture's first row is the image's top.
     GLfloat texcoords[] = {
         0.0f, 1.0f,
         1.0f, 1.0f,
@@ -196,7 +178,6 @@ static void deletePBO(GLuint* pbo)
 {
     if (pbo)
     {
-        // unregister this buffer object with CUDA
         cudaGLUnregisterBufferObject(*pbo);
 
         glBindBuffer(GL_ARRAY_BUFFER, *pbo);
@@ -231,18 +212,14 @@ static void initCuda()
 
 static void initPBO()
 {
-    // set up vertex data parameter
     int numTexels = width * height;
     int numValues = numTexels * 4;
     int sizeTexData = sizeof(GLubyte) * numValues;
 
-    // Generate a buffer ID called a PBO (Pixel Buffer Object)
     glGenBuffers(1, &pbo);
 
-    // Make this the current UNPACK buffer (OpenGL is state-based)
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
 
-    // Allocate data for the buffer. 4-channel 8-bit image
     glBufferData(GL_PIXEL_UNPACK_BUFFER, sizeTexData, NULL, GL_DYNAMIC_COPY);
     CUDA_CHECK(cudaGLRegisterBufferObject(pbo));
 }
@@ -252,9 +229,7 @@ static void errorCallback(int error, const char* description)
     fprintf(stderr, "GLFW: %s\n", description);
 }
 
-// The window, its OpenGL context, ImGui, the pixel buffer CUDA writes the
-// image into, and the shader that draws it. False when the window or the
-// context cannot be made (GLFW has printed why).
+// Creates the window, GL context, ImGui, the CUDA-mapped pixel buffer and the shader; false on failure.
 static bool init()
 {
     glfwSetErrorCallback(errorCallback);
@@ -276,20 +251,17 @@ static bool init()
     glfwSetMouseButtonCallback(window, mouseButtonCallback);
     glfwSetScrollCallback(window, scrollCallback);
     glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
-    // Unaccelerated mouse motion while a drag has the cursor disabled
     if (glfwRawMouseMotionSupported())
     {
         glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
     }
 
-    // Set up GL context
     glewExperimental = GL_TRUE;
     if (glewInit() != GLEW_OK)
     {
         return false;
     }
     printf("Opengl Version:%s\n", glGetString(GL_VERSION));
-    //Set up ImGui
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -298,7 +270,6 @@ static bool init()
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 120");
 
-    // Initialize other stuff
     initVAO();
     initTextures();
     initCuda();
@@ -311,8 +282,7 @@ static bool init()
     return true;
 }
 
-// The environment section's name for what renders: the map the panel or
-// --env loaded, else the scene file's own.
+// The panel's name for the environment that renders.
 static std::string environmentLabel()
 {
     if (!options.overrides.environmentFile.empty())
@@ -327,14 +297,12 @@ static std::string environmentLabel()
     return maxComponent(own.radiance) > 0.0f ? "one color (the scene's)" : "none";
 }
 
-// The "Path Tracer Analytics" panel over the viewport.
 static void renderImGui()
 {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
-    // Sized to its content: the scene section below changes height
     ImGui::Begin("Path Tracer Analytics", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
     ImGui::Text("Traced Depth %d", guiData.tracedDepth);
     ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
@@ -349,7 +317,6 @@ static void renderImGui()
         for (int i = 0; i < (int)sceneList.size(); ++i)
         {
             const SceneName& entry = sceneList[i];
-            // A catalog scene whose glTF is not downloaded is listed, grayed out
             const std::string label = entry.available ? entry.name : entry.name + " (not downloaded)";
             if (ImGui::Selectable(label.c_str(), i == selectedScene,
                     entry.available ? ImGuiSelectableFlags_None : ImGuiSelectableFlags_Disabled))
@@ -429,15 +396,13 @@ static void renderImGui()
         ImGui::PopTextWrapPos();
     }
 
-    // Next event estimation against BSDF sampling alone. A scene that cannot
-    // use it shows the box grayed out, with the reason under it.
     ImGui::Separator();
     const bool neeAvailable = pathtraceNeeAvailable();
     ImGui::BeginDisabled(!neeAvailable);
     if (ImGui::Checkbox("Next event estimation (NEE + MIS)", &options.nee))
     {
         setNextEventEstimation(options.nee);
-        camchanged = true;  // the image starts over
+        camchanged = true;
     }
     ImGui::EndDisabled();
     if (!neeAvailable)
@@ -445,11 +410,6 @@ static void renderImGui()
         ImGui::TextDisabled("needs OptiX and a light to sample");
     }
 
-    // The camera: pinhole, thin lens or the real lens. The real lens needs a
-    // prescription: the one the scene has, else the default lens file, loaded
-    // when the entry is picked (the picker below swaps it). The thin lens's
-    // two numbers drag in steps scaled to the scene, since a radius that
-    // blurs a room is a wall for a figurine.
     ImGui::Separator();
     Camera& cam = renderState->camera;
     const char* cameraNames[] = {"Pinhole", "Thin lens", "Real lens"};
@@ -477,6 +437,7 @@ static void renderImGui()
     }
     if (cam.type == CAMERA_THIN_LENS)
     {
+        // Drag steps scale with the scene: a radius that blurs a room is a wall for a figurine.
         const float step = 0.001f * viewportPose.pivotDistance;
         ImGui::SetNextItemWidth(240);
         if (ImGui::DragFloat("Aperture radius", &cam.apertureRadius, step, 0.0f, FLT_MAX, "%.4g"))
@@ -489,8 +450,6 @@ static void renderImGui()
             camchanged = true;
         }
     }
-    // The lens picker, like the environment's: a lens file from the list or
-    // a typed path, loaded at once
     ImGui::Text("Lens: %s", scene->hasLens() ? scene->lens.name.c_str() : "none");
     ImGui::SetNextItemWidth(240);
     const std::string lensPreview = selectedLens >= 0
@@ -546,8 +505,6 @@ static void mainLoop()
     double lastFrameTime = glfwGetTime();
     while (!glfwWindowShouldClose(window))
     {
-        // A finished render has nothing left to compute: wait for input
-        // instead of redrawing the same image as fast as the GPU can.
         const bool finished = !camchanged && iteration >= (int)renderState->iterations;
         if (finished)
         {
@@ -571,13 +528,10 @@ static void mainLoop()
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        // Binding GL_PIXEL_UNPACK_BUFFER back to default
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
-        // VAO, shader program, and texture already bound
         glDrawElements(GL_TRIANGLES, 6,  GL_UNSIGNED_SHORT, 0);
 
-        // Render ImGui Stuff
         renderImGui();
 
         glfwSwapBuffers(window);
@@ -606,9 +560,7 @@ static void mainLoop()
     cudaDeviceReset();
 }
 
-// Makes s the scene being rendered: render state, image size, the viewport's
-// starting pose and the fly speed come from it. Startup and a switch in the
-// window both go through here. The old scene, if any, is the caller's.
+// Makes s the scene being rendered; freeing the old scene is the caller's job.
 static void useScene(Scene* s, const std::string& file)
 {
     scene = s;
@@ -620,8 +572,7 @@ static void useScene(Scene* s, const std::string& file)
     width = cam.resolution.x;
     height = cam.resolution.y;
 
-    // The viewport starts at the scene file's camera. Headless renders take
-    // their basis from the same pose, so they match the window's first frame.
+    // Headless renders take their basis from this pose too, so they match the window's first frame.
     scenePose = poseFromCamera(cam);
     viewportPose = scenePose;
     applyPose(viewportPose, cam);
@@ -632,12 +583,7 @@ static void useScene(Scene* s, const std::string& file)
     flySpeed = (lo.x <= hi.x ? glm::length(hi - lo) : 1.0f) / SECONDS_TO_CROSS_SCENE;
 }
 
-// Replaces the window's scene with the one argument names (a path or a
-// name, as on the command line; the same --res / --spp / --depth apply, and
-// the environment map from --env or the panel).
-// The new scene is read first, so a bad one leaves the old scene in place
-// with the error in the panel. Then the device buffers, the pixel buffer,
-// the display texture and the window are remade at the new resolution.
+// Replaces the window's scene; one that fails to load leaves the old scene in place.
 static void switchScene(const std::string& argument)
 {
     Scene* next;
@@ -654,7 +600,6 @@ static void switchScene(const std::string& argument)
         return;
     }
     loadError.clear();
-    // The combo follows a scene the path field named, when it is in the list
     selectedScene = -1;
     for (int i = 0; i < (int)sceneList.size(); ++i)
     {
@@ -672,11 +617,9 @@ static void switchScene(const std::string& argument)
     cleanupCuda();
     initTextures();
     initPBO();
-    // The window follows the image; framebufferSizeCallback sets the viewport
     glfwSetWindowSize(window, width, height);
 }
 
-// The combo follows the map that renders, when it is in the list
 static void selectEnvironmentInList()
 {
     selectedEnvironment = -1;
@@ -689,13 +632,6 @@ static void selectEnvironmentInList()
     }
 }
 
-// Replaces the environment with the map file names (strength 1, no
-// rotation, like --env), or with the scene file's own when file is empty.
-// The environment texture and the light list are remade, not the scene. A
-// map that does not load leaves the current one, with the error in the
-// panel.
-// The lens the Camera combo loads when none is loaded yet: the double Gauss
-// when it is in the list, else the first file there
 static std::string defaultLensFile()
 {
     for (const std::string& file : lensList)
@@ -708,7 +644,6 @@ static std::string defaultLensFile()
     return lensList.empty() ? std::string() : lensList.front();
 }
 
-// The combo follows the lens the scene has, when it is in the list
 static void selectLensInList()
 {
     selectedLens = -1;
@@ -721,8 +656,7 @@ static void selectLensInList()
     }
 }
 
-// Loads a lens file into the scene and the device, and renders through it.
-// A bad file leaves the current lens in place with the error in the panel.
+// Loads a lens file and renders through it; a bad file keeps the current lens.
 static void switchLens(const std::string& file)
 {
     try
@@ -740,9 +674,10 @@ static void switchLens(const std::string& file)
     selectLensInList();
     pathtraceSetLens();
     renderState->camera.type = CAMERA_REAL_LENS;
-    camchanged = true;  // the image starts over
+    camchanged = true;
 }
 
+// Replaces the environment with a map file, or the scene's own when file is empty; a failed load keeps the current one.
 static void switchEnvironment(const std::string& file)
 {
     try
@@ -763,12 +698,8 @@ static void switchEnvironment(const std::string& file)
     selectEnvironmentInList();
     selectLensInList();
     pathtraceSetEnvironment(scene->environment);
-    camchanged = true;  // the image starts over
+    camchanged = true;
 }
-
-//-------------------------------
-//-------------MAIN--------------
-//-------------------------------
 
 int main(int argc, char** argv)
 {
@@ -785,9 +716,6 @@ int main(int argc, char** argv)
     setOptixValidation(options.optixValidation);
     setToneMap(options.toneMap, options.exposure);
 
-    // Load the scene file. Loading reports its errors as exceptions so the
-    // window can keep its scene on a failed switch; here there is nothing
-    // to fall back to.
     try
     {
         if (options.list)
@@ -815,8 +743,6 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    // The combo starts on the scene the command line named, when that is
-    // one of the list's names rather than a path
     for (int i = 0; i < (int)sceneList.size(); ++i)
     {
         if (sceneList[i].name == options.sceneFile)
@@ -827,17 +753,14 @@ int main(int argc, char** argv)
     selectEnvironmentInList();
     selectLensInList();
 
-    // Initialize CUDA and GL components
     if (!init())
     {
         fatal("cannot create the window and its OpenGL context");
     }
-    // Device buffers live until exit or a scene switch; camera changes only
-    // clear the image
+    // Device buffers live until exit or a scene switch; a camera change only clears the image.
     pathtraceInit(scene);
     setGuiData(&guiData);
 
-    // GLFW main loop
     mainLoop();
 
     return 0;
@@ -847,11 +770,7 @@ static void saveImage()
 {
     float samples = iteration;
     pathtraceDownloadImage();
-    // output image file
     Image img(width, height);
-    // An --out path ending in .hdr or .exr keeps the scene-linear average
-    // itself, no view transform and no clipping, for comparing renders by
-    // their numbers. .exr is exact float; .hdr truncates to 8-bit mantissas.
     const std::string ext = lowercaseExtension(options.outPath);
     const bool hdr = ext == ".hdr";
     const bool exr = ext == ".exr";
@@ -861,7 +780,7 @@ static void saveImage()
         for (int y = 0; y < height; y++)
         {
             int index = x + (y * width);
-            glm::vec3 pix = renderState->image[index] / samples;   // scene-linear average
+            glm::vec3 pix = renderState->image[index] / samples;
             img.setPixel(x, y, hdr || exr ? pix : applyToneMap(pix, options.toneMap, options.exposure));
         }
     }
@@ -904,8 +823,7 @@ static void saveImage()
     }
 }
 
-// Headless mode: no GLFW / GL / ImGui / PBO. Render state.iterations samples,
-// save, and exit. Used for agent-driven test renders.
+// Renders the scene's iterations without a window, saves and returns.
 static void runHeadless()
 {
     pathtraceInit(scene);
@@ -946,9 +864,6 @@ static void runCuda()
         camchanged = false;
     }
 
-    // Map OpenGL buffer object for writing from CUDA on a single GPU
-    // No data is moved (Win & Linux). When mapped to CUDA, OpenGL should not use this buffer
-
     if (iteration == 0)
     {
         pathtraceReset();
@@ -962,11 +877,8 @@ static void runCuda()
 
         pathtrace(pboPointer, iteration);
 
-        // unmap buffer object
         CUDA_CHECK(cudaGLUnmapBufferObject(pbo));
 
-        // The last sample: save the image. The window stays open on the
-        // finished render until Escape; moving the camera starts it over.
         if (iteration == (int)renderState->iterations)
         {
             saveImage();
@@ -974,19 +886,13 @@ static void runCuda()
     }
 }
 
-//-------------------------------
-//------INTERACTIVITY SETUP------
-//-------------------------------
-
-// Every change to viewportPose ends here: the render camera follows it and
-// the image starts over.
+// Every viewportPose change goes through here: the render camera follows and the image starts over.
 static void cameraMoved()
 {
     applyPose(viewportPose, renderState->camera);
     camchanged = true;
 }
 
-// The quad that shows the image fills the window, whatever size it has
 static void framebufferSizeCallback(GLFWwindow* window, int fbWidth, int fbHeight)
 {
     glViewport(0, 0, fbWidth, fbHeight);
@@ -997,9 +903,7 @@ static bool altHeld()
     return glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS;
 }
 
-// RMB + W A S D E Q. The keys are read every frame rather than from key
-// events, so a held key moves the camera smoothly. Not with Alt, where RMB
-// dollies.
+// Keys are polled every frame so a held key moves smoothly; not with Alt, where RMB dollies.
 static void flyFromKeys(float seconds)
 {
     if (!rightMousePressed || altHeld() || io->WantCaptureKeyboard)
@@ -1034,8 +938,7 @@ static void keyCallback(GLFWwindow* window, int key, int scancode, int action, i
             }
             break;
         case GLFW_KEY_F:
-            // Back to the scene file's camera. Not while flying, where F sits
-            // next to the movement keys.
+            // Not while flying, where F sits next to the movement keys
             if (!rightMousePressed)
             {
                 viewportPose = scenePose;
@@ -1048,8 +951,7 @@ static void keyCallback(GLFWwindow* window, int key, int scancode, int action, i
 static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
 {
     const bool press = action == GLFW_PRESS;
-    // A press over an ImGui panel is ImGui's. Releases always count, so a
-    // drag that ends over a panel does not leave its button held.
+    // Releases always count, so a drag that ends over a panel does not leave its button held.
     if (press && io->WantCaptureMouse)
     {
         return;
@@ -1068,8 +970,6 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
         default:
             return;
     }
-    // A drag hides and locks the cursor, so it never stops at the edge of the
-    // window or the screen. GLFW puts the cursor back where it was afterwards.
     const bool dragging = leftMousePressed || rightMousePressed || middleMousePressed;
     glfwSetInputMode(window, GLFW_CURSOR, dragging ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
     glfwGetCursorPos(window, &lastX, &lastY);
@@ -1115,8 +1015,6 @@ static void mousePositionCallback(GLFWwindow* window, double xpos, double ypos)
     cameraMoved();
 }
 
-// The wheel moves the camera along the view in steps. With RMB held it sets
-// the fly speed instead.
 static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset)
 {
     if (io->WantCaptureMouse)

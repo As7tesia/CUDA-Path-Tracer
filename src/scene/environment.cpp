@@ -1,10 +1,4 @@
-// Environment map files. See environment.h.
-//
-// This is the one translation unit that compiles tinyexr's implementation
-// (v1.0.13, external/include with its exr_reader.hh and streamreader.hh). Its
-// ZIP decoding uses the zlib inside the stb headers that stb.cpp compiles,
-// so no miniz is vendored; stb.cpp gives stbi_zlib_compress the C linkage
-// tinyexr expects. Chunks decode on several threads.
+// The one TU that compiles tinyexr (v1.0.13); its ZIP decoding uses stb's zlib from stb.cpp, so no miniz.
 
 #define TINYEXR_USE_MINIZ 0
 #define TINYEXR_USE_STB_ZLIB 1
@@ -29,7 +23,6 @@ const std::string ENVIRONMENT_DIR = "scenes/assets/hdri/";
 
 namespace
 {
-// Reads a lat-long HDR image into env's image.
 void loadEnvironmentImage(const std::string& path, Environment& env)
 {
     const std::string ext = lowercaseExtension(path);
@@ -49,8 +42,7 @@ void loadEnvironmentImage(const std::string& path, Environment& env)
     }
     else if (ext == ".hdr")
     {
-        // stbi_loadf would also read an 8-bit image, through an assumed
-        // gamma of 2.2, so only Radiance files come this way.
+        // Radiance only: stbi_loadf would read 8-bit images through an assumed gamma of 2.2.
         int channels = 0;
         pixels = stbi_loadf(path.c_str(), &width, &height, &channels, 4);
         if (pixels == nullptr)
@@ -70,9 +62,7 @@ void loadEnvironmentImage(const std::string& path, Environment& env)
     printf("Environment %s: %dx%d\n", path.c_str(), width, height);
 }
 
-// Builds env's sampling table from its image (see Environment). Sums run in
-// double: a 4k map has 8M cells, and a single cell's share is far below
-// float's resolution next to 1.
+// Sums run in double: a 4k map has 8M cells, each far below float's resolution next to 1.
 void buildEnvironmentTable(Environment& env, bool compensate)
 {
     TimingScope timing("load.environment_table");
@@ -80,11 +70,7 @@ void buildEnvironmentTable(Environment& env, bool compensate)
     const int h = env.height;
     const size_t cells = (size_t)w * h;
 
-    // The luminance the texture unit returns when a sample's radiance is
-    // read, averaged over each cell: the bilinear read inside a cell is a
-    // convex mix of the texel and its eight neighbors, and its average over
-    // the cell is [1 6 1]/8 along each axis. Wraps in u (the horizon),
-    // clamps in v (the poles), as the texture does.
+    // A bilinear read averaged over a cell is [1 6 1]/8 per axis; wraps in u, clamps in v, as the texture does.
     std::vector<float> lum(cells);
     for (size_t i = 0; i < cells; ++i)
     {
@@ -116,16 +102,12 @@ void buildEnvironmentTable(Environment& env, bool compensate)
         }
     }
 
-    // sin(theta) at each row's center: how much of the sphere a cell of
-    // that row covers, relative to a cell at the horizon.
     std::vector<double> sinTheta(h);
     for (int j = 0; j < h; ++j)
     {
         sinTheta[j] = std::sin((j + 0.5) * PI / h);
     }
 
-    // The integral of the luminance over the sphere, and its average: a
-    // cell covers 2 pi / w by pi / h in angle, times sin(theta).
     double integral = 0.0;
     for (int j = 0; j < h; ++j)
     {
@@ -140,9 +122,7 @@ void buildEnvironmentTable(Environment& env, bool compensate)
     env.radianceIntegral = (float)integral;
     const double average = integral / (4.0 * PI);
 
-    // The cell weights: luminance (less the average, when compensating)
-    // times sin(theta). A map that is one color all over compensates to
-    // nothing; it then keeps the plain weights, a uniform sphere.
+    // A one-color map compensates to nothing and keeps the plain weights.
     std::vector<double> weight(cells);
     double total = 0.0;
     env.compensated = false;
@@ -174,14 +154,11 @@ void buildEnvironmentTable(Environment& env, bool compensate)
     }
     if (total <= 0.0)
     {
-        // A black map: nothing to sample. The light list leaves it out.
         env.radianceIntegral = 0.0f;
         return;
     }
 
-    // The densities and the two CDFs. A row that weighs nothing is never
-    // picked; its conditional CDF is left uniform so a search in it stays
-    // well defined.
+    // A zero-weight row is never picked; its conditional CDF stays uniform so a search in it is defined.
     env.pdfUv.resize(cells);
     env.conditionalCdf.resize(cells);
     env.marginalCdf.resize(h);

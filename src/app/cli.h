@@ -5,30 +5,26 @@
 
 #include <string>
 
-// What the command line asks for. The usage text in cli.cpp lists the flags.
+// The parsed command line.
 struct Options
 {
-    std::string sceneFile;       // a path, or a name for findSceneFile (scene.h)
-    bool list = false;           // --list: print the scene names and exit
-    SceneOverrides overrides;    // --res, --spp, --depth, --env, --no-env-nee, --no-env-compensation, --lens, --aperture, --focus
+    std::string sceneFile;       // a path or a scene name
+    bool list = false;
+    SceneOverrides overrides;
     bool headless = false;
     std::string outPath;         // empty: img/auto_saved/<FILE>.<time>.<spp>samp.png
     ToneMapMode toneMap = TONEMAP_AGX_PUNCHY;
     float exposure = 1.0f;
     bool russianRoulette = true;
-    bool antialiasing = true;    // --no-aa: camera rays through the pixel centers
-    // Off by default since the 2026-10-02 profile: the sort's gather costs
-    // 0.3 to 0.9x the frame on every scene and saves the shade kernel almost
-    // nothing (README, Performance). --sort turns it on.
+    bool antialiasing = true;
+    // Off by default: the sort's gather costs more than it saves the shade kernel (README, Performance).
     bool materialSort = false;
-    bool compaction = true;      // --no-compact: ended paths stay in the buffer, for comparisons
-    bool nee = true;             // next event estimation with MIS; --no-nee for BSDF sampling only
+    bool compaction = true;
+    bool nee = true;
     bool optix = true;
     bool optixValidation = false;
-    bool timing = false;         // --timing: headless prints load, init and per-bounce stage times
+    bool timing = false;
 };
 
-// Reads the arguments. An unknown option, a flag without its value or a value
-// that does not parse ends the program with the reason (and the usage text
-// for an unknown option or a missing scene).
+// Parses the arguments; a bad option or value ends the program with the reason.
 Options parseArguments(int argc, char** argv);

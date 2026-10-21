@@ -8,8 +8,7 @@
 namespace
 {
 bool enabled = false;
-// A vector rather than a map so the report keeps first-use order, which
-// follows the program: load, init, render, save.
+// A vector rather than a map so the report keeps first-use order.
 std::vector<std::pair<std::string, double>> accumulators;
 }  // namespace
 

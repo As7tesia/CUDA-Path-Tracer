@@ -9,65 +9,41 @@ struct GuiDataContainer
     int tracedDepth = 0;
 };
 
-// Where pathtrace() writes its report; nothing is written until this is set
-// (headless renders never set it).
+// Null (headless) means no report is written.
 void setGuiData(GuiDataContainer* data);
-// pathtraceInit allocates every device buffer for the scene's resolution and
-// pathtraceFree releases them all; the window calls the pair again when it
-// switches scenes. pathtraceReset clears the accumulation buffer so the next
-// iteration starts a fresh image (camera moved); it allocates nothing.
 void pathtraceInit(Scene *scene);
 void pathtraceFree();
+// Clears the accumulation buffer; allocates nothing.
 void pathtraceReset();
-// Replaces the environment pathtraceInit uploaded with env, for the window's
-// environment picker, and rebuilds the light list, whose shares depend on
-// the environment's power. The caller restarts the image.
+// Swaps in a new environment and rebuilds the light list, whose shares depend on its power.
 void pathtraceSetEnvironment(const Environment& env);
-// Replaces the lens pathtraceInit uploaded with the scene's current one
-// (Scene::lens), for the window's lens picker. The caller restarts the image.
+// Swaps in the scene's current lens (Scene::lens).
 void pathtraceSetLens();
-// Copies the accumulation buffer into scene->state.image. Only saveImage needs
-// the host copy, so it is done on demand rather than every iteration.
+// Copies the accumulation buffer into scene->state.image.
 void pathtraceDownloadImage();
-// The share of camera rays the real lens blocked since the last reset (a
-// device read); 0 when no lens is rendering.
+// Share of camera rays the real lens blocked since the last reset; 0 without a lens.
 float pathtraceLensBlockedFraction();
-// One sample per pixel, added to the accumulation buffer. With a pixel
-// buffer (the viewport; null when headless) it also writes the tone-mapped
-// average of iterations 1 to iteration into it.
+// One sample per pixel into the accumulation buffer; with a pixel buffer, also the tone-mapped average.
 void pathtrace(uchar4 *pbo, int iteration);
 
 // Feature toggles (default on). Safe to flip between iterations.
 void setRussianRoulette(bool enabled);
-// Off, every camera ray goes through its pixel's center instead of a random
-// point in the pixel, for comparisons. The random numbers are still drawn.
+// Off, rays go through the pixel center; the random numbers are still drawn.
 void setAntialiasing(bool enabled);
 void setMaterialSort(bool enabled);
-// Off, the shade kernel updates the paths in place instead of compacting the
-// ones that go on, so every bounce launches over every pixel and the stages
-// skip the paths that ended. The image is the same; this is the baseline that
-// shows what the compaction saves.
+// Off, shading updates paths in place; same image, every bounce launches over every pixel.
 void setCompaction(bool enabled);
-// Next event estimation with MIS: a light sample and a shadow ray at every
-// hit. Off, lights are found only by BSDF sampling (the paths have to hit
-// them). Takes effect only where pathtraceNeeAvailable says it can.
+// Takes effect only where pathtraceNeeAvailable says it can.
 void setNextEventEstimation(bool enabled);
-// Whether the loaded scene can use next event estimation: the shadow rays
-// need OptiX, and the scene needs a light it can sample (an emissive cube or
-// mesh, or a punctual light).
+// NEE needs OptiX and a light the scene can sample.
 bool pathtraceNeeAvailable();
 
-// Startup options, read once by pathtraceInit: whether the intersection stage
-// runs on OptiX (false = the naive per-object kernel) and whether OptiX
-// validation mode is on (slow; checks every launch).
+// Startup options, read once by pathtraceInit.
 void setOptix(bool enabled);
 void setOptixValidation(bool enabled);
 
-// View transform used by the viewport kernel. saveImage applies the same
-// function on the host, see tonemap.h.
+// View transform of the viewport kernel; saveImage applies the same one on the host.
 void setToneMap(ToneMapMode mode, float exposure);
 
-// With --timing (timing.h): prints the record sizes and, per bounce, the
-// average over the iterations so far of the paths entering and leaving it and
-// the time of each stage, as "BOUNCE,..." CSV lines. Nothing without the flag.
+// With --timing: per-bounce path counts and stage times as "BOUNCE,..." CSV lines.
 void pathtraceTimingReport();

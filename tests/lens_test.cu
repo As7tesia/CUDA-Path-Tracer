@@ -1,12 +1,5 @@
-// Host-side check of the lens loaders (scene/lens.cpp) and the lens trace
-// (render/lens_trace.h): the double Gauss .json matches the PBRT-v3 table it
-// was converted from, the Noct file's aspheric and focus fields land where
-// they should, bad files are refused with a reason, and a trace
-// of the double Gauss reproduces its published focal length, f-number and
-// film distance and blocks rays where the lens does. Every check prints a
-// line and the exit code is nonzero when one fails. Built by the lens_test
-// target (CMakeLists.txt, outside the default build); run it from the
-// repository root, where scenes/lenses/ is.
+// Checks the lens loaders and the lens trace against PBRT-v3's double Gauss and the Noct table; nonzero exit on a failure.
+// Run it from the repository root, where scenes/lenses/ is.
 #include "scene/lens.h"
 #include "render/lens_trace.h"
 
@@ -31,9 +24,7 @@ static bool within(float a, float b, float tolerance = 1e-4f)
     return std::fabs(a - b) <= tolerance;
 }
 
-// PBRT-v3's dgauss.50mm.dat, the table dgauss.50mm.json was converted from:
-// radius, thickness, index and clear diameter per row, the stop as radius 0
-// with index 0, the film gap left at 0.
+// PBRT-v3's dgauss.50mm.dat: radius, thickness, index, clear diameter in mm; the stop is radius 0 with index 0.
 static const float pbrtDgauss[11][4] = {
     {29.475f, 3.76f, 1.67f, 25.2f},
     {84.83f, 0.12f, 1.0f, 25.2f},
@@ -48,7 +39,6 @@ static const float pbrtDgauss[11][4] = {
     {-39.73f, 0.0f, 1.0f, 20.0f},
 };
 
-// The double Gauss: the table the lens notes describe.
 static void checkDgauss(const LensSystem& lens, const char* label)
 {
     char line[256];
@@ -91,8 +81,6 @@ static void checkDgauss(const LensSystem& lens, const char* label)
     check(lens.aspheric.empty(), "dgauss: every surface is spherical, no coefficients stored");
 }
 
-// The double Gauss through the trace: the numbers PBRT's header states (50
-// mm, f/2) as the table gives them, and where rays get blocked.
 static void checkDgaussTrace(const LensSystem& lens, const char* label)
 {
     char line[256];
@@ -108,18 +96,12 @@ static void checkDgaussTrace(const LensSystem& lens, const char* label)
     snprintf(line, sizeof line, "%s: entrance pupil radius 12.48 (%.3f) against a stop radius of 8.55, so f/2.02 (%.3f)",
         label, p.entrancePupilRadius, p.fNumber);
     check(within(p.entrancePupilRadius, 12.48f, 0.02f) && within(p.fNumber, 2.02f, 0.01f), line);
-    // The front group shows the stop 1.46x larger, so its image lies farther
-    // from the group than the stop itself: behind the stop's own position
-    // (16.885 mm) and in front of the film
+    // The front group magnifies the stop 1.46x, so the pupil lies behind the stop (16.885 mm).
     snprintf(line, sizeof line, "%s: entrance pupil %.2f mm behind the front vertex, behind the stop (16.89) and before the film",
         label, p.entrancePupilZ);
     check(p.entrancePupilZ > 16.885f && p.entrancePupilZ < p.filmDistance, line);
 
-    // Film to scene, the way the kernel traces: from a film point through a
-    // point of the rear element. Every ray that gets out is finite with a
-    // unit direction heading away from the lens, and the share that gets
-    // out at the film's center and corners is what the whole-rear-element
-    // sampling of step 3 is expected to waste.
+    // Film to scene, as the kernel traces: from a film point through a point of the rear element.
     thrust::default_random_engine rng(7);
     thrust::uniform_real_distribution<float> u01(0.0f, 1.0f);
     const float rearZ = p.filmDistance - s[n - 1].thickness;
@@ -151,16 +133,13 @@ static void checkDgaussTrace(const LensSystem& lens, const char* label)
     }
     check(allFinite, "dgauss: every ray that gets out is finite, unit length and heads toward the scene");
 
-    // Scene to film at a field angle that lands 18 mm off center: a fan
-    // across the entrance pupil is blocked at the rims of the front and rear
-    // elements and nowhere else, surface by surface
+    // An 18 mm field fan across the entrance pupil clips at the front and rear rims, never at the stop.
     const float theta = atanf(18.0f / p.focalLength);
     const glm::vec3 dir(-sinf(theta), 0.0f, cosf(theta));
     int blockedAt[16] = {};
     int entered = 0;
     for (int k = -40; k <= 40; ++k)
     {
-        // Across the entrance pupil, aimed through its center
         const float h = p.entrancePupilRadius * k / 40.0f;
         glm::vec3 o = glm::vec3(h, 0.0f, p.entrancePupilZ) - 50.0f * dir;
         glm::vec3 d = dir;
@@ -184,8 +163,6 @@ static void checkDgaussTrace(const LensSystem& lens, const char* label)
             ++blockedAt[stoppedBy];
         }
     }
-    // Off axis the bundle is clipped by element rims, the front and rear
-    // ones first, and never by the stop, which the whole pupil passes
     std::string where;
     int passed = entered;
     for (int i = 1; i < n; ++i)
@@ -202,7 +179,6 @@ static void checkDgaussTrace(const LensSystem& lens, const char* label)
         label, blockedAt[0], where.c_str(), passed);
     check(blockedAt[0] > 0 && blockedAt[n - 1] > 0 && blockedAt[lens.stopIndex] == 0, line);
 
-    // A ray along the axis goes straight through, unbent
     glm::vec3 o(0.0f, 0.0f, -1.0f);
     glm::vec3 d(0.0f, 0.0f, 1.0f);
     check(traceLens(s, 0, n - 1, 0.0f, o, d) && within(d.x, 0.0f, 1e-6f) && within(d.y, 0.0f, 1e-6f) && within(o.x, 0.0f, 1e-6f),
@@ -214,7 +190,6 @@ int main()
     char line[256];
     try
     {
-        // The bare name resolves to scenes/lenses/dgauss.50mm.json
         const LensSystem js = loadLens("dgauss.50mm");
         check(js.file == LENS_DIR + "dgauss.50mm.json", "dgauss: findLensFile resolved the bare name to the .json");
         checkDgauss(js, "dgauss");
@@ -240,7 +215,6 @@ int main()
         for (int i = 0; i < 11; ++i)
         {
             abbeOk = abbeOk && within(js.surfaces[i].abbe, abbe[i]);
-            // Every glass row has one, every air row none
             abbeOk = abbeOk && ((js.surfaces[i].ior > 1.0f) == (abbe[i] > 0.0f));
         }
         check(abbeOk, "dgauss: Abbe numbers on the six glass rows only");
@@ -249,7 +223,6 @@ int main()
         check(within(js.focalLength, 50.0f) && within(js.fNumber, 2.0f) && js.blades == 0, "dgauss: stated f 50, f/2, round stop");
         check(js.focusSurface == -1, "dgauss: no focusing gap");
 
-        // A film gap of 0, as PBRT leaves it, becomes the paraxial back focus
         LensSystem noFilm = js;
         noFilm.surfaces.back().thickness = 0.0f;
         analyzeLens(noFilm);
@@ -257,7 +230,6 @@ int main()
             noFilm.surfaces.back().thickness);
         check(within(noFilm.surfaces.back().thickness, 36.106f, 0.01f), line);
 
-        // The Noct: aspheres, a focusing gap, estimated apertures
         const LensSystem noct = loadLens("noct-z58");
         snprintf(line, sizeof line, "noct: 28 surfaces (%d), stop at 14 (%d)", (int)noct.surfaces.size(), noct.stopIndex + 1);
         check(noct.surfaces.size() == 28 && noct.stopIndex == 13, line);
@@ -276,7 +248,6 @@ int main()
                 }
             }
             check(aspheric == 3, "noct: aspheres on surfaces 1, 20 and 28 only");
-            // Four, four and six terms, stored one after the other
             const LensSurface& s1 = noct.surfaces[0];
             const LensSurface& s20 = noct.surfaces[19];
             const LensSurface& s28 = noct.surfaces[27];
@@ -298,14 +269,9 @@ int main()
             check(noct.blades == 11 && within(noct.sensorMm.x, 36.0f) && within(noct.sensorMm.y, 24.0f)
                 && within(noct.focalLength, 59.62f) && within(noct.fNumber, 0.98f), "noct: 11 blades, 36x24 sensor, f 59.62, f/0.98");
             check(noct.apertureSource == "estimated", "noct: apertures marked as estimated");
-            // The patent's numbers come back from the spherical trace: the
-            // paraxial ray never feels the aspheric terms
+            // The paraxial ray never feels the aspheric terms; the f-number tolerance waits for the aspheric trace.
             snprintf(line, sizeof line, "noct: traced f 59.62 (%.2f), back focus 16.55 (%.2f), f/0.98 (%.3f)",
                 noct.paraxial.focalLength, noct.paraxial.backFocus, noct.paraxial.fNumber);
-            // The f-number waits for the aspheric trace: the marginal ray
-            // crosses the front asphere 30 mm from the axis, where its
-            // polynomial terms move the surface by a third of a millimeter,
-            // and the stop radius was set with them in
             check(within(noct.paraxial.focalLength, 59.62f, 0.1f) && within(noct.paraxial.backFocus, 16.55f, 0.1f)
                 && within(noct.paraxial.fNumber, 0.98f, 0.05f), line);
         }
@@ -317,7 +283,6 @@ int main()
         ++failures;
     }
 
-    // Bad files are refused with the reason
     struct Bad
     {
         const char* what;

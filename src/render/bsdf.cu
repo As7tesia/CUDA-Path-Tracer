@@ -13,28 +13,20 @@ __host__ __device__ glm::vec3 offsetOrigin(glm::vec3 hitPoint, glm::vec3 normal)
 
 namespace
 {
-// Below this GGX alpha (roughness 0.01) a lobe is treated as perfectly
-// smooth: the microfacet normal is the surface normal and the sample is a
-// mirror reflection or a clean refraction.
+// Below this alpha (roughness 0.01) a lobe is a perfect mirror or clean refraction.
 constexpr float MIN_ALPHA = 1e-4f;
 
-// Smith's Lambda for isotropic GGX, from the cosine between a direction and
-// the macro normal (cosTheta > 0).
+// Smith's Lambda for isotropic GGX.
 __host__ __device__ float ggxLambda(float cosTheta, float alpha)
 {
-    // Floored: a cosine of exactly 0 would make Lambda infinite and G2/G1
-    // (1 + inf) / (1 + inf + x), a NaN that would reach the image.
+    // A cosine of exactly 0 would make G2/G1 a NaN
     const float cos2 = fmaxf(cosTheta * cosTheta, 1e-8f);
     const float tan2 = fmaxf(1.0f - cos2, 0.0f) / cos2;
     return 0.5f * (sqrtf(1.0f + alpha * alpha * tan2) - 1.0f);
 }
 
-// f * cos / pdf of a GGX lobe whose microfacet normal was drawn from the
-// distribution of normals visible from wo, apart from the Fresnel term: the
-// height-correlated masking-shadowing G2(wo, wi) over the masking G1(wo)
-// (Heitz 2014, 2018). The D terms and the Jacobian of the reflection or
-// refraction cancel against the pdf, for reflection and transmission alike.
-// Cosines are taken against the macro normal, as absolute values.
+// f * cos / pdf of a visible-normal GGX sample without the Fresnel term:
+// height-correlated G2 over G1 (Heitz 2014).
 __host__ __device__ float smithG2OverG1(float cosO, float cosI, float alpha)
 {
     if (alpha < MIN_ALPHA)
@@ -45,11 +37,7 @@ __host__ __device__ float smithG2OverG1(float cosO, float cosI, float alpha)
     return (1.0f + lambdaO) / (1.0f + lambdaO + ggxLambda(cosI, alpha));
 }
 
-// A microfacet normal from the GGX distribution of normals visible from wo
-// (Dupuy and Benyoub 2023, "Sampling Visible GGX Normals with Spherical
-// Caps"): stretch wo into the alpha = 1 configuration, sample the spherical
-// cap of directions visible from it, unstretch. wo is unit length and on the
-// side n faces.
+// Visible-normal GGX sampling (Dupuy and Benyoub 2023, "Sampling Visible GGX Normals with Spherical Caps").
 __host__ __device__ glm::vec3 sampleMicrofacetNormal(glm::vec3 n, glm::vec3 wo, float alpha,
     thrust::default_random_engine& rng)
 {
@@ -74,8 +62,7 @@ __host__ __device__ glm::vec3 sampleMicrofacetNormal(glm::vec3 n, glm::vec3 wo, 
     return h.x * t + h.y * b + h.z * n;
 }
 
-// f0 from the index of refraction against air. glTF's KHR_materials_ior
-// reserves ior = 0 for a Fresnel term of 1 everywhere.
+// KHR_materials_ior reserves ior = 0 for a Fresnel term of 1 everywhere.
 __host__ __device__ float iorF0(float ior)
 {
     if (ior == 0.0f)
@@ -86,11 +73,7 @@ __host__ __device__ float iorF0(float ior)
     return r * r;
 }
 
-// The share a glass lobe's microfacet h reflects, from cosO = wo . h: Schlick
-// scaled by KHR_materials_specular's factor, or 1 for total internal
-// reflection and for ior = 0. eta is the incident over the transmitted index.
-// Schlick takes the cosine on the air side: the incident angle when entering,
-// the transmitted angle when leaving.
+// Reflected share of a glass microfacet; Schlick takes the cosine on the air side.
 __host__ __device__ glm::vec3 glassFresnel(const Material& m, bool outside, float eta, float cosO, glm::vec3 f0)
 {
     const float sin2T = eta * eta * (1.0f - cosO * cosO);
@@ -102,10 +85,7 @@ __host__ __device__ glm::vec3 glassFresnel(const Material& m, bool outside, floa
     return m.specularFactor * schlickFresnel(f0, cosSchlick);
 }
 
-// The GGX distribution of microfacet normals at unit h about the macro
-// normal n: alpha^2 / (pi (cos^2 alpha^2 + sin^2)^2). sin^2 comes from the
-// cross product, which keeps it accurate near the peak of a smooth lobe,
-// where 1 - cos^2 would cancel to nothing.
+// GGX D; sin^2 from the cross product stays accurate near the peak of a smooth lobe.
 __host__ __device__ float ggxD(glm::vec3 n, glm::vec3 h, float alpha)
 {
     const float cosH = glm::dot(n, h);
@@ -119,10 +99,7 @@ __host__ __device__ float ggxD(glm::vec3 n, glm::vec3 h, float alpha)
     return a2 / (PI * d * d);
 }
 
-// One GGX reflection lobe at (wo, wi) with h = normalize(wo + wi), cosines
-// against its normal n (both positive): f * cos without the Fresnel term,
-// D G2 / (4 cosO), and the density of the visible-normal sampling
-// scatterPbr uses, G1(wo) D / (4 cosO). Their ratio is smithG2OverG1.
+// f * cos without the Fresnel term, and the visible-normal sampling density.
 struct LobeEval
 {
     float fCos;
@@ -151,16 +128,13 @@ __host__ __device__ BsdfEval evalPbr(
     const float alpha = s.roughness * s.roughness;
     const bool reflected = glm::dot(wi, surfaceNormal) > 0.0f;
 
-    // scatterPbr's lobe probabilities: the clearcoat with its Fresnel term,
-    // then metal against dielectric, then glass against the specular layer
-    // over Lambert.
+    // scatterPbr's lobe probabilities
     const float pCoat = hasClearcoat(m, outside)
         ? m.clearcoat * schlickFresnel(glm::vec3(0.04f), glm::dot(s.coatNormal, wo)).x : 0.0f;
     const float pMetal = (1.0f - pCoat) * s.metallic;
     const float pGlass = (1.0f - pCoat) * (1.0f - s.metallic) * s.transmission;
     const float pLayered = (1.0f - pCoat) * (1.0f - s.metallic) * (1.0f - s.transmission);
 
-    // Clearcoat: GGX about the mesh normal, its Fresnel term already in pCoat.
     const float coatAlpha = m.clearcoatRoughness * m.clearcoatRoughness;
     if (pCoat > 0.0f && coatAlpha >= MIN_ALPHA && reflected)
     {
@@ -200,17 +174,12 @@ __host__ __device__ BsdfEval evalPbr(
         }
         if (pGlass > 0.0f && rough)
         {
-            // The reflected share of a glass sample, picked with probability
-            // max(fresnel).
             const glm::vec3 fresnel = glassFresnel(m, outside, eta, cosOH, f0);
             result.fCos += pGlass * fresnel * ggx.fCos;
             result.pdf += pGlass * maxComponent(fresnel) * ggx.pdf;
         }
         if (pLayered > 0.0f)
         {
-            // scatterPbr picks the layer by its reflectance estimate from wo
-            // against the base color, and Lambert keeps what the layer does
-            // not reflect at the half vector.
             const float layerEstimate = specular * maxComponent(schlickFresnel(f0, cosO));
             const float baseEstimate = maxComponent(s.baseColor);
             if (layerEstimate + baseEstimate > 0.0f)
@@ -229,9 +198,7 @@ __host__ __device__ BsdfEval evalPbr(
     }
     else if (!reflected && cosI < 0.0f && pGlass > 0.0f && alpha >= MIN_ALPHA && m.ior != 1.0f && m.ior != 0.0f)
     {
-        // Refraction through the microfacet normal that takes wo to wi
-        // (Walter et al. 2007): the generalized half vector, turned to wo's
-        // side. Index 1 on the far side scales out of every term.
+        // Generalized half vector of the refraction (Walter et al. 2007), turned to wo's side
         glm::vec3 h = glm::normalize(eta * wo + wi);
         if (glm::dot(h, n) < 0.0f)
         {
@@ -243,8 +210,6 @@ __host__ __device__ BsdfEval evalPbr(
         const float pReflect = maxComponent(fresnel);
         if (cosOH > 0.0f && cosIH < 0.0f && pReflect < 1.0f)
         {
-            // The visible-normal density of h times the Jacobian from h to
-            // wi, and f * cos = pdf * scatterPbr's weight, base color * G2 / G1.
             const float d = ggxD(n, h, alpha);
             const float lambdaO = ggxLambda(cosO, alpha);
             const float g2 = 1.0f / (1.0f + lambdaO + ggxLambda(-cosI, alpha));
@@ -272,29 +237,17 @@ __host__ __device__ bool scatterPbr(
     const glm::vec3 wo = -path.ray.direction;
     const float alpha = s.roughness * s.roughness;
 
-    // Every lobe below either reflects about its normal or transmits through
-    // it, and sets wi, the lobe's normal and the weight.
     glm::vec3 wi;
     glm::vec3 lobeNormal;
     glm::vec3 weight;
     bool transmitted = false;
-    // Whether the lobe that made wi is smooth: one direction only, which next
-    // event estimation never samples. Every GGX lobe but the clearcoat's
-    // shares alpha.
     bool smooth = alpha < MIN_ALPHA;
 
-    // A lobe is picked with probability equal to its mixing weight wherever
-    // that weight does not depend on wi (clearcoat, metallic, transmission),
-    // so the weight cancels. The specular layer's Fresnel weight depends on
-    // the microfacet normal, so it is picked with an estimate made from wo
-    // and its weight divided by that probability.
+    // Each lobe is picked with its mixing weight, so the weight cancels;
+    // the specular layer's depends on the microfacet, so it uses an estimate from wo.
     if (hasClearcoat(m, outside)
         && u01(rng) < m.clearcoat * schlickFresnel(glm::vec3(0.04f), glm::dot(s.coatNormal, wo)).x)
     {
-        // Clearcoat: a GGX lobe of its own roughness about the mesh normal,
-        // on the air side of the surface only (hasClearcoat). fresnel_coat
-        // weights it with a Fresnel term at the macro normal, which is the
-        // probability it was picked with.
         const float coatAlpha = m.clearcoatRoughness * m.clearcoatRoughness;
         lobeNormal = s.coatNormal;
         const glm::vec3 h = sampleMicrofacetNormal(lobeNormal, wo, coatAlpha, rng);
@@ -304,7 +257,6 @@ __host__ __device__ bool scatterPbr(
     }
     else if (u01(rng) < s.metallic)
     {
-        // Metal: GGX reflection with Fresnel tinted by the base color.
         lobeNormal = s.normal;
         const glm::vec3 h = sampleMicrofacetNormal(lobeNormal, wo, alpha, rng);
         wi = glm::reflect(-wo, h);
@@ -313,19 +265,14 @@ __host__ __device__ bool scatterPbr(
     }
     else
     {
-        // Dielectric. KHR_materials_specular scales the Fresnel term by
-        // specularFactor and f0 by specularColorFactor (clamped to 1 before
-        // the factor), so the layer reflects specularFactor * fresnel and
-        // the base keeps 1 - specularFactor * max(fresnel).
+        // Dielectric: KHR_materials_specular scales the Fresnel term and f0
         lobeNormal = s.normal;
         const glm::vec3 f0 = glm::min(iorF0(m.ior) * m.specularColorFactor, glm::vec3(1.0f));
         const float specular = m.specularFactor;
 
         if (u01(rng) < s.transmission)
         {
-            // Glass: one GGX microfacet normal, then reflect or refract
-            // through it (Walter et al. 2007) with the probability of the
-            // reflected share, so the Fresnel term cancels in both branches.
+            // Glass: reflect or refract through one microfacet (Walter et al. 2007)
             const glm::vec3 h = sampleMicrofacetNormal(lobeNormal, wo, alpha, rng);
             const float eta = outside ? 1.0f / m.ior : m.ior;  // incident over transmitted index
             const glm::vec3 fresnel = glassFresnel(m, outside, eta, glm::dot(wo, h), f0);
@@ -338,29 +285,23 @@ __host__ __device__ bool scatterPbr(
             }
             else
             {
-                // 1 - specular * max(fresnel) over 1 - pReflect is 1.
                 wi = glm::refract(-wo, h, eta);
                 weight = s.baseColor * smithG2OverG1(cosWo, fabsf(glm::dot(lobeNormal, wi)), alpha);
                 transmitted = true;
-                // With ior 1 every microfacet passes the ray straight through.
                 smooth = smooth || m.ior == 1.0f;
             }
         }
         else
         {
-            // Specular layer over Lambert. Pick the layer by its reflectance
-            // seen from wo against the base color. The base's estimate is
-            // left unscaled by what the layer takes: at a grazing wo the
-            // layer's estimate nears 1 while the Fresnel term at a sampled
-            // microfacet can stay small, and 1 / (1 - pLayer) would then
-            // turn rare diffuse samples into fireflies. This way a diffuse
-            // weight stays below 2.
+            // Specular layer over Lambert. The base estimate is not scaled by
+            // what the layer takes: at grazing wo that would turn rare
+            // diffuse samples into fireflies.
             const float cosWo = glm::dot(lobeNormal, wo);
             const float layerEstimate = specular * maxComponent(schlickFresnel(f0, cosWo));
             const float baseEstimate = maxComponent(s.baseColor);
             if (layerEstimate + baseEstimate <= 0.0f)
             {
-                return false;  // black, nothing to reflect
+                return false;
             }
             const float pLayer = layerEstimate / (layerEstimate + baseEstimate);
             if (u01(rng) < pLayer)
@@ -372,7 +313,6 @@ __host__ __device__ bool scatterPbr(
             }
             else
             {
-                // Lambert: f = color / pi, cosine-weighted pdf = cos / pi.
                 wi = sampleCosineHemisphere(lobeNormal, rng);
                 const glm::vec3 h = glm::normalize(wo + wi);
                 const float layer = specular * maxComponent(schlickFresnel(f0, glm::dot(wo, h)));
@@ -382,11 +322,7 @@ __host__ __device__ bool scatterPbr(
         }
     }
 
-    // A reflection has to leave on the lit side of both its lobe's normal
-    // and the surface, a transmission on the far side of both. A normal map
-    // or a rough lobe can produce directions that fail this; they carry no
-    // light (the lobe's masking term is zero there, and past the surface
-    // they would leak through it).
+    // A reflection leaves on the lit side of both normals, a transmission on the far side of both
     const float side = transmitted ? -1.0f : 1.0f;
     if (side * glm::dot(wi, lobeNormal) <= 0.0f || side * glm::dot(wi, surfaceNormal) <= 0.0f)
     {
@@ -396,8 +332,7 @@ __host__ __device__ bool scatterPbr(
     path.ray.direction = glm::normalize(wi);
     path.ray.origin = offsetOrigin(hitPoint, side * surfaceNormal);
     path.color *= weight;
-    // The density over every rough lobe, not just the one picked: a light
-    // sample toward the same direction weighs itself with evalPbr's pdf too.
+    // The density over every rough lobe, the same one NEE weighs against
     path.pdf = smooth ? 0.0f : evalPbr(wo, path.ray.direction, surfaceNormal, outside, m, s).pdf;
     return true;
 }
