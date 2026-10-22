@@ -34,7 +34,7 @@ Intel Sponza with the curtains package, 1920x1080, 1024 spp, DEPTH 8, AgX punchy
 - [Importance-sampled environment maps](#environment-map-sampling) with MIS compensation
 - [Thin lens depth of field](#depth-of-field) and [stochastic antialiasing](#antialiasing)
 - [AgX and ACES view transforms](#view-transform)
-- Physically Based Camera and Lens System: under work right now.
+- [Real lens camera](#real-lens-camera): rays traced through a double Gauss prescription, with exit pupil sampling
 
 **Performance**
 - [Stream compaction inside the shade kernel](#compaction-moved-into-the-shade-kernel) with warp-aggregated atomics
@@ -175,6 +175,40 @@ Stardust, 2580x1080, 2048 spp, DEPTH 12, AgX. Bottom row: the foreground gear at
 |:---:|:---:|
 | ![Stardust through a pinhole](img/readme/dof_stardust_pinhole.jpg) | ![Stardust through a thin lens](img/readme/dof_stardust_thin.jpg) |
 | ![Gear crop, pinhole](img/readme/dof_stardust_pinhole_crop.png) | ![Gear crop, thin lens](img/readme/dof_stardust_thin_crop.png) |
+
+### Real lens camera
+
+The real lens camera traces every camera ray through a lens prescription. A lens file lists the surfaces from the scene side to the film: curvature radius, gap to the next surface, glass index and clear aperture. The generate kernel starts each path on the film behind the lens, aims it at a point on the rear element, and refracts it through every surface with Snell's law; a ray that misses a piece of lens or the stop is dropped, which actually is where the vignetting comes from for real cameras (and this camera). What leaves the front element is the path's camera ray. Focus is currently achieved by sliding the film and changing the distance between film and rear element (lens internal focus underwork). The lens below is the 50 mm f/2 double Gauss from PBRT-v3's `dgauss.50mm.dat`, Tronnier's 1954 Voigtländer patent. The drawing labels its ten glass surfaces R1 to R10 (R4′ and R7′ are the far sides of the two cemented joints, the same surface seen from the other element), and the stop makes the lens file's eleventh row. Technically, R4 and R4', R7 and R7' are glued together with a very thin layer of optical cement in between, and we are simplifying those 3 elements into 1 surface, which could lead to slightly less flare and tiny bit of inaccuracy compared to the real lens. 
+
+<p align="center">
+  <img src="img/readme/lens_tronnier_fig1.png" alt="Cross-section of the double Gauss from Tronnier's patent" width="660">
+  <br>
+  <em>The double Gauss in cross-section, from Tronnier's 1954 patent</em>
+</p>
+
+Intel Sponza, 1920x1280, 1024 spp, DEPTH 8, AgX punchy. 
+
+The thin lens gets the double Gauss's entrance pupil radius and field of view, so the two differ only in what the glass does. We can see the corners fall off with the lens's own vignetting, and the blur is its aberrations rather than a perfect disk. Note how much darker the real lens is compared to thin lens, and this is physically accurate, beacuse in real lens there are a few factors that dims the image by $cos(\theta)$ terms: inverse sqaure law because theres distance between glass and film, a ray (most often) does not hit the film straight on, and the lens (consider it a light source) is not oriented perfectly towards every pixel.
+
+| Thin lens | Double Gauss 50 mm f/2 |
+|:---:|:---:|
+| ![Intel Sponza through a thin lens](img/readme/lens_sponza_thin.jpg) | ![Intel Sponza through the double Gauss](img/readme/lens_sponza_dgauss.jpg) |
+
+#### Exit pupil importance sampling
+
+Here's a diagram that shows why this is important. All the grey rays are the wasted samples that would have been traced but dropped without exit pupil sampling.
+
+|Pixel at film center | Pixel at corner |
+|:---:|:---:|
+| ![Pixel at the film center](img/readme/lens_exitpupil_center.png) | ![Pixel at corner](img/readme/lens_exitpupil_18mm.png) |
+
+Before rendering, we first split up the aim plane that touches the rear vertex into bunch of tiny grid cells. Then we partition our film into bins as well, and for each grid on film, we trace the full grid of aim plane cells and store the bounding box of cells with passing rays. Then when rendering, for each pixel, we look up the bin it belongs to, and only sample the aim plane cells that is active, and scale the ray's weight by the bbox area of the "good" grid cells over the area of all the possible grid cells.
+
+Same frame at 64 spp, 128x128 crops of the top left corner at 4x:
+
+| Whole rear element | Exit pupil box |
+|:---:|:---:|
+| ![Corner, whole rear element](img/readme/lens_exitpupil_off_crop.png) | ![Corner, exit pupil box](img/readme/lens_exitpupil_on_crop.png) |
 
 ### View transform
 
@@ -414,7 +448,7 @@ The ImGui panel also switches scenes without a restart.
 ./build/bin/Release/cis565_path_tracer.exe scenes/cornell.json --headless --spp 100 --res 400x400 --out img/test/cornell.png
 ```
 
-`--spp`, `--res`, `--depth` and `--out` override the scene file, and also work in windowed mode. The comparisons above use `--no-nee`, `--no-optix`, `--sort`, `--no-compact`, `--no-rr`, `--no-aa`, `--lens`, `--aperture`, `--focus` and `--tonemap none|aces|agx|agx-punchy`; `--list` prints the scene names. An `.exr` output keeps the scene-linear average as float32.
+`--spp`, `--res`, `--depth` and `--out` override the scene file, and also work in windowed mode. The comparisons above use `--no-nee`, `--no-optix`, `--sort`, `--no-compact`, `--no-rr`, `--no-aa`, `--lens`, `--aperture`, `--focus`, `--fovy`, `--units-per-meter`, `--no-exit-pupil`, `--camera-weight simple|physical` and `--tonemap none|aces|agx|agx-punchy`; `--list` prints the scene names. An `.exr` output keeps the scene-linear average as float32.
 
 ### Building
 
@@ -482,3 +516,5 @@ GLFW, GLEW, nlohmann/json, Dear ImGui and stb_image_write included in base code.
 - Dupuy and Benyoub 2023: Jonathan Dupuy, Anis Benyoub, "Sampling Visible GGX Normals with Spherical Caps", High-Performance Graphics 2023.
 - Karlík et al. 2019: Ondřej Karlík, Martin Šik, Petr Vévoda, Tomáš Skřivan, Jaroslav Křivánek, "MIS Compensation: Optimizing Sampling Techniques in Multiple Importance Sampling", ACM Transactions on Graphics 38(6), SIGGRAPH Asia 2019.
 - PBRT-v4: Matt Pharr, Wenzel Jakob, Greg Humphreys, *Physically Based Rendering: From Theory to Implementation*, 4th edition, MIT Press 2023, https://pbr-book.org.
+- PBRT-v3, chapter 6.4: the realistic camera, the exit pupil table and the `dgauss.50mm.dat` lens table from [pbrt-v3-scenes](https://pbrt.org/scenes-v3).
+- Tronnier 1954: Albrecht Wilhelm Tronnier, US patent 2,673,491, the double Gauss the lens file comes from, with its glass data.

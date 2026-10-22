@@ -294,6 +294,26 @@ float lensLength(const LensSystem& lens)
     return z;
 }
 
+float lensFilmDistance(const LensSystem& lens, float objectZ)
+{
+    const LensSurface* s = lens.surfaces.data();
+    const int count = (int)lens.surfaces.size();
+    if (objectZ >= 0.0f || objectZ < -1e7f)  // beyond 10 km the object is at infinity
+    {
+        return lens.paraxial.filmDistance;
+    }
+    // The near-axis ray from the object point, started 1 mm in front of the lens to keep the trace in float range
+    const float h = 0.01f * s[0].apertureRadius;
+    const float slope = h / -objectZ;
+    glm::vec3 o(h - slope, 0.0f, -1.0f);
+    glm::vec3 d = glm::normalize(glm::vec3(slope, 0.0f, 1.0f));
+    if (!traceLens(s, 0, count - 1, 0.0f, o, d) || d.x >= 0.0f)
+    {
+        return lens.paraxial.filmDistance;
+    }
+    return o.z - o.x * d.z / d.x;
+}
+
 float lensAimRadius(const LensSystem& lens, float halfDiagonal)
 {
     const LensSurface& rear = lens.surfaces.back();

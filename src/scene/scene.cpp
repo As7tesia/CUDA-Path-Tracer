@@ -92,6 +92,14 @@ CameraPose withOverrides(CameraPose pose, const SceneOverrides& ov)
     {
         pose.focusDistance = ov.focusDistance;
     }
+    if (ov.fovy > 0.0f)
+    {
+        pose.fovy = ov.fovy;
+    }
+    if (ov.unitsPerMeter > 0.0f)
+    {
+        pose.unitsPerMeter = ov.unitsPerMeter;
+    }
     return pose;
 }
 

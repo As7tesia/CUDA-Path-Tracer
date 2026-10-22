@@ -362,12 +362,13 @@ static void uploadLens()
         const LensSystem::Paraxial& p = lens.paraxial;
         dev_lensDevice.surfaces = dev_lens;
         dev_lensDevice.count = (int)lens.surfaces.size();
-        dev_lensDevice.filmDistance = p.filmDistance;
         dev_lensDevice.entrancePupilZ = p.entrancePupilZ;
         dev_lensDevice.rearZ = p.filmDistance - lens.surfaces.back().thickness;
         // The film's height is the sensor's; its width follows the image
         dev_lensDevice.pixelMm = lens.sensorMm.y / (float)cam.resolution.y;
         dev_lensDevice.mmToScene = 0.001f * cam.unitsPerMeter;
+        // The focus distance is measured from the entrance pupil, where cam.position sits
+        dev_lensDevice.filmDistance = lensFilmDistance(lens, p.entrancePupilZ - cam.focusDistance / dev_lensDevice.mmToScene);
         const float filmWidth = lens.sensorMm.y * (float)cam.resolution.x / (float)cam.resolution.y;
         dev_lensDevice.halfDiagonal = 0.5f * sqrtf(filmWidth * filmWidth + lens.sensorMm.y * lens.sensorMm.y);
         dev_lensDevice.aimRadius = lensAimRadius(lens, dev_lensDevice.halfDiagonal);
@@ -435,6 +436,11 @@ int pathtraceExitPupilBins()
 float pathtraceExitPupilBuildMs()
 {
     return lensPupilMs;
+}
+
+float pathtraceLensFilmDistance()
+{
+    return dev_lensDevice.filmDistance;
 }
 
 float pathtraceLensBlockedFraction()

@@ -22,6 +22,8 @@ struct SceneOverrides
     // Scene units.
     float apertureRadius = 0.0f;
     float focusDistance = 0.0f;
+    float fovy = 0.0f;           // degrees
+    float unitsPerMeter = 0.0f;
 };
 
 struct RenderSettings

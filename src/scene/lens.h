@@ -70,6 +70,10 @@ LensSystem parseLensJson(const std::string& text, const std::string& name);
 
 float lensLength(const LensSystem& lens);
 
+// Front vertex to the film that puts an axial object point at lens z objectZ (mm, negative in front) in paraxial
+// focus; the infinity film distance when the point is too close to form an image.
+float lensFilmDistance(const LensSystem& lens, float objectZ);
+
 // Radius on the rear vertex's plane that camera rays are aimed within: the rear clear aperture plus the
 // radial shift between that plane and the curved surface for the steepest ray from the film's corner.
 float lensAimRadius(const LensSystem& lens, float halfDiagonal);

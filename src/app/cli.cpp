@@ -12,7 +12,8 @@ const char* const USAGE =
     "Usage: %s SCENE [--headless] [--spp N] [--res WxH] [--depth N] [--out PATH.png] [--env FILE]\n"
     "                     [--no-rr] [--no-aa] [--sort] [--no-compact] [--no-nee] [--no-env-nee] [--no-env-compensation]\n"
     "                     [--tonemap none|aces|agx|agx-punchy] [--exposure X]\n"
-    "                     [--lens pinhole|thin|FILE] [--aperture R] [--focus D] [--no-exit-pupil] [--camera-weight simple|physical]\n"
+    "                     [--lens pinhole|thin|FILE] [--aperture R] [--focus D] [--fovy DEG] [--units-per-meter U]\n"
+    "                     [--no-exit-pupil] [--camera-weight simple|physical]\n"
     "                     [--no-optix] [--optix-validate] [--timing]\n"
     "       %s --list\n"
     "  SCENE            a scene .json, a .gltf / .glb file that is the whole scene, or a scene name:\n"
@@ -29,7 +30,9 @@ const char* const USAGE =
     "  --lens TYPE      the camera: pinhole (the scene's default), thin (a thin lens), or a lens file\n"
     "                   in scenes/lenses/ (a .json prescription) for the real lens\n"
     "  --aperture R     the thin lens's aperture radius, scene units (0 is a pinhole)\n"
-    "  --focus D        the thin lens's focus distance, scene units (default: the distance to LOOKAT)\n"
+    "  --focus D        the thin or real lens's focus distance, scene units (default: the distance to LOOKAT)\n"
+    "  --fovy DEG       override the scene's FOVY (the real lens sets its own view from the film size)\n"
+    "  --units-per-meter U  override the scene's UNITS_PER_METER, which sizes the real lens against the scene\n"
     "  --no-exit-pupil  real lens: aim camera rays at the whole rear element instead of the exit pupil table\n"
     "  --camera-weight  real lens: simple (default; the center pixel wide open weighs 1) or physical\n"
     "                   (irradiance on the film, which needs an exposure to look right)\n"
@@ -126,6 +129,26 @@ Options parseArguments(int argc, char** argv)
             if (end == value || *end != '\0' || !(options.overrides.focusDistance > 0.0f))
             {
                 fatal("--focus expects a positive number, not \"%s\"", value);
+            }
+        }
+        else if (a == "--fovy")
+        {
+            const char* value = needValue("--fovy");
+            char* end = nullptr;
+            options.overrides.fovy = strtof(value, &end);
+            if (end == value || *end != '\0' || !(options.overrides.fovy > 0.0f && options.overrides.fovy < 180.0f))
+            {
+                fatal("--fovy expects degrees between 0 and 180, not \"%s\"", value);
+            }
+        }
+        else if (a == "--units-per-meter")
+        {
+            const char* value = needValue("--units-per-meter");
+            char* end = nullptr;
+            options.overrides.unitsPerMeter = strtof(value, &end);
+            if (end == value || *end != '\0' || !(options.overrides.unitsPerMeter > 0.0f))
+            {
+                fatal("--units-per-meter expects a positive number, not \"%s\"", value);
             }
         }
         else if (a == "--no-rr")

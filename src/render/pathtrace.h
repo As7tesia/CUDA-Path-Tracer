@@ -17,7 +17,7 @@ void pathtraceFree();
 void pathtraceReset();
 // Swaps in a new environment and rebuilds the light list, whose shares depend on its power.
 void pathtraceSetEnvironment(const Environment& env);
-// Swaps in the scene's current lens (Scene::lens).
+// Swaps in the scene's current lens (Scene::lens), focused at the camera's focus distance; also after a focus change.
 void pathtraceSetLens();
 // Copies the accumulation buffer into scene->state.image.
 void pathtraceDownloadImage();
@@ -25,6 +25,8 @@ void pathtraceDownloadImage();
 float pathtraceLensBlockedFraction();
 int pathtraceExitPupilBins();
 float pathtraceExitPupilBuildMs();
+// Front vertex to the film as focused, mm.
+float pathtraceLensFilmDistance();
 // One sample per pixel into the accumulation buffer; with a pixel buffer, also the tone-mapped average.
 void pathtrace(uchar4 *pbo, int iteration);
 

@@ -435,18 +435,25 @@ static void renderImGui()
         }
         ImGui::EndCombo();
     }
-    if (cam.type == CAMERA_THIN_LENS)
+    if (cam.type != CAMERA_PINHOLE)
     {
         // Drag steps scale with the scene: a radius that blurs a room is a wall for a figurine.
         const float step = 0.001f * viewportPose.pivotDistance;
-        ImGui::SetNextItemWidth(240);
-        if (ImGui::DragFloat("Aperture radius", &cam.apertureRadius, step, 0.0f, FLT_MAX, "%.4g"))
+        if (cam.type == CAMERA_THIN_LENS)
         {
-            camchanged = true;
+            ImGui::SetNextItemWidth(240);
+            if (ImGui::DragFloat("Aperture radius", &cam.apertureRadius, step, 0.0f, FLT_MAX, "%.4g"))
+            {
+                camchanged = true;
+            }
         }
         ImGui::SetNextItemWidth(240);
         if (ImGui::DragFloat("Focus distance", &cam.focusDistance, 10.0f * step, 10.0f * step, FLT_MAX, "%.4g"))
         {
+            if (cam.type == CAMERA_REAL_LENS)
+            {
+                pathtraceSetLens();
+            }
             camchanged = true;
         }
     }
@@ -501,6 +508,7 @@ static void renderImGui()
                 setPhysicalCameraWeight(options.physicalCameraWeight);
                 camchanged = true;
             }
+            ImGui::TextDisabled("film %.3f mm behind the front vertex", pathtraceLensFilmDistance());
             ImGui::TextDisabled("exit pupil: %d bins built in %.2f ms", pathtraceExitPupilBins(), pathtraceExitPupilBuildMs());
             ImGui::TextDisabled("blocked %.1f%% of camera rays", 100.0f * pathtraceLensBlockedFraction());
         }
