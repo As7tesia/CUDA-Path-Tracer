@@ -34,7 +34,7 @@ Intel Sponza with the curtains package, 1920x1080, 1024 spp, DEPTH 8, AgX punchy
 - [Importance-sampled environment maps](#environment-map-sampling) with MIS compensation
 - [Thin lens depth of field](#depth-of-field) and [stochastic antialiasing](#antialiasing)
 - [AgX and ACES view transforms](#view-transform)
-- [Real lens camera](#real-lens-camera): rays traced through a double Gauss prescription, with exit pupil sampling
+- [Real lens camera](#real-lens-camera): spherical lens tracing, with exit pupil importance sampling
 
 **Performance**
 - [Stream compaction inside the shade kernel](#compaction-moved-into-the-shade-kernel) with warp-aggregated atomics
