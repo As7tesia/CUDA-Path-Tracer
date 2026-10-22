@@ -230,7 +230,7 @@ void pathtraceTimingReport()
     if (dev_lensBlocked != nullptr && lensRays > 0.0)
     {
         printf("TIMING,lens.blocked_fraction,%.4f\n", pathtraceLensBlockedFraction());
-        printf("TIMING,lens.exit_pupil_bins,%d\n", dev_lensDevice.pupilBins);
+        printf("TIMING,lens.exit_pupil_bins,%d\n", dev_lensDevice.pupilBinCount);
         printf("TIMING,lens.exit_pupil_ms,%.4f\n", lensPupilMs);
     }
     printf("TIMING,render.shadow_tail,%.4f\n", st.shadowTailMs / st.iterations);
@@ -372,11 +372,11 @@ static void uploadLens()
         const float filmWidth = lens.sensorMm.y * (float)cam.resolution.x / (float)cam.resolution.y;
         dev_lensDevice.halfDiagonal = 0.5f * sqrtf(filmWidth * filmWidth + lens.sensorMm.y * lens.sensorMm.y);
         dev_lensDevice.aimRadius = lensAimRadius(lens, dev_lensDevice.halfDiagonal);
-        dev_lensDevice.pupilBins = exitPupilBinCount(dev_lensDevice.halfDiagonal);
-        CUDA_CHECK(cudaMalloc(&dev_lensPupil, dev_lensDevice.pupilBins * sizeof(glm::vec4)));
+        dev_lensDevice.pupilBinCount = exitPupilBinCount(dev_lensDevice.halfDiagonal);
+        CUDA_CHECK(cudaMalloc(&dev_lensPupil, dev_lensDevice.pupilBinCount * sizeof(glm::vec4)));
         dev_lensDevice.pupil = dev_lensPupil;
         float* areas = nullptr;
-        CUDA_CHECK(cudaMalloc(&areas, dev_lensDevice.pupilBins * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&areas, dev_lensDevice.pupilBinCount * sizeof(float)));
         lensPupilMs = exitPupilBuildDevice(dev_lensDevice, EXIT_PUPIL_GRID, dev_lensPupil, areas);
         CUDA_CHECK(cudaMemcpy(&lensPupil0Area, areas, sizeof(float), cudaMemcpyDeviceToHost));
         cudaFree(areas);
@@ -430,7 +430,7 @@ void pathtraceReset()
 
 int pathtraceExitPupilBins()
 {
-    return dev_lensDevice.pupilBins;
+    return dev_lensDevice.pupilBinCount;
 }
 
 float pathtraceExitPupilBuildMs()
@@ -535,7 +535,7 @@ __global__ void generateRayFromCamera(Camera cam, LensDevice lens, int iter, int
             float area = diskArea;
             if (lens.useExitPupil)
             {
-                const int bin = min((int)(rFilm / lens.halfDiagonal * (float)lens.pupilBins), lens.pupilBins - 1);
+                const int bin = min((int)(rFilm / lens.halfDiagonal * (float)lens.pupilBinCount), lens.pupilBinCount - 1);
                 box = lens.pupil[bin];
                 area = (box.z - box.x) * (box.w - box.y);
             }

@@ -19,5 +19,5 @@ int exitPupilBinCount(float halfDiagonal);
 // (the aim points that got out). Host trace, for tests.
 void exitPupilBuildHost(const LensDevice& lens, int grid, std::vector<glm::vec4>& boxes, std::vector<float>& areas);
 
-// Same table into device memory of lens.pupilBins boxes and areas; returns the build time in ms.
+// Same table into device memory of lens.pupilBinCount boxes and areas; returns the build time in ms.
 float exitPupilBuildDevice(const LensDevice& lens, int grid, glm::vec4* boxes, float* areas);

@@ -42,8 +42,8 @@ __host__ __device__ inline glm::vec4 cellsToBox(const LensDevice& lens, int grid
 
 __host__ __device__ inline void binRadii(const LensDevice& lens, int bin, float& r0, float& r1)
 {
-    r0 = lens.halfDiagonal * (float)bin / (float)lens.pupilBins;
-    r1 = lens.halfDiagonal * (float)(bin + 1) / (float)lens.pupilBins;
+    r0 = lens.halfDiagonal * (float)bin / (float)lens.pupilBinCount;
+    r1 = lens.halfDiagonal * (float)(bin + 1) / (float)lens.pupilBinCount;
 }
 
 __host__ __device__ inline float cellArea(const LensDevice& lens, int grid)
@@ -96,9 +96,9 @@ int exitPupilBinCount(float halfDiagonal)
 
 void exitPupilBuildHost(const LensDevice& lens, int grid, std::vector<glm::vec4>& boxes, std::vector<float>& areas)
 {
-    boxes.assign(lens.pupilBins, glm::vec4(0.0f));
-    areas.assign(lens.pupilBins, 0.0f);
-    for (int bin = 0; bin < lens.pupilBins; ++bin)
+    boxes.assign(lens.pupilBinCount, glm::vec4(0.0f));
+    areas.assign(lens.pupilBinCount, 0.0f);
+    for (int bin = 0; bin < lens.pupilBinCount; ++bin)
     {
         float r0;
         float r1;
@@ -133,7 +133,7 @@ float exitPupilBuildDevice(const LensDevice& lens, int grid, glm::vec4* boxes, f
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
     CUDA_CHECK(cudaEventRecord(start));
-    buildBinKernel<<<lens.pupilBins, 256>>>(lens, grid, boxes, areas);
+    buildBinKernel<<<lens.pupilBinCount, 256>>>(lens, grid, boxes, areas);
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
     float ms = 0.0f;
